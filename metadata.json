@@ -1,0 +1,6 @@
+{
+  "name": "كروت طيبة نت — TAIBAH NET",
+  "description": "النظام التجاري والمحاسبي والإداري المتكامل لإدارة وبيع كروت شبكة طيبة نت اللاسلكية — بيع مباشر، جملة للوكلاء، ونقاط البيع.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

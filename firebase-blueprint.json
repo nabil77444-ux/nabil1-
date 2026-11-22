@@ -1,0 +1,257 @@
+{
+  "entities": {
+    "AdminDoc": {
+      "title": "AdminDoc",
+      "description": "Trusted Super Admin registry document",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 2, "maxLength": 100 },
+        "phone": { "type": "string", "minLength": 7, "maxLength": 20 },
+        "email": { "type": "string", "format": "email", "maxLength": 120 },
+        "role": { "type": "string", "enum": ["super_admin"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "name", "phone", "email", "role", "createdAt"]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User profile with role, hierarchy, balance, and PII protected by owner/admin/parentAgent access",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 2, "maxLength": 100 },
+        "phone": { "type": "string", "minLength": 7, "maxLength": 20 },
+        "email": { "type": "string", "format": "email", "maxLength": 120 },
+        "role": { "type": "string", "enum": ["super_admin", "agent", "client"] },
+        "status": { "type": "string", "enum": ["pending", "active", "rejected", "suspended"] },
+        "parentAgentId": { "type": "string", "maxLength": 128 },
+        "discountRate": { "type": "number" },
+        "balance": { "type": "number" },
+        "fcmTokens": { "type": "array" },
+        "rejectionReason": { "type": "string", "maxLength": 300 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "name", "phone", "email", "role", "status", "parentAgentId", "discountRate", "balance", "createdAt", "updatedAt"]
+    },
+    "RegistrationRequest": {
+      "title": "RegistrationRequest",
+      "description": "Account registration request submitted by prospective clients or agents",
+      "type": "object",
+      "properties": {
+        "applicantUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 2, "maxLength": 100 },
+        "phone": { "type": "string", "minLength": 7, "maxLength": 20 },
+        "email": { "type": "string", "format": "email", "maxLength": 120 },
+        "requestedRole": { "type": "string", "enum": ["agent", "client"] },
+        "parentAgentId": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "rejectionReason": { "type": "string", "maxLength": 300 },
+        "reviewedBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["applicantUid", "name", "phone", "email", "requestedRole", "parentAgentId", "status", "createdAt", "updatedAt"]
+    },
+    "PasswordResetRequest": {
+      "title": "PasswordResetRequest",
+      "description": "Password reset approval request visible to Super Admin",
+      "type": "object",
+      "properties": {
+        "requesterUid": { "type": "string", "maxLength": 128 },
+        "identifier": { "type": "string", "minLength": 3, "maxLength": 120 },
+        "name": { "type": "string", "maxLength": 100 },
+        "phone": { "type": "string", "maxLength": 20 },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "resolvedBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["identifier", "status", "createdAt", "updatedAt"]
+    },
+    "PackageDoc": {
+      "title": "PackageDoc",
+      "description": "One of the 8 exclusive Taibah Net wireless internet voucher packages",
+      "type": "object",
+      "properties": {
+        "code": { "type": "string", "maxLength": 32 },
+        "price": { "type": "number" },
+        "dataLabel": { "type": "string", "maxLength": 40 },
+        "hoursLabel": { "type": "string", "maxLength": 40 },
+        "validityLabel": { "type": "string", "maxLength": 40 },
+        "colorTheme": { "type": "string", "maxLength": 32 },
+        "availableCount": { "type": "number" },
+        "soldCount": { "type": "number" },
+        "uploadedCount": { "type": "number" },
+        "injectedCount": { "type": "number" },
+        "sortOrder": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["code", "price", "dataLabel", "hoursLabel", "validityLabel", "colorTheme", "availableCount", "soldCount", "uploadedCount", "injectedCount", "sortOrder", "updatedAt"]
+    },
+    "CardDoc": {
+      "title": "CardDoc",
+      "description": "Individual 10 or 11 digit voucher card record",
+      "type": "object",
+      "properties": {
+        "packageId": { "type": "string", "maxLength": 64 },
+        "cardNumber": { "type": "string", "minLength": 10, "maxLength": 11, "pattern": "^[0-9]{10,11}$" },
+        "status": { "type": "string", "enum": ["available", "sold", "returned", "injected"] },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "soldTo": { "type": "string", "maxLength": 128 },
+        "saleId": { "type": "string", "maxLength": 128 },
+        "batchId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["packageId", "cardNumber", "status", "ownerId", "createdAt", "updatedAt"]
+    },
+    "SaleDoc": {
+      "title": "SaleDoc",
+      "description": "Direct, wholesale electronic, or paper invoice sale record with batch items and profit tracking",
+      "type": "object",
+      "properties": {
+        "invoiceNumber": { "type": "string", "maxLength": 40 },
+        "sellerId": { "type": "string", "maxLength": 128 },
+        "buyerId": { "type": "string", "maxLength": 128 },
+        "buyerName": { "type": "string", "maxLength": 100 },
+        "buyerPhone": { "type": "string", "maxLength": 20 },
+        "buyerRole": { "type": "string", "enum": ["consumer", "client", "agent"] },
+        "saleType": { "type": "string", "enum": ["direct", "electronic_wholesale", "paper_invoice"] },
+        "paymentMethod": { "type": "string", "enum": ["cash", "credit", "partial"] },
+        "discountRate": { "type": "number" },
+        "totalAmount": { "type": "number" },
+        "paidAmount": { "type": "number" },
+        "remainingAmount": { "type": "number" },
+        "expectedProfit": { "type": "number" },
+        "realizedProfit": { "type": "number" },
+        "totalCards": { "type": "number" },
+        "deliveredCards": { "type": "number" },
+        "returnedCards": { "type": "number" },
+        "items": { "type": "array" },
+        "cardNumbers": { "type": "array" },
+        "status": { "type": "string", "enum": ["completed", "partial", "returned", "cancelled"] },
+        "notes": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["sellerId", "buyerName", "saleType", "paymentMethod", "totalAmount", "paidAmount", "remainingAmount", "totalCards", "deliveredCards", "status", "createdAt", "updatedAt"]
+    },
+    "CustomerAccount": {
+      "title": "CustomerAccount",
+      "description": "General accounting ledger customer profile",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "minLength": 2, "maxLength": 100 },
+        "phone": { "type": "string", "maxLength": 20 },
+        "category": { "type": "string", "maxLength": 50 },
+        "totalDebit": { "type": "number" },
+        "totalCredit": { "type": "number" },
+        "balance": { "type": "number" },
+        "notes": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerId", "name", "totalDebit", "totalCredit", "balance", "createdAt", "updatedAt"]
+    },
+    "LedgerEntry": {
+      "title": "LedgerEntry",
+      "description": "Individual financial debit, credit, or adjustment entry",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "customerId": { "type": "string", "maxLength": 128 },
+        "entryType": { "type": "string", "enum": ["debit", "credit", "adjustment"] },
+        "amount": { "type": "number" },
+        "description": { "type": "string", "maxLength": 300 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerId", "customerId", "entryType", "amount", "description", "createdAt"]
+    },
+    "TopupRequest": {
+      "title": "TopupRequest",
+      "description": "Two-tier feed/topup request (client to agent, agent to super admin)",
+      "type": "object",
+      "properties": {
+        "requesterId": { "type": "string", "maxLength": 128 },
+        "requesterName": { "type": "string", "maxLength": 100 },
+        "requesterPhone": { "type": "string", "maxLength": 20 },
+        "requesterRole": { "type": "string", "enum": ["agent", "client"] },
+        "discountRate": { "type": "number" },
+        "targetId": { "type": "string", "maxLength": 128 },
+        "targetName": { "type": "string", "maxLength": 100 },
+        "items": { "type": "array" },
+        "totalCards": { "type": "number" },
+        "totalAmount": { "type": "number" },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "rejectionReason": { "type": "string", "maxLength": 300 },
+        "notes": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["requesterId", "requesterName", "requesterRole", "targetId", "totalCards", "totalAmount", "status", "createdAt", "updatedAt"]
+    },
+    "NotificationDoc": {
+      "title": "NotificationDoc",
+      "description": "Real-time notification record for internal bell and FCM push routing",
+      "type": "object",
+      "properties": {
+        "recipientId": { "type": "string", "maxLength": 128 },
+        "senderId": { "type": "string", "maxLength": 128 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 150 },
+        "body": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "category": { "type": "string", "enum": ["registration", "topup", "sale", "invoice", "password_reset", "inventory", "account", "system"] },
+        "targetRoute": { "type": "string", "maxLength": 64 },
+        "isRead": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["recipientId", "title", "body", "category", "targetRoute", "isRead", "createdAt"]
+    },
+    "AuditLogDoc": {
+      "title": "AuditLogDoc",
+      "description": "Immutable system audit log record",
+      "type": "object",
+      "properties": {
+        "actorId": { "type": "string", "maxLength": 128 },
+        "actorName": { "type": "string", "maxLength": 100 },
+        "action": { "type": "string", "maxLength": 100 },
+        "details": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["actorId", "actorName", "action", "details", "createdAt"]
+    },
+    "AppSettingsDoc": {
+      "title": "AppSettingsDoc",
+      "description": "Global application settings managed by Super Admin",
+      "type": "object",
+      "properties": {
+        "newsTicker": { "type": "string", "maxLength": 500 },
+        "lowStockThreshold": { "type": "number" },
+        "agentDiscountPercent": { "type": "number" },
+        "clientDiscountPercent": { "type": "number" },
+        "directSaleMessageTemplate": { "type": "string", "maxLength": 1000 },
+        "appDescription": { "type": "string", "maxLength": 600 },
+        "apkDownloadUrl": { "type": "string", "maxLength": 300 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["newsTicker", "lowStockThreshold", "agentDiscountPercent", "clientDiscountPercent", "directSaleMessageTemplate", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/admins/{uid}": { "schema": { "$ref": "#/entities/AdminDoc" }, "description": "Trusted Super Admin accounts" },
+    "/users/{uid}": { "schema": { "$ref": "#/entities/UserProfile" }, "description": "User accounts for Super Admin, Agents, and Clients" },
+    "/registrationRequests/{requestId}": { "schema": { "$ref": "#/entities/RegistrationRequest" }, "description": "Pending account registration requests" },
+    "/passwordResetRequests/{requestId}": { "schema": { "$ref": "#/entities/PasswordResetRequest" }, "description": "Pending password reset requests" },
+    "/packages/{packageId}": { "schema": { "$ref": "#/entities/PackageDoc" }, "description": "The 8 exclusive Taibah Net voucher packages" },
+    "/cards/{cardId}": { "schema": { "$ref": "#/entities/CardDoc" }, "description": "Electronic voucher card inventory" },
+    "/sales/{saleId}": { "schema": { "$ref": "#/entities/SaleDoc" }, "description": "All direct, electronic wholesale, and paper sales" },
+    "/customers/{customerId}": { "schema": { "$ref": "#/entities/CustomerAccount" }, "description": "General customer accounting ledger accounts" },
+    "/ledgerEntries/{entryId}": { "schema": { "$ref": "#/entities/LedgerEntry" }, "description": "Financial ledger entries linked to customer accounts" },
+    "/topupRequests/{requestId}": { "schema": { "$ref": "#/entities/TopupRequest" }, "description": "Two-tier feed/topup requests" },
+    "/notifications/{notificationId}": { "schema": { "$ref": "#/entities/NotificationDoc" }, "description": "Real-time notification center" },
+    "/auditLogs/{logId}": { "schema": { "$ref": "#/entities/AuditLogDoc" }, "description": "Immutable operation audit logs" },
+    "/settings/{settingId}": { "schema": { "$ref": "#/entities/AppSettingsDoc" }, "description": "Global Taibah Net configuration" }
+  }
+}

@@ -1,0 +1,154 @@
+name: Build & Publish TaibahNet-Cards Android Release APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build Type (release requires original Keystore secrets)'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - debug
+
+permissions:
+  contents: write
+
+jobs:
+  build-android-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Install Dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci --no-audit --no-fund
+          else
+            npm install --no-audit --no-fund
+          fi
+
+      - name: TypeScript Lint & Production Web Build
+        run: |
+          npm run lint
+          npm run build
+
+      - name: Initialize & Sync Capacitor Android Project with Native Plugins
+        run: |
+          npm install --no-save --no-audit --no-fund \
+            @capacitor/core@7 \
+            @capacitor/cli@7 \
+            @capacitor/android@7 \
+            @capacitor/filesystem@7 \
+            @capacitor/share@7 \
+            @capacitor-community/contacts \
+            @capacitor/push-notifications@7 \
+            @capacitor/haptics@7 \
+            capacitor-native-biometric \
+            @capacitor/assets
+          if [ ! -d "android" ]; then
+            npx cap add android
+          fi
+          npx cap sync android
+          mkdir -p resources
+          cp public/pwa-512x512.png resources/icon.png
+          cp public/pwa-512x512.png resources/splash.png
+          npx capacitor-assets generate --android --iconBackgroundColor '#0F172A' --splashBackgroundColor '#0F172A' || true
+          mkdir -p android/app/src/main/res/drawable
+          cp public/pwa-512x512.png android/app/src/main/res/drawable/taibah_logo.png || true
+
+      - name: Configure Android Permissions (Contacts, BiometricPrompt & Notifications)
+        run: |
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          for PERM in \
+            "android.permission.READ_CONTACTS" \
+            "android.permission.USE_BIOMETRIC" \
+            "android.permission.POST_NOTIFICATIONS"; do
+            if ! grep -q "$PERM" "$MANIFEST"; then
+              sed -i "s|<application|<uses-permission android:name=\"$PERM\" />\n    <application|" "$MANIFEST"
+            fi
+          done
+
+      - name: Build Signed Release APK (with Original Keystore Verification)
+        working-directory: android
+        env:
+          BUILD_TYPE: ${{ github.event.inputs.build_type || 'release' }}
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          chmod +x gradlew
+          BUILD_TOOLS_DIR=$(ls -d "$ANDROID_HOME"/build-tools/* 2>/dev/null | sort -V | tail -n 1)
+          APKSIGNER="$BUILD_TOOLS_DIR/apksigner"
+          ZIPALIGN="$BUILD_TOOLS_DIR/zipalign"
+
+          if [ -n "$KEYSTORE_B64" ] && [ -n "$KEYSTORE_PASS" ] && [ -n "$KEY_ALIAS" ] && [ -n "$KEY_PASS" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > release.keystore
+            ./gradlew assembleRelease
+            UNSIGNED_APK="app/build/outputs/apk/release/app-release-unsigned.apk"
+            ALIGNED_APK="app/build/outputs/apk/release/app-release-aligned.apk"
+            "$ZIPALIGN" -v -p 4 "$UNSIGNED_APK" "$ALIGNED_APK"
+            "$APKSIGNER" sign \
+              --ks release.keystore \
+              --ks-pass "pass:$KEYSTORE_PASS" \
+              --ks-key-alias "$KEY_ALIAS" \
+              --key-pass "pass:$KEY_PASS" \
+              --out ../TaibahNet-Cards.apk \
+              "$ALIGNED_APK"
+            rm -f release.keystore
+            echo "SIGNING_STATUS=RELEASE_SIGNED_ORIGINAL_KEYSTORE" >> "$GITHUB_ENV"
+          elif [ "$BUILD_TYPE" = "debug" ]; then
+            ./gradlew assembleDebug
+            cp app/build/outputs/apk/debug/app-debug.apk ../TaibahNet-Cards.apk
+            echo "SIGNING_STATUS=DEBUG_TEST_ONLY" >> "$GITHUB_ENV"
+          else
+            echo "::error::Missing original Android release keystore secrets (ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD). Stopping to preserve signing certificate compatibility."
+            exit 1
+          fi
+
+          echo "=== Official apksigner Verification ==="
+          "$APKSIGNER" verify --verbose --print-certs ../TaibahNet-Cards.apk
+          echo "=== APK SHA-256 & File Size ==="
+          sha256sum ../TaibahNet-Cards.apk
+          ls -lh ../TaibahNet-Cards.apk
+
+      - name: Upload TaibahNet-Cards.apk Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TaibahNet-Cards-APK
+          path: TaibahNet-Cards.apk
+          retention-days: 90
+
+      - name: Publish Direct APK to GitHub Releases (latest)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: كروت طيبة نت — TAIBAH NET (Android Release APK)
+          body: |
+            الإصدار النهائي الجاهز للتثبيت المباشر من تطبيق **كروت طيبة نت – TAIBAH NET**.
+            - **applicationId:** `net.taibah.wireless`
+            - **حالة التوقيع:** `${{ env.SIGNING_STATUS }}`
+            - يدعم الدخول بالبصمة والوجه عبر **Android BiometricPrompt** والعمل أوفلاين (Offline-First)
+            - يدعم مشاركة الفواتير والكشوفات (PDF عربي + صور HD) وجلب جهات الاتصال مباشرة من الهاتف
+            - مزامنة لحظية مع Firebase Firestore
+          files: TaibahNet-Cards.apk
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

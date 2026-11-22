@@ -1,0 +1,564 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Pillar 0: Global Default-Deny Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // =========================================================================
+    // Global Hardened Helper Primitives
+    // =========================================================================
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidString(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
+    function isSuperAdmin() {
+      return isSignedIn() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        (
+          request.auth.token.email_verified == true &&
+          (
+            request.auth.token.email == 'nabil77444@gmail.com' ||
+            request.auth.token.email == 'nabil7766998@gmail.com'
+          )
+        )
+      );
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    // =========================================================================
+    // Validation Blueprints (Anti-Update-Gap Helpers)
+    // =========================================================================
+    function isValidAdminDoc(data) {
+      return data.keys().hasAll(['uid', 'name', 'phone', 'email', 'role', 'createdAt']) &&
+        data.keys().hasOnly(['uid', 'name', 'phone', 'email', 'role', 'createdAt']) &&
+        isValidId(data.uid) &&
+        isValidString(data.name, 2, 100) &&
+        isValidString(data.phone, 7, 20) &&
+        isValidString(data.email, 5, 120) &&
+        data.role == 'super_admin' &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['uid', 'name', 'phone', 'email', 'role', 'status', 'parentAgentId', 'discountRate', 'balance', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'name', 'phone', 'email', 'role', 'status', 'parentAgentId', 'discountRate', 'balance', 'fcmTokens', 'rejectionReason', 'createdAt', 'updatedAt']) &&
+        isValidId(data.uid) &&
+        isValidString(data.name, 2, 100) &&
+        isValidString(data.phone, 7, 20) &&
+        isValidString(data.email, 5, 120) &&
+        data.role in ['super_admin', 'agent', 'client'] &&
+        data.status in ['pending', 'active', 'rejected', 'suspended'] &&
+        isValidString(data.parentAgentId, 0, 128) &&
+        data.discountRate is number && data.discountRate >= 0 && data.discountRate <= 100 &&
+        data.balance is number &&
+        (!('fcmTokens' in data) || (data.fcmTokens is list && data.fcmTokens.size() <= 5 && (data.fcmTokens.size() == 0 || (data.fcmTokens[0] is string && data.fcmTokens[0].size() <= 300)))) &&
+        (!('rejectionReason' in data) || isValidString(data.rejectionReason, 0, 300)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidRegistrationRequest(data) {
+      return data.keys().hasAll(['applicantUid', 'name', 'phone', 'email', 'requestedRole', 'parentAgentId', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['applicantUid', 'name', 'phone', 'email', 'requestedRole', 'parentAgentId', 'status', 'rejectionReason', 'reviewedBy', 'createdAt', 'updatedAt']) &&
+        isValidId(data.applicantUid) &&
+        isValidString(data.name, 2, 100) &&
+        isValidString(data.phone, 7, 20) &&
+        isValidString(data.email, 5, 120) &&
+        data.requestedRole in ['agent', 'client'] &&
+        isValidString(data.parentAgentId, 0, 128) &&
+        data.status in ['pending', 'approved', 'rejected'] &&
+        (!('rejectionReason' in data) || isValidString(data.rejectionReason, 0, 300)) &&
+        (!('reviewedBy' in data) || isValidString(data.reviewedBy, 0, 128)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidPasswordResetRequest(data) {
+      return data.keys().hasAll(['identifier', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['requesterUid', 'identifier', 'name', 'phone', 'status', 'resolvedBy', 'createdAt', 'updatedAt']) &&
+        isValidString(data.identifier, 3, 120) &&
+        (!('requesterUid' in data) || isValidString(data.requesterUid, 0, 128)) &&
+        (!('name' in data) || isValidString(data.name, 0, 100)) &&
+        (!('phone' in data) || isValidString(data.phone, 0, 20)) &&
+        data.status in ['pending', 'approved', 'rejected'] &&
+        (!('resolvedBy' in data) || isValidString(data.resolvedBy, 0, 128)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidPackageDoc(data) {
+      return data.keys().hasAll(['code', 'price', 'dataLabel', 'hoursLabel', 'validityLabel', 'colorTheme', 'availableCount', 'soldCount', 'uploadedCount', 'injectedCount', 'sortOrder', 'updatedAt']) &&
+        data.keys().hasOnly(['code', 'price', 'dataLabel', 'hoursLabel', 'validityLabel', 'colorTheme', 'availableCount', 'soldCount', 'uploadedCount', 'injectedCount', 'sortOrder', 'updatedAt']) &&
+        isValidString(data.code, 1, 32) &&
+        data.price is number && data.price > 0 && data.price <= 100000 &&
+        isValidString(data.dataLabel, 1, 40) &&
+        isValidString(data.hoursLabel, 1, 40) &&
+        isValidString(data.validityLabel, 1, 40) &&
+        isValidString(data.colorTheme, 1, 32) &&
+        data.availableCount is number && data.availableCount >= 0 &&
+        data.soldCount is number && data.soldCount >= 0 &&
+        data.uploadedCount is number && data.uploadedCount >= 0 &&
+        data.injectedCount is number && data.injectedCount >= 0 &&
+        data.sortOrder is number && data.sortOrder >= 1 && data.sortOrder <= 20 &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidCardDoc(data) {
+      return data.keys().hasAll(['packageId', 'cardNumber', 'status', 'ownerId', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['packageId', 'cardNumber', 'status', 'ownerId', 'soldTo', 'saleId', 'batchId', 'createdAt', 'updatedAt']) &&
+        isValidString(data.packageId, 1, 64) &&
+        data.cardNumber is string && data.cardNumber.size() >= 10 && data.cardNumber.size() <= 11 && data.cardNumber.matches('^[0-9]{10,11}$') &&
+        data.status in ['available', 'sold', 'returned', 'injected'] &&
+        isValidId(data.ownerId) &&
+        (!('soldTo' in data) || isValidString(data.soldTo, 0, 128)) &&
+        (!('saleId' in data) || isValidString(data.saleId, 0, 128)) &&
+        (!('batchId' in data) || isValidString(data.batchId, 0, 128)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidSaleDoc(data) {
+      return data.keys().hasAll(['sellerId', 'buyerName', 'saleType', 'paymentMethod', 'totalAmount', 'paidAmount', 'remainingAmount', 'totalCards', 'deliveredCards', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['invoiceNumber', 'sellerId', 'buyerId', 'buyerName', 'buyerPhone', 'buyerRole', 'saleType', 'paymentMethod', 'discountRate', 'totalAmount', 'paidAmount', 'remainingAmount', 'expectedProfit', 'realizedProfit', 'totalCards', 'deliveredCards', 'returnedCards', 'items', 'cardNumbers', 'status', 'notes', 'createdAt', 'updatedAt']) &&
+        (!('invoiceNumber' in data) || isValidString(data.invoiceNumber, 0, 40)) &&
+        isValidId(data.sellerId) &&
+        (!('buyerId' in data) || isValidString(data.buyerId, 0, 128)) &&
+        isValidString(data.buyerName, 1, 100) &&
+        (!('buyerPhone' in data) || isValidString(data.buyerPhone, 0, 20)) &&
+        (!('buyerRole' in data) || data.buyerRole in ['consumer', 'client', 'agent']) &&
+        data.saleType in ['direct', 'electronic_wholesale', 'paper_invoice'] &&
+        data.paymentMethod in ['cash', 'credit', 'partial'] &&
+        (!('discountRate' in data) || (data.discountRate is number && data.discountRate >= 0 && data.discountRate <= 100)) &&
+        data.totalAmount is number && data.totalAmount >= 0 &&
+        data.paidAmount is number && data.paidAmount >= 0 &&
+        data.remainingAmount is number &&
+        (!('expectedProfit' in data) || data.expectedProfit is number) &&
+        (!('realizedProfit' in data) || data.realizedProfit is number) &&
+        data.totalCards is number && data.totalCards >= 0 &&
+        data.deliveredCards is number && data.deliveredCards >= 0 &&
+        (!('returnedCards' in data) || (data.returnedCards is number && data.returnedCards >= 0)) &&
+        (!('items' in data) || (data.items is list && data.items.size() <= 20 && (data.items.size() == 0 || data.items[0] is map))) &&
+        (!('cardNumbers' in data) || (data.cardNumbers is list && data.cardNumbers.size() <= 200 && (data.cardNumbers.size() == 0 || (data.cardNumbers[0] is string && data.cardNumbers[0].size() <= 20)))) &&
+        data.status in ['completed', 'partial', 'returned', 'cancelled'] &&
+        (!('notes' in data) || isValidString(data.notes, 0, 500)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidCustomerAccount(data) {
+      return data.keys().hasAll(['ownerId', 'name', 'totalDebit', 'totalCredit', 'balance', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['ownerId', 'name', 'phone', 'category', 'totalDebit', 'totalCredit', 'balance', 'notes', 'createdAt', 'updatedAt']) &&
+        isValidId(data.ownerId) &&
+        isValidString(data.name, 2, 100) &&
+        (!('phone' in data) || isValidString(data.phone, 0, 20)) &&
+        (!('category' in data) || isValidString(data.category, 0, 50)) &&
+        data.totalDebit is number && data.totalDebit >= 0 &&
+        data.totalCredit is number && data.totalCredit >= 0 &&
+        data.balance is number &&
+        (!('notes' in data) || isValidString(data.notes, 0, 500)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidLedgerEntry(data) {
+      return data.keys().hasAll(['ownerId', 'customerId', 'entryType', 'amount', 'description', 'createdAt']) &&
+        data.keys().hasOnly(['ownerId', 'customerId', 'entryType', 'amount', 'description', 'createdAt']) &&
+        isValidId(data.ownerId) &&
+        isValidId(data.customerId) &&
+        data.entryType in ['debit', 'credit', 'adjustment'] &&
+        data.amount is number && data.amount >= 0 &&
+        isValidString(data.description, 1, 300) &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidTopupRequest(data) {
+      return data.keys().hasAll(['requesterId', 'requesterName', 'requesterRole', 'targetId', 'totalCards', 'totalAmount', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['requesterId', 'requesterName', 'requesterPhone', 'requesterRole', 'discountRate', 'targetId', 'targetName', 'items', 'totalCards', 'totalAmount', 'status', 'rejectionReason', 'notes', 'createdAt', 'updatedAt']) &&
+        isValidId(data.requesterId) &&
+        isValidString(data.requesterName, 2, 100) &&
+        (!('requesterPhone' in data) || isValidString(data.requesterPhone, 0, 20)) &&
+        data.requesterRole in ['agent', 'client'] &&
+        (!('discountRate' in data) || (data.discountRate is number && data.discountRate >= 0 && data.discountRate <= 100)) &&
+        isValidString(data.targetId, 1, 128) &&
+        (!('targetName' in data) || isValidString(data.targetName, 0, 100)) &&
+        (!('items' in data) || (data.items is list && data.items.size() <= 20 && (data.items.size() == 0 || data.items[0] is map))) &&
+        data.totalCards is number && data.totalCards >= 1 &&
+        data.totalAmount is number && data.totalAmount >= 0 &&
+        data.status in ['pending', 'approved', 'rejected'] &&
+        (!('rejectionReason' in data) || isValidString(data.rejectionReason, 0, 300)) &&
+        (!('notes' in data) || isValidString(data.notes, 0, 500)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidNotificationDoc(data) {
+      return data.keys().hasAll(['recipientId', 'title', 'body', 'category', 'targetRoute', 'isRead', 'createdAt']) &&
+        data.keys().hasOnly(['recipientId', 'senderId', 'title', 'body', 'category', 'targetRoute', 'isRead', 'createdAt']) &&
+        isValidString(data.recipientId, 1, 128) &&
+        (!('senderId' in data) || isValidString(data.senderId, 0, 128)) &&
+        isValidString(data.title, 1, 150) &&
+        isValidString(data.body, 1, 500) &&
+        data.category in ['registration', 'topup', 'sale', 'invoice', 'password_reset', 'inventory', 'account', 'system'] &&
+        isValidString(data.targetRoute, 1, 64) &&
+        data.isRead is bool &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidAuditLogDoc(data) {
+      return data.keys().hasAll(['actorId', 'actorName', 'action', 'details', 'createdAt']) &&
+        data.keys().hasOnly(['actorId', 'actorName', 'action', 'details', 'createdAt']) &&
+        isValidId(data.actorId) &&
+        isValidString(data.actorName, 1, 100) &&
+        isValidString(data.action, 1, 100) &&
+        isValidString(data.details, 1, 500) &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidAppSettingsDoc(data) {
+      return data.keys().hasAll(['newsTicker', 'lowStockThreshold', 'agentDiscountPercent', 'clientDiscountPercent', 'directSaleMessageTemplate', 'updatedAt']) &&
+        data.keys().hasOnly(['newsTicker', 'lowStockThreshold', 'agentDiscountPercent', 'clientDiscountPercent', 'directSaleMessageTemplate', 'appDescription', 'apkDownloadUrl', 'updatedAt']) &&
+        isValidString(data.newsTicker, 0, 500) &&
+        data.lowStockThreshold is number && data.lowStockThreshold >= 0 &&
+        data.agentDiscountPercent is number && data.agentDiscountPercent >= 1 && data.agentDiscountPercent <= 100 &&
+        data.clientDiscountPercent is number && data.clientDiscountPercent >= 1 && data.clientDiscountPercent <= 100 &&
+        isValidString(data.directSaleMessageTemplate, 0, 1000) &&
+        (!('appDescription' in data) || isValidString(data.appDescription, 0, 600)) &&
+        (!('apkDownloadUrl' in data) || isValidString(data.apkDownloadUrl, 0, 300)) &&
+        data.updatedAt is timestamp;
+    }
+
+    // =========================================================================
+    // Connection Test Document (Read-Only for Connectivity Probe)
+    // =========================================================================
+    match /test/{docId} {
+      allow get: if isValidId(docId) && docId == 'connection';
+    }
+
+    // =========================================================================
+    // 1. Admins Registry
+    // =========================================================================
+    match /admins/{uid} {
+      allow get: if isValidId(uid) && (isOwner(uid) || isSuperAdmin());
+      allow list: if isSuperAdmin();
+      allow create: if isValidId(uid) && isValidAdminDoc(incoming()) && isSuperAdmin() && incoming().uid == uid && incoming().createdAt == request.time;
+      allow update: if isValidId(uid) && isValidAdminDoc(incoming()) && isSuperAdmin() && incoming().uid == existing().uid && incoming().createdAt == existing().createdAt;
+      allow delete: if false;
+    }
+
+    // =========================================================================
+    // 2. Users (PII Isolated: Owner, Parent Agent, or Super Admin only)
+    // =========================================================================
+    match /users/{uid} {
+      allow get: if isValidId(uid) && isSignedIn() && (
+        isOwner(uid) ||
+        isSuperAdmin() ||
+        (resource != null && existing().parentAgentId == request.auth.uid)
+      );
+      allow list: if isSignedIn() && (
+        isSuperAdmin() ||
+        resource.data.uid == request.auth.uid ||
+        resource.data.parentAgentId == request.auth.uid
+      );
+      allow create: if isValidId(uid) && isSignedIn() && isValidUserProfile(incoming()) &&
+        incoming().uid == uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time && (
+          isSuperAdmin() ||
+          (
+            isOwner(uid) &&
+            incoming().role in ['agent', 'client'] &&
+            incoming().status == 'pending' &&
+            incoming().balance == 0 &&
+            incoming().discountRate == 100
+          )
+        );
+      allow update: if isValidId(uid) && isSignedIn() && isValidUserProfile(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isSuperAdmin() ||
+          (
+            isOwner(uid) &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['name', 'phone', 'fcmTokens', 'updatedAt'])
+          ) ||
+          (
+            existing().parentAgentId == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['balance', 'status', 'updatedAt'])
+          )
+        );
+      allow delete: if isValidId(uid) && isSuperAdmin();
+    }
+
+    // =========================================================================
+    // 3. Registration Requests (Real-Time Admin & Agent Queue)
+    // =========================================================================
+    match /registrationRequests/{requestId} {
+      allow get: if isValidId(requestId) && isSignedIn() && (
+        isSuperAdmin() ||
+        existing().applicantUid == request.auth.uid ||
+        existing().parentAgentId == request.auth.uid
+      );
+      allow list: if isSignedIn() && (
+        isSuperAdmin() ||
+        resource.data.applicantUid == request.auth.uid ||
+        resource.data.parentAgentId == request.auth.uid
+      );
+      allow create: if isValidId(requestId) && isSignedIn() && isValidRegistrationRequest(incoming()) &&
+        incoming().applicantUid == request.auth.uid &&
+        incoming().status == 'pending' &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(requestId) && isSignedIn() && isValidRegistrationRequest(incoming()) &&
+        incoming().applicantUid == existing().applicantUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isSuperAdmin() ||
+          (
+            existing().status == 'pending' &&
+            existing().parentAgentId == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'rejectionReason', 'reviewedBy', 'updatedAt'])
+          )
+        );
+      allow delete: if isValidId(requestId) && isSuperAdmin();
+    }
+
+    // =========================================================================
+    // 4. Password Reset Requests
+    // =========================================================================
+    match /passwordResetRequests/{requestId} {
+      allow get: if isValidId(requestId) && isSignedIn() && (isSuperAdmin() || existing().requesterUid == request.auth.uid);
+      allow list: if isSignedIn() && (isSuperAdmin() || resource.data.requesterUid == request.auth.uid);
+      allow create: if isValidId(requestId) && isValidPasswordResetRequest(incoming()) &&
+        incoming().status == 'pending' &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(requestId) && isValidPasswordResetRequest(incoming()) && isSuperAdmin() &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time;
+      allow delete: if isValidId(requestId) && isSuperAdmin();
+    }
+
+    // =========================================================================
+    // 5. Packages (The 8 Exclusive Taibah Net Packages)
+    // =========================================================================
+    match /packages/{packageId} {
+      allow get: if isValidId(packageId) && isSignedIn();
+      allow list: if isSignedIn() && resource.data.price > 0;
+      allow create: if isValidId(packageId) && isValidPackageDoc(incoming()) && isSuperAdmin() && incoming().updatedAt == request.time;
+      allow update: if isValidId(packageId) && isValidPackageDoc(incoming()) && incoming().updatedAt == request.time && (
+        isSuperAdmin() ||
+        (
+          isSignedIn() &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['availableCount', 'soldCount', 'updatedAt'])
+        )
+      );
+      allow delete: if isValidId(packageId) && isSuperAdmin();
+    }
+
+    // =========================================================================
+    // 6. Cards Inventory (10 or 11 digit voucher codes)
+    // =========================================================================
+    match /cards/{cardId} {
+      allow get: if isValidId(cardId) && isSignedIn() && (isSuperAdmin() || existing().ownerId == request.auth.uid);
+      allow list: if isSignedIn() && (isSuperAdmin() || resource.data.ownerId == request.auth.uid);
+      allow create: if isValidId(cardId) && isValidCardDoc(incoming()) && isSuperAdmin() &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(cardId) && isSignedIn() && isValidCardDoc(incoming()) &&
+        incoming().cardNumber == existing().cardNumber &&
+        incoming().updatedAt == request.time && (
+          isSuperAdmin() ||
+          (
+            incoming().createdAt == existing().createdAt &&
+            existing().ownerId == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'ownerId', 'soldTo', 'saleId', 'updatedAt'])
+          )
+        );
+      allow delete: if isValidId(cardId) && isSuperAdmin();
+    }
+
+    // =========================================================================
+    // 7. Sales (Direct, Electronic Wholesale, Paper Invoices)
+    // =========================================================================
+    match /sales/{saleId} {
+      allow get: if isValidId(saleId) && isSignedIn() && (
+        isSuperAdmin() ||
+        existing().sellerId == request.auth.uid ||
+        existing().buyerId == request.auth.uid
+      );
+      allow list: if isSignedIn() && (
+        isSuperAdmin() ||
+        resource.data.sellerId == request.auth.uid ||
+        resource.data.buyerId == request.auth.uid
+      );
+      allow create: if isValidId(saleId) && isSignedIn() && isValidSaleDoc(incoming()) &&
+        incoming().sellerId == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(saleId) && isSignedIn() && isValidSaleDoc(incoming()) &&
+        incoming().sellerId == existing().sellerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isSuperAdmin() ||
+          (
+            existing().sellerId == request.auth.uid &&
+            existing().status != 'cancelled' &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['buyerName', 'buyerPhone', 'paymentMethod', 'paidAmount', 'remainingAmount', 'realizedProfit', 'deliveredCards', 'returnedCards', 'items', 'cardNumbers', 'status', 'notes', 'updatedAt'])
+          )
+        );
+      allow delete: if isValidId(saleId) && isSignedIn() && (isSuperAdmin() || existing().sellerId == request.auth.uid);
+    }
+
+    // =========================================================================
+    // 8. Customer Ledger Accounts
+    // =========================================================================
+    match /customers/{customerId} {
+      allow get: if isValidId(customerId) && isSignedIn() && (isSuperAdmin() || existing().ownerId == request.auth.uid);
+      allow list: if isSignedIn() && (isSuperAdmin() || resource.data.ownerId == request.auth.uid);
+      allow create: if isValidId(customerId) && isSignedIn() && isValidCustomerAccount(incoming()) &&
+        incoming().ownerId == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(customerId) && isSignedIn() && isValidCustomerAccount(incoming()) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isSuperAdmin() ||
+          (
+            existing().ownerId == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['name', 'phone', 'category', 'totalDebit', 'totalCredit', 'balance', 'notes', 'updatedAt'])
+          )
+        );
+      allow delete: if isValidId(customerId) && isSignedIn() && (isSuperAdmin() || existing().ownerId == request.auth.uid);
+    }
+
+    // =========================================================================
+    // 9. Ledger Entries
+    // =========================================================================
+    match /ledgerEntries/{entryId} {
+      allow get: if isValidId(entryId) && isSignedIn() && (isSuperAdmin() || existing().ownerId == request.auth.uid);
+      allow list: if isSignedIn() && (isSuperAdmin() || resource.data.ownerId == request.auth.uid);
+      allow create: if isValidId(entryId) && isSignedIn() && isValidLedgerEntry(incoming()) &&
+        incoming().ownerId == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        exists(/databases/$(database)/documents/customers/$(incoming().customerId));
+      allow update: if isValidId(entryId) && isValidLedgerEntry(incoming()) && isSignedIn() && (
+        isSuperAdmin() ||
+        (
+          existing().ownerId == request.auth.uid &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['entryType', 'amount', 'description'])
+        )
+      ) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().customerId == existing().customerId &&
+        incoming().createdAt == existing().createdAt;
+      allow delete: if isValidId(entryId) && isSignedIn() && (isSuperAdmin() || existing().ownerId == request.auth.uid);
+    }
+
+    // =========================================================================
+    // 10. Topup / Feed Requests (Two-Tier Hierarchy)
+    // =========================================================================
+    match /topupRequests/{requestId} {
+      allow get: if isValidId(requestId) && isSignedIn() && (
+        isSuperAdmin() ||
+        existing().requesterId == request.auth.uid ||
+        existing().targetId == request.auth.uid
+      );
+      allow list: if isSignedIn() && (
+        isSuperAdmin() ||
+        resource.data.requesterId == request.auth.uid ||
+        resource.data.targetId == request.auth.uid
+      );
+      allow create: if isValidId(requestId) && isSignedIn() && isValidTopupRequest(incoming()) &&
+        incoming().requesterId == request.auth.uid &&
+        incoming().status == 'pending' &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(requestId) && isSignedIn() && isValidTopupRequest(incoming()) &&
+        incoming().requesterId == existing().requesterId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isSuperAdmin() ||
+          (
+            existing().status == 'pending' &&
+            existing().targetId == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'rejectionReason', 'notes', 'updatedAt'])
+          )
+        );
+      allow delete: if isValidId(requestId) && isSuperAdmin();
+    }
+
+    // =========================================================================
+    // 11. Real-Time Notifications (Strict Recipient Isolation)
+    // =========================================================================
+    match /notifications/{notificationId} {
+      allow get: if isValidId(notificationId) && isSignedIn() && (
+        isSuperAdmin() ||
+        existing().recipientId == request.auth.uid
+      );
+      allow list: if isSignedIn() && (
+        isSuperAdmin() ||
+        resource.data.recipientId == request.auth.uid
+      );
+      allow create: if isValidId(notificationId) && isSignedIn() && isValidNotificationDoc(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().isRead == false;
+      allow update: if isValidId(notificationId) && isSignedIn() && isValidNotificationDoc(incoming()) &&
+        incoming().recipientId == existing().recipientId &&
+        incoming().createdAt == existing().createdAt && (
+          isSuperAdmin() ||
+          (
+            existing().recipientId == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['isRead'])
+          )
+        );
+      allow delete: if isValidId(notificationId) && isSignedIn() && (isSuperAdmin() || existing().recipientId == request.auth.uid);
+    }
+
+    // =========================================================================
+    // 12. Immutable Audit Logs
+    // =========================================================================
+    match /auditLogs/{logId} {
+      allow get: if isValidId(logId) && isSuperAdmin();
+      allow list: if isSuperAdmin();
+      allow create: if isValidId(logId) && isSignedIn() && isValidAuditLogDoc(incoming()) &&
+        incoming().actorId == request.auth.uid &&
+        incoming().createdAt == request.time;
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    // =========================================================================
+    // 13. Global App Settings (Public non-PII read for App Description & APK Direct Link on Login)
+    // =========================================================================
+    match /settings/{settingId} {
+      allow get: if isValidId(settingId) && settingId == 'global';
+      allow list: if isSuperAdmin();
+      allow create: if isValidId(settingId) && isValidAppSettingsDoc(incoming()) && isSuperAdmin() && incoming().updatedAt == request.time;
+      allow update: if isValidId(settingId) && isValidAppSettingsDoc(incoming()) && isSuperAdmin() && incoming().updatedAt == request.time;
+      allow delete: if false;
+    }
+  }
+}
