@@ -127,10 +127,17 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ isDark, onToggleTheme })
       }
 
       const { email } = normalizeAuthIdentifier(identifier);
-      await signInWithEmailAndPassword(auth, email, password);
-      // Keep credential in ephemeral RAM & silently update encrypted biometric vault if enrolled
-      await syncBiometricVaultOnPasswordLogin(email, password, identifier.trim());
-      notifySuccess('مرحباً بك في كروت طيبة نت — تم تسجيل الدخول');
+      const cred = await signInWithEmailAndPassword(auth, email, password);
+      // Automatically arm encrypted local vault so Fingerprint & Face Unlock work independently right away
+      await syncBiometricVaultOnPasswordLogin(
+        email,
+        password,
+        identifier.trim(),
+        cred.user.displayName || (isSuperAdminEmail(email) ? SUPER_ADMIN_CONFIG.name : identifier.trim()),
+        rememberMe
+      );
+      setHasEnrolledBiometric(!!getSavedBiometricEnrollment());
+      notifySuccess('مرحباً بك في كروت طيبة نت — تم تسجيل الدخول وتفعيل الدخول السريع بالبصمة والوجه');
     } catch (err: unknown) {
       const code = (err as { code?: string })?.code || '';
       if (code === 'auth/operation-not-allowed' || code === 'auth/configuration-not-found') {
@@ -233,11 +240,39 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ isDark, onToggleTheme })
   };
 
   const handleBiometricLogin = async (method: BiometricMethod) => {
-    const saved = getSavedBiometricEnrollment();
+    const methodLabel = method === 'face' ? 'التعرف على الوجه' : 'البصمة';
+    let saved = getSavedBiometricEnrollment();
+
+    // If first time on this device and the user entered their credentials above, arm & verify in 1 step!
+    if (!saved && identifier.trim() && password) {
+      setSubmitting(true);
+      try {
+        await applyAuthPersistence(true);
+        const { email } = normalizeAuthIdentifier(identifier);
+        const cred = await signInWithEmailAndPassword(auth, email, password);
+        await syncBiometricVaultOnPasswordLogin(
+          email,
+          password,
+          identifier.trim(),
+          cred.user.displayName || (isSuperAdminEmail(email) ? SUPER_ADMIN_CONFIG.name : identifier.trim()),
+          true
+        );
+        saved = getSavedBiometricEnrollment();
+        setHasEnrolledBiometric(!!saved);
+        notifySuccess(`تم الدخول وتفعيل ${methodLabel} تلقائياً للمرات القادمة ✅`);
+        return;
+      } catch {
+        notifyError('بيانات الحساب غير صحيحة', 'تأكد من البريد أو رقم الهاتف وكلمة المرور لربط الخزنة الآمنة.');
+        return;
+      } finally {
+        setSubmitting(false);
+      }
+    }
+
     if (!saved) {
       notifyInfo(
-        method === 'face' ? 'تفعيل الدخول بالوجه' : 'تفعيل الدخول بالبصمة',
-        'سجّل الدخول أولاً ثم اضغط "تفعيل الدخول بالبصمة / الوجه" من القائمة الجانبية أو الإعدادات لمرة واحدة فقط.'
+        method === 'face' ? 'ربط الدخول بالوجه (مرة واحدة فقط)' : 'ربط الدخول بالبصمة (مرة واحدة فقط)',
+        'سجّل الدخول بالرمز مرة واحدة فقط لحفظ الجلسة مشفرة على هذا الجهاز، وبعدها ستدخل بالوجه أو البصمة فوراً دون كلمة مرور.'
       );
       return;
     }
@@ -258,7 +293,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ isDark, onToggleTheme })
         method
       );
     } else {
-      notifyWarning('لم يكتمل التحقق الحيوي', 'أعد المحاولة بالبصمة أو التعرف على الوجه.');
+      notifyWarning(`لم يكتمل التحقق عبر ${methodLabel}`, 'أعد المحاولة بالوجه أو البصمة أو الدخول بالرمز.');
     }
   };
 
@@ -787,46 +822,53 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ isDark, onToggleTheme })
                   </label>
                 </div>
 
-                {/* Primary 3D Password Login Button */}
+                {/* Method 1: Primary 3D Password / Passcode Login Button */}
                 <button
                   type="submit"
                   disabled={submitting}
                   className="w-full min-h-[48px] royal-btn-3d text-white font-extrabold text-sm rounded-xl flex items-center justify-center gap-2 disabled:opacity-60"
                 >
                   <LogIn className="w-4 h-4" />
-                  <span>{submitting ? 'جاري التحقق...' : 'تسجيل الدخول بكلمة المرور'}</span>
+                  <span>{submitting ? 'جاري التحقق...' : 'الدخول بالرمز (كلمة المرور)'}</span>
                 </button>
 
-                {/* Independent Instant Fingerprint & Face Unlock Buttons (Zero Password Required) */}
-                <div className="grid grid-cols-2 gap-2 pt-0.5">
-                  <button
-                    type="button"
-                    disabled={submitting}
-                    onClick={() => void handleBiometricLogin('fingerprint')}
-                    className={`min-h-[44px] rounded-xl px-3 text-xs font-extrabold flex items-center justify-center gap-1.5 relative transition-transform active:scale-[0.98] ${
-                      hasEnrolledBiometric
-                        ? 'bg-emerald-600 hover:bg-emerald-700 text-white border-2 border-[#D4AF37] shadow-md'
-                        : 'gold-btn-3d text-[#0F172A]'
-                    }`}
-                    aria-label="الدخول الفوري بالبصمة"
-                  >
-                    <Fingerprint className="w-4 h-4 shrink-0" />
-                    <span>دخول بالبصمة</span>
-                  </button>
-                  <button
-                    type="button"
-                    disabled={submitting}
-                    onClick={() => void handleBiometricLogin('face')}
-                    className={`min-h-[44px] rounded-xl px-3 text-xs font-extrabold flex items-center justify-center gap-1.5 relative transition-transform active:scale-[0.98] ${
-                      hasEnrolledBiometric
-                        ? 'bg-[#1A365D] hover:bg-[#142a4a] text-[#FDE68A] border-2 border-[#D4AF37] shadow-md'
-                        : 'bg-slate-100 dark:bg-slate-800 border-2 border-[#D4AF37] text-[#1A365D] dark:text-[#FDE68A]'
-                    }`}
-                    aria-label="الدخول الفوري بالتعرف على الوجه"
-                  >
-                    <ScanFace className="w-4 h-4 shrink-0" />
-                    <span>دخول بالوجه</span>
-                  </button>
+                {/* Methods 2 & 3: Independent Instant Fingerprint + Face Unlock (Always Visible & Active Together) */}
+                <div className="space-y-1.5 pt-0.5">
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      disabled={submitting}
+                      onClick={() => void handleBiometricLogin('fingerprint')}
+                      className={`min-h-[46px] rounded-xl px-3 text-xs font-extrabold flex items-center justify-center gap-1.5 relative transition-transform active:scale-[0.98] ${
+                        hasEnrolledBiometric
+                          ? 'bg-emerald-600 hover:bg-emerald-700 text-white border-2 border-[#D4AF37] shadow-md'
+                          : 'gold-btn-3d text-[#0F172A]'
+                      }`}
+                      aria-label="الدخول الفوري بالبصمة"
+                    >
+                      <Fingerprint className="w-4 h-4 shrink-0" />
+                      <span>الدخول بالبصمة</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={submitting}
+                      onClick={() => void handleBiometricLogin('face')}
+                      className={`min-h-[46px] rounded-xl px-3 text-xs font-extrabold flex items-center justify-center gap-1.5 relative transition-transform active:scale-[0.98] ${
+                        hasEnrolledBiometric
+                          ? 'bg-[#1A365D] hover:bg-[#142a4a] text-[#FDE68A] border-2 border-[#D4AF37] shadow-md'
+                          : 'bg-[#1A365D] hover:bg-[#142a4a] text-[#FDE68A] border-2 border-[#D4AF37]/85 shadow-sm'
+                      }`}
+                      aria-label="الدخول الفوري بالتعرف على الوجه"
+                    >
+                      <ScanFace className="w-4 h-4 shrink-0" />
+                      <span>الدخول بالوجه</span>
+                    </button>
+                  </div>
+                  <p className="text-[10.5px] font-bold text-center text-slate-500 dark:text-slate-400">
+                    {hasEnrolledBiometric
+                      ? 'طرق الدخول الثلاث مفعّلة ومستقلة: الرمز • البصمة • الوجه (دخول فوري بدون كلمة مرور)'
+                      : 'متاح الدخول بالرمز أو بالبصمة أو بالوجه (يُحفظ التشفير تلقائياً بعد أول دخول)'}
+                  </p>
                 </div>
 
                 {isSuperAdminEmail(normalizeAuthIdentifier(identifier).email) && (

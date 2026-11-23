@@ -113,48 +113,78 @@ export function releaseCardLocksLocally(cardNumbers: string[]): void {
   savePersistedLocks(current);
 }
 
+// Fast in-memory RAM cache per owner so reading/filtering available cards takes <1ms
+const memoryCardPoolByOwner = new Map<string, CachedAvailableCard[]>();
+
 export function saveCachedAvailableCards(ownerId: string, cards: CachedAvailableCard[]): void {
   if (!ownerId) return;
-  try {
-    const locked = getLocallyLockedCards();
-    // Never cache already locked cards
-    const clean = cards.filter((c) => c.cardNumber && !locked.has(c.cardNumber));
-    // Cap per-owner cache to 2,000 cards to stay fast and light in localStorage
-    const capped = clean.slice(0, 2000);
-    localStorage.setItem(`${CACHED_CARDS_PREFIX}${ownerId}`, JSON.stringify(capped));
-  } catch {
-    // Ignore storage quota errors
+  const locked = getLocallyLockedCards();
+  const seen = new Set<string>();
+  const clean: CachedAvailableCard[] = [];
+  for (const c of cards) {
+    if (!c?.cardNumber || locked.has(c.cardNumber) || seen.has(c.cardNumber)) continue;
+    seen.add(c.cardNumber);
+    clean.push(c);
+    if (clean.length >= 5000) break;
   }
+  memoryCardPoolByOwner.set(ownerId, clean);
+  try {
+    localStorage.setItem(`${CACHED_CARDS_PREFIX}${ownerId}`, JSON.stringify(clean));
+  } catch {
+    // If quota exceeded, persist top 2,000 while keeping full 5,000 in RAM
+    try {
+      localStorage.setItem(`${CACHED_CARDS_PREFIX}${ownerId}`, JSON.stringify(clean.slice(0, 2000)));
+    } catch {
+      // Ignore storage quota errors
+    }
+  }
+}
+
+export function appendCachedAvailableCards(ownerId: string, newCards: CachedAvailableCard[]): void {
+  if (!ownerId || newCards.length === 0) return;
+  const existing = getCachedAvailableCards(ownerId);
+  saveCachedAvailableCards(ownerId, [...newCards, ...existing]);
 }
 
 export function getCachedAvailableCards(ownerId: string, packageId?: string): CachedAvailableCard[] {
   if (!ownerId) return [];
-  try {
-    const raw = localStorage.getItem(`${CACHED_CARDS_PREFIX}${ownerId}`);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    const locked = getLocallyLockedCards();
-    return parsed.filter(
-      (c): c is CachedAvailableCard =>
-        !!c &&
-        typeof c.id === 'string' &&
-        typeof c.packageId === 'string' &&
-        typeof c.cardNumber === 'string' &&
-        !locked.has(c.cardNumber) &&
-        (!packageId || c.packageId === packageId)
-    );
-  } catch {
-    return [];
+  const locked = getLocallyLockedCards();
+  let pool = memoryCardPoolByOwner.get(ownerId);
+
+  if (!pool) {
+    try {
+      const raw = localStorage.getItem(`${CACHED_CARDS_PREFIX}${ownerId}`);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          pool = parsed.filter(
+            (c): c is CachedAvailableCard =>
+              !!c &&
+              typeof c.id === 'string' &&
+              typeof c.packageId === 'string' &&
+              typeof c.cardNumber === 'string'
+          );
+          memoryCardPoolByOwner.set(ownerId, pool);
+        }
+      }
+    } catch {
+      pool = [];
+    }
   }
+
+  if (!pool || pool.length === 0) return [];
+  return pool.filter(
+    (c) => !locked.has(c.cardNumber) && (!packageId || c.packageId === packageId)
+  );
 }
 
 export function removeCardsFromCache(ownerId: string, cardNumbers: string[]): void {
   if (!ownerId || cardNumbers.length === 0) return;
+  const numSet = new Set(cardNumbers);
+  const remaining = getCachedAvailableCards(ownerId).filter((c) => !numSet.has(c.cardNumber));
+  memoryCardPoolByOwner.set(ownerId, remaining);
   try {
-    const numSet = new Set(cardNumbers);
-    const remaining = getCachedAvailableCards(ownerId).filter((c) => !numSet.has(c.cardNumber));
-    localStorage.setItem(`${CACHED_CARDS_PREFIX}${ownerId}`, JSON.stringify(remaining));
+    localStorage.setItem(`${CACHED_CARDS_PREFIX}${ownerId}`, JSON.stringify(remaining.slice(0, 5000)));
   } catch {
     // Ignore storage errors
   }

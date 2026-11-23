@@ -46,7 +46,9 @@ function createOfflineFirstFirestore(): Firestore {
       app,
       {
         localCache,
-        experimentalForceLongPolling: true,
+        ...(embedded
+          ? { experimentalForceLongPolling: true }
+          : { experimentalAutoDetectLongPolling: true }),
       },
       firebaseConfig.firestoreDatabaseId
     );
@@ -56,7 +58,9 @@ function createOfflineFirstFirestore(): Firestore {
         app,
         {
           localCache: memoryLocalCache(),
-          experimentalForceLongPolling: true,
+          ...(embedded
+            ? { experimentalForceLongPolling: true }
+            : { experimentalAutoDetectLongPolling: true }),
         },
         firebaseConfig.firestoreDatabaseId
       );

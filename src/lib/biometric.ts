@@ -313,30 +313,49 @@ export function getSavedBiometricEnrollment(): BiometricEnrollment | null {
 }
 
 /**
- * Refresh the encrypted vault silently when an enrolled user signs in with their password.
+ * Automatically arm or refresh the encrypted local session vault (Android Hardware Keystore /
+ * Web Crypto AES-GCM 256-bit IndexedDB) whenever a user signs in with their password,
+ * so Fingerprint & Face Unlock work immediately and independently without asking for a password.
  */
 export async function syncBiometricVaultOnPasswordLogin(
   authEmail: string,
   password: string,
-  identifier?: string
-): Promise<void> {
+  identifier?: string,
+  displayName?: string,
+  autoArm = true
+): Promise<boolean> {
   rememberSessionCredentialInMemory(authEmail, password);
   const existing = getSavedBiometricEnrollment();
-  if (!existing) return;
-  const saved = await saveBiometricVaultCredentials(authEmail, password);
-  if (saved) {
-    const updated: BiometricEnrollment = {
-      ...existing,
-      authEmail: authEmail.trim().toLowerCase(),
-      identifier: identifier?.trim() || existing.identifier,
-      hasVault: true,
-    };
-    try {
-      localStorage.setItem(BIOMETRIC_META_KEY, JSON.stringify(updated));
-    } catch {
-      // ignore
-    }
+  if (!existing && !autoArm) return false;
+
+  const cleanEmail = authEmail.trim().toLowerCase();
+  const saved = await saveBiometricVaultCredentials(cleanEmail, password);
+  if (!saved && !existing) return false;
+
+  const updated: BiometricEnrollment = existing
+    ? {
+        ...existing,
+        authEmail: cleanEmail,
+        identifier: identifier?.trim() || existing.identifier,
+        displayName: displayName?.trim() || existing.displayName,
+        hasVault: saved || existing.hasVault,
+      }
+    : {
+        mode: isNativeAndroid() ? 'android_biometric' : 'quick_pin',
+        credentialId: `auto_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        identifier: identifier?.trim() || cleanEmail,
+        authEmail: cleanEmail,
+        displayName: displayName?.trim() || identifier?.trim() || 'مستخدم طيبة نت',
+        hasVault: saved,
+        enrolledAt: Date.now(),
+      };
+
+  try {
+    localStorage.setItem(BIOMETRIC_META_KEY, JSON.stringify(updated));
+  } catch {
+    // ignore storage errors
   }
+  return saved;
 }
 
 export function clearBiometricEnrollment(): void {
@@ -527,19 +546,22 @@ export async function verifyDeviceBiometric(
       ? 'وجّه الكاميرا للتعرف على الوجه للدخول الفوري'
       : 'ضع إصبعك على مستشعر البصمة للدخول الفوري';
 
-  // Tier 1: Native Android BiometricPrompt
+  // Tier 1: Native Android BiometricPrompt (supports Face Unlock & Fingerprint natively)
   if (isNativeAndroid()) {
     activeBiometricPrompt = true;
     try {
-      await NativeBiometric.verifyIdentity({
-        title,
-        subtitle: `مرحباً ${saved.displayName}`,
-        description,
-        negativeButtonText: 'إلغاء',
-        useFallback: true,
-      });
-      const credentials = await readBiometricVaultCredentials();
-      return { verified: true, enrollment: saved, credentials };
+      const avail = await NativeBiometric.isAvailable().catch(() => ({ isAvailable: false }));
+      if (avail?.isAvailable) {
+        await NativeBiometric.verifyIdentity({
+          title,
+          subtitle: `مرحباً ${saved.displayName}`,
+          description,
+          negativeButtonText: 'إلغاء',
+          useFallback: true,
+        });
+        const credentials = await readBiometricVaultCredentials();
+        return { verified: true, enrollment: saved, credentials };
+      }
     } catch {
       return { verified: false, enrollment: null };
     } finally {
@@ -547,7 +569,7 @@ export async function verifyDeviceBiometric(
     }
   }
 
-  // Tier 3: Quick-PIN or embedded iframe fallback
+  // Tier 3: Quick-PIN or embedded iframe or auto-armed browser vault
   if (saved.mode === 'quick_pin' || isRunningInsideIframe()) {
     if (saved.pinHash) {
       if (!enteredPin) {

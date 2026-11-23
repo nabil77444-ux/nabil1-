@@ -17,6 +17,8 @@ export interface PrintableDocumentPayload {
   tableHeaders: string[];
   tableRows: string[][];
   summaryRows?: Array<{ label: string; value: string; highlight?: boolean }>;
+  breakdownTitle?: string;
+  breakdownItems?: Array<{ label: string; formula: string }>;
   extraSectionTitle?: string;
   extraLines?: string[];
   fileName: string;
@@ -245,6 +247,28 @@ function buildRoyalDocumentHTML(payload: PrintableDocumentPayload, logoSrc: stri
     )
     .join('');
 
+  const breakdownHtml =
+    payload.breakdownItems && payload.breakdownItems.length > 0
+      ? `
+      <div style="margin-top:14px;background:#f8fafc;border:2px solid #1A365D;border-radius:14px;overflow:hidden;box-sizing:border-box;">
+        <div style="background:#1A365D;color:#FDE68A;padding:8px 14px;font-size:12.5px;font-weight:800;display:flex;justify-content:space-between;align-items:center;border-bottom:2px solid #D4AF37;">
+          <span>${escapeHtml(payload.breakdownTitle || 'تفصيل الفئات المباعة (العدد × سعر الفئة = الإجمالي)')}</span>
+          <span style="font-size:11px;color:#ffffff;">${payload.breakdownItems.length} فئة</span>
+        </div>
+        <div style="padding:10px 12px;display:grid;grid-template-columns:repeat(2,1fr);gap:8px;">
+          ${payload.breakdownItems
+            .map(
+              (item) => `
+            <div style="background:#ffffff;border:1.5px solid #cbd5e1;border-right:4px solid #D4AF37;border-radius:10px;padding:8px 10px;display:flex;flex-direction:column;gap:3px;box-sizing:border-box;">
+              <span style="font-size:11.5px;font-weight:800;color:#1A365D;">${escapeHtml(item.label)}</span>
+              <span style="font-size:13px;font-weight:900;color:#0f172a;direction:rtl;">${escapeHtml(item.formula)}</span>
+            </div>`
+            )
+            .join('')}
+        </div>
+      </div>`
+      : '';
+
   const extraHtml =
     payload.extraLines && payload.extraLines.length > 0
       ? `
@@ -306,6 +330,8 @@ function buildRoyalDocumentHTML(payload: PrintableDocumentPayload, logoSrc: stri
           </table>
         </div>
 
+        ${breakdownHtml}
+
         ${extraHtml}
 
         ${
@@ -338,13 +364,15 @@ async function renderRoyalCanvasFallback2D(
   const metaH = metaRowsCount * 58 + 20;
   const tableRowsCount = Math.max(1, payload.tableRows.length);
   const tableH = 54 + tableRowsCount * 46 + 24;
+  const breakdownRowsCount = payload.breakdownItems?.length ? Math.ceil(payload.breakdownItems.length / 2) : 0;
+  const breakdownH = breakdownRowsCount > 0 ? 54 + breakdownRowsCount * 62 + 20 : 0;
   const extraRowsCount = payload.extraLines?.length ? Math.ceil(payload.extraLines.length / 3) : 0;
   const extraH = extraRowsCount > 0 ? 58 + extraRowsCount * 46 + 24 : 0;
   const summaryRowsCount = payload.summaryRows?.length ? Math.ceil(payload.summaryRows.length / 2) : 0;
   const summaryH = summaryRowsCount > 0 ? summaryRowsCount * 62 + 20 : 0;
   const footerH = 64;
 
-  const height = Math.min(7200, headerH + metaH + tableH + extraH + summaryH + footerH + 70);
+  const height = Math.min(7200, headerH + metaH + tableH + breakdownH + extraH + summaryH + footerH + 70);
   const canvas = document.createElement('canvas');
   canvas.width = width;
   canvas.height = height;
@@ -487,6 +515,49 @@ async function renderRoyalCanvasFallback2D(
     y += 44;
   });
   y += 22;
+
+  // Per-denomination breakdown box
+  if (payload.breakdownItems && payload.breakdownItems.length > 0) {
+    const bBoxH = 48 + breakdownRowsCount * 58 + 14;
+    ctx.fillStyle = '#f8fafc';
+    ctx.fillRect(pad, y, tableW, bBoxH);
+    ctx.strokeStyle = '#1A365D';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(pad, y, tableW, bBoxH);
+    ctx.fillStyle = '#1A365D';
+    ctx.fillRect(pad, y, tableW, 42);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#FDE68A';
+    ctx.font = '800 17px Cairo, sans-serif';
+    ctx.fillText(
+      payload.breakdownTitle || 'تفصيل الفئات المباعة (العدد × سعر الفئة = الإجمالي)',
+      width - pad - 16,
+      y + 27
+    );
+
+    const bItemW = (tableW - 36) / 2;
+    payload.breakdownItems.forEach((item, idx) => {
+      const col = idx % 2;
+      const row = Math.floor(idx / 2);
+      const bx = col === 0 ? width - pad - 12 - bItemW : pad + 12;
+      const by = y + 52 + row * 58;
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(bx, by, bItemW, 48);
+      ctx.strokeStyle = '#cbd5e1';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(bx, by, bItemW, 48);
+      ctx.fillStyle = '#D4AF37';
+      ctx.fillRect(bx + bItemW - 5, by, 5, 48);
+      ctx.textAlign = 'right';
+      ctx.fillStyle = '#1A365D';
+      ctx.font = '800 14px Cairo, sans-serif';
+      ctx.fillText(item.label.slice(0, 34), bx + bItemW - 14, by + 19);
+      ctx.fillStyle = '#0f172a';
+      ctx.font = '900 16px Cairo, sans-serif';
+      ctx.fillText(item.formula.slice(0, 38), bx + bItemW - 14, by + 40);
+    });
+    y += bBoxH + 18;
+  }
 
   // Extra lines (Voucher numbers)
   if (payload.extraLines && payload.extraLines.length > 0) {

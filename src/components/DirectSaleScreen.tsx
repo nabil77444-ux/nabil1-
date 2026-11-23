@@ -41,6 +41,14 @@ import {
   type PackageDoc,
   type SaleDoc,
 } from '../types/taibah';
+import {
+  buildSingleSaleBreakdown,
+  formatDenominationFormula,
+  formatNumEn,
+  getBuyerPriceTierLabel,
+  getBuyerRoleArabicLabel,
+  toPrintableBreakdownItems,
+} from '../utils/salesBreakdown';
 
 interface DirectSaleScreenProps {
   hideNumbers: boolean;
@@ -174,6 +182,7 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
     const items = sale.items || [];
     const formattedDate = formatDateTimeAr(sale.createdAt);
     const invoiceNum = sale.invoiceNumber || sale.id.slice(-6);
+    const breakdown = buildSingleSaleBreakdown(sale, appSettings);
     if (items.length === 1 && items[0].cardNumbers.length === 1) {
       const tpl =
         channel === 'sms'
@@ -181,57 +190,77 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
           : channel === 'whatsapp'
             ? appSettings.whatsappMessageTemplate || appSettings.directSaleMessageTemplate || ''
             : appSettings.directSaleMessageTemplate || appSettings.whatsappMessageTemplate || '';
-      return applyMessageTemplate(tpl, {
+      const baseMsg = applyMessageTemplate(tpl, {
         package: items[0].packageLabel,
         card: items[0].cardNumbers[0],
         buyer: sale.buyerName,
-        total: `${sale.totalAmount} ر.ي`,
+        total: `${formatNumEn(sale.totalAmount)} ر.ي`,
         invoice: invoiceNum,
         date: formattedDate,
       });
+      const formulaLine = breakdown[0]?.fullLineText;
+      return formulaLine ? `${baseMsg}\n📊 ${formulaLine}` : baseMsg;
     }
     const lines = [
       `📶 شبكة طيبة نت اللاسلكية (TAIBAH NET)`,
       `🧾 فاتورة بيع مباشر #${invoiceNum}`,
       `📅 التاريخ: ${formattedDate}`,
-      `👤 الزبون: ${sale.buyerName}`,
+      `👤 المشتري: ${sale.buyerName} (${getBuyerRoleArabicLabel(sale.buyerRole, sale.saleType)})`,
+      `🏷 التسعير: ${getBuyerPriceTierLabel(sale.buyerRole, sale.saleType, sale.discountRate)}`,
       `────────────────────`,
+      `📊 تفصيل الفئات المباعة:`,
     ];
+    for (const b of breakdown) {
+      lines.push(`🔹 ${b.fullLineText}`);
+    }
     for (const item of items) {
-      lines.push(`🔹 ${item.packageLabel} (العدد: ${item.quantity} | ${item.unitPrice * item.quantity} ر.ي)`);
-      item.cardNumbers.forEach((num, idx) => {
-        lines.push(`   ${idx + 1}. ${num}`);
-      });
+      if (item.cardNumbers.length > 0) {
+        lines.push(`🔑 أرقام كروت ${item.packageLabel}:`);
+        item.cardNumbers.forEach((num, idx) => {
+          lines.push(`   ${idx + 1}. ${num}`);
+        });
+      }
     }
     lines.push(`────────────────────`);
-    lines.push(`💰 الإجمالي: ${sale.totalAmount} ر.ي (${sale.totalCards} كرت)`);
+    lines.push(`💰 الإجمالي: ${formatNumEn(sale.totalAmount)} ر.ي (${formatNumEn(sale.totalCards)} كرت)`);
     lines.push(`📞 ${SUPER_ADMIN_CONFIG.developerCredit}`);
     return lines.join('\n');
   };
 
-  const buildDirectPrintable = (sale: SaleDoc): PrintableDocumentPayload => ({
-    title: 'فاتورة بيع مباشر للمستهلك',
-    subtitle: `رقم الفاتورة: ${sale.invoiceNumber || sale.id.slice(-6)}`,
-    metaRows: [
-      { label: 'اسم الزبون', value: sale.buyerName },
-      { label: 'رقم الهاتف', value: sale.buyerPhone || 'مباشر' },
-      { label: 'التاريخ', value: formatDateTimeAr(sale.createdAt) },
-      { label: 'عدد الكروت', value: `${sale.totalCards} كرت` },
-    ],
-    tableHeaders: ['الباقة', 'الكمية', 'سعر الكرت', 'الإجمالي'],
-    tableRows: (sale.items || []).map((i) => [
-      i.packageLabel,
-      String(i.quantity),
-      `${i.unitPrice} ر.ي`,
-      `${i.unitPrice * i.quantity} ر.ي`,
-    ]),
-    summaryRows: [{ label: 'الإجمالي المدفوع نقداً', value: `${sale.totalAmount} ر.ي`, highlight: true }],
-    extraSectionTitle: 'أرقام الكروت المسحوبة',
-    extraLines: sale.cardNumbers || [],
-    fileName: `بيع_مباشر_${sale.invoiceNumber || sale.id.slice(-6)}`,
-    sharePhone: sale.buyerPhone,
-    shareText: buildUnifiedDirectMessage(sale),
-  });
+  const buildDirectPrintable = (sale: SaleDoc): PrintableDocumentPayload => {
+    const breakdown = buildSingleSaleBreakdown(sale, appSettings);
+    return {
+      title: 'فاتورة بيع مباشر للمستهلك',
+      subtitle: `رقم الفاتورة: ${sale.invoiceNumber || sale.id.slice(-6)}`,
+      metaRows: [
+        { label: 'اسم الزبون', value: sale.buyerName },
+        { label: 'نوع المشتري / التسعير', value: `${getBuyerRoleArabicLabel(sale.buyerRole, sale.saleType)} — ${getBuyerPriceTierLabel(sale.buyerRole, sale.saleType, sale.discountRate)}` },
+        { label: 'رقم الهاتف', value: sale.buyerPhone || 'مباشر' },
+        { label: 'التاريخ', value: formatDateTimeAr(sale.createdAt) },
+      ],
+      tableHeaders: ['الفئة / الباقة', 'العدد', 'سعر الفئة', 'تفصيل الحساب (العدد × السعر = الإجمالي)'],
+      tableRows: (sale.items || []).map((i) => {
+        const unit = i.unitPrice || i.price;
+        return [
+          i.packageLabel,
+          formatNumEn(i.quantity),
+          `${formatNumEn(unit)} ر.ي`,
+          formatDenominationFormula(i.quantity, unit, unit * i.quantity),
+        ];
+      }),
+      breakdownTitle: 'تفصيل الفئات المباعة (العدد × سعر الفئة = الإجمالي)',
+      breakdownItems: toPrintableBreakdownItems(breakdown),
+      summaryRows: [
+        { label: 'إجمالي الكروت', value: `${formatNumEn(sale.totalCards)} كرت` },
+        { label: 'الإجمالي المدفوع نقداً', value: `${formatNumEn(sale.totalAmount)} ر.ي`, highlight: true },
+      ],
+      extraSectionTitle: 'أرقام الكروت المسحوبة',
+      extraLines: sale.cardNumbers || [],
+      fileName: `بيع_مباشر_${sale.invoiceNumber || sale.id.slice(-6)}`,
+      sharePhone: sale.buyerPhone,
+      shareText: buildUnifiedDirectMessage(sale),
+    };
+  };
 
   return (
     <div className="space-y-3 pb-28 safe-bottom">
@@ -416,6 +445,22 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
             </div>
 
             <div className="p-4 space-y-3">
+              {/* Per-Denomination Breakdown Strip */}
+              <div className="rounded-xl bg-amber-50/70 dark:bg-amber-950/25 border border-[#D4AF37]/60 p-2.5 space-y-1">
+                <div className="text-[11px] font-extrabold text-[#1A365D] dark:text-[#FDE68A]">
+                  تفصيل الفئات المباعة (سعر الزبون 100%):
+                </div>
+                {buildSingleSaleBreakdown(completedSale, appSettings).map((b) => (
+                  <div
+                    key={b.key}
+                    className="flex items-center justify-between gap-2 text-[11px] font-extrabold tabular-nums"
+                  >
+                    <span className="text-slate-700 dark:text-slate-200">فئة {formatNumEn(b.denomination)} ريال</span>
+                    <span className="text-[#1A365D] dark:text-[#FDE68A]">{b.formulaText}</span>
+                  </div>
+                ))}
+              </div>
+
               <div className="rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 p-3 text-xs font-bold whitespace-pre-wrap leading-relaxed max-h-56 overflow-y-auto">
                 {buildUnifiedDirectMessage(completedSale)}
               </div>

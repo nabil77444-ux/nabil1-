@@ -36,8 +36,18 @@ import {
   SUPER_ADMIN_CONFIG,
   TAIBAH_ASSETS,
   type AppRoute,
+  type AppSettingsDoc,
   type SaleDoc,
 } from '../types/taibah';
+import {
+  buildSalesListDenominationBreakdown,
+  buildSingleSaleBreakdown,
+  formatDenominationFormula,
+  formatNumEn,
+  getBuyerPriceTierLabel,
+  getBuyerRoleArabicLabel,
+  toPrintableBreakdownItems,
+} from '../utils/salesBreakdown';
 
 interface SalesListScreenProps {
   hideNumbers: boolean;
@@ -47,66 +57,84 @@ interface SalesListScreenProps {
 type DateFilter = 'all' | 'today' | 'yesterday' | 'range';
 type TypeFilter = 'all' | 'direct' | 'wholesale';
 
-function buildSaleShareText(sale: SaleDoc): string {
+function buildSaleShareText(sale: SaleDoc, appSettings?: Partial<AppSettingsDoc>): string {
   const typeLabel =
     sale.saleType === 'direct'
       ? 'فاتورة بيع مباشر'
       : sale.saleType === 'electronic_wholesale'
         ? 'فاتورة بيع جملة إلكترونية'
         : 'فاتورة كروت ورقية';
+  const breakdown = buildSingleSaleBreakdown(sale, appSettings);
+  const buyerRoleText = getBuyerRoleArabicLabel(sale.buyerRole, sale.saleType);
+  const tierText = getBuyerPriceTierLabel(sale.buyerRole, sale.saleType, sale.discountRate);
   const lines = [
     `📶 شبكة طيبة نت اللاسلكية (TAIBAH NET)`,
     `📄 ${typeLabel} — رقم: ${sale.invoiceNumber || sale.id.slice(-6)}`,
     `👤 المستلم: ${sale.buyerName}${sale.buyerPhone ? ` (${sale.buyerPhone})` : ''}`,
+    `🏷 نوع المشتري: ${buyerRoleText} — ${tierText}`,
     `🗓 التاريخ: ${formatDateTimeAr(sale.createdAt)}`,
     `────────────────────`,
+    `📊 تفصيل الفئات المباعة (العدد × سعر الفئة = الإجمالي):`,
   ];
+  if (breakdown.length > 0) {
+    for (const b of breakdown) {
+      lines.push(`• ${b.fullLineText}`);
+    }
+  }
   if (sale.items && sale.items.length > 0) {
     for (const item of sale.items) {
-      lines.push(
-        `• ${item.packageLabel}: العدد ${item.quantity} | المُسلّم ${item.delivered} | السعر ${item.unitPrice} ر.ي`
-      );
       if (item.cardNumbers && item.cardNumbers.length > 0) {
-        lines.push(`  الأرقام: ${item.cardNumbers.join(' ، ')}`);
+        lines.push(`🔑 أرقام ${item.packageLabel} (المُسلّم ${item.delivered}/${item.quantity}): ${item.cardNumbers.join(' ، ')}`);
       }
     }
   } else if (sale.cardNumbers && sale.cardNumbers.length > 0) {
     lines.push(`🔑 أرقام الكروت:\n${sale.cardNumbers.join('\n')}`);
   }
   lines.push(`────────────────────`);
-  lines.push(`📦 إجمالي الكروت: ${sale.totalCards} | المُسلّم: ${sale.deliveredCards}`);
-  lines.push(`💰 الإجمالي: ${sale.totalAmount} ر.ي`);
-  lines.push(`✅ المدفوع: ${sale.paidAmount} ر.ي | ⏳ المتبقي: ${sale.remainingAmount} ر.ي`);
+  lines.push(`📦 إجمالي الكروت: ${formatNumEn(sale.totalCards)} | المُسلّم: ${formatNumEn(sale.deliveredCards)}`);
+  lines.push(`💰 الإجمالي: ${formatNumEn(sale.totalAmount)} ر.ي`);
+  lines.push(`✅ المدفوع: ${formatNumEn(sale.paidAmount)} ر.ي | ⏳ المتبقي: ${formatNumEn(sale.remainingAmount)} ر.ي`);
   lines.push(`📞 ${SUPER_ADMIN_CONFIG.developerCredit}`);
   return lines.join('\n');
 }
 
-function buildSalePrintablePayload(sale: SaleDoc): PrintableDocumentPayload {
+function buildSalePrintablePayload(
+  sale: SaleDoc,
+  appSettings?: Partial<AppSettingsDoc>
+): PrintableDocumentPayload {
   const typeLabel =
     sale.saleType === 'direct'
       ? 'فاتورة بيع مباشر'
       : sale.saleType === 'electronic_wholesale'
         ? 'فاتورة بيع جملة (إلكترونية)'
         : 'فاتورة كروت ورقية';
+  const breakdown = buildSingleSaleBreakdown(sale, appSettings);
+  const buyerRoleText = getBuyerRoleArabicLabel(sale.buyerRole, sale.saleType);
+  const tierText = getBuyerPriceTierLabel(sale.buyerRole, sale.saleType, sale.discountRate);
 
   const rows =
     sale.items && sale.items.length > 0
-      ? sale.items.map((item) => [
-          item.packageLabel,
-          String(item.quantity),
-          String(item.delivered),
-          String(item.returned || 0),
-          `${item.unitPrice} ر.ي`,
-          `${item.unitPrice * item.quantity} ر.ي`,
-        ])
+      ? sale.items.map((item) => {
+          const unit =
+            item.unitPrice ||
+            (sale.saleType === 'direct'
+              ? item.price
+              : Math.round((item.price * (sale.discountRate || 100)) / 100));
+          return [
+            item.packageLabel,
+            formatNumEn(item.quantity),
+            formatNumEn(item.delivered),
+            formatNumEn(item.returned || 0),
+            formatDenominationFormula(item.quantity, unit, unit * item.quantity),
+          ];
+        })
       : [
           [
             typeLabel,
-            String(sale.totalCards),
-            String(sale.deliveredCards),
-            String(sale.returnedCards || 0),
-            '-',
-            `${sale.totalAmount} ر.ي`,
+            formatNumEn(sale.totalCards),
+            formatNumEn(sale.deliveredCards),
+            formatNumEn(sale.returnedCards || 0),
+            `${formatNumEn(sale.totalAmount)} ر.ي`,
           ],
         ];
 
@@ -115,6 +143,7 @@ function buildSalePrintablePayload(sale: SaleDoc): PrintableDocumentPayload {
     subtitle: `رقم الفاتورة: ${sale.invoiceNumber || sale.id.slice(-6)}`,
     metaRows: [
       { label: 'اسم المستلم / العميل', value: sale.buyerName },
+      { label: 'نوع الحساب / التسعير', value: `${buyerRoleText} — ${tierText}` },
       { label: 'رقم الهاتف', value: sale.buyerPhone || 'غير مسجل' },
       { label: 'التاريخ والوقت', value: formatDateTimeAr(sale.createdAt) },
       {
@@ -127,26 +156,29 @@ function buildSalePrintablePayload(sale: SaleDoc): PrintableDocumentPayload {
               : 'دفع جزئي',
       },
     ],
-    tableHeaders: ['الباقة', 'العدد', 'المُسلّم', 'المرتجع', 'سعر الكرت', 'الإجمالي'],
+    tableHeaders: ['الفئة / الباقة', 'العدد', 'المُسلّم', 'المرتجع', 'تفصيل الحساب (العدد × السعر = الإجمالي)'],
     tableRows: rows,
+    breakdownTitle: `تفصيل الفئات المباعة — ${buyerRoleText} (العدد × سعر الفئة = الإجمالي)`,
+    breakdownItems: toPrintableBreakdownItems(breakdown),
     summaryRows: [
-      { label: 'إجمالي الكروت', value: `${sale.totalCards} كرت` },
-      { label: 'الكروت المُسلّمة', value: `${sale.deliveredCards} كرت` },
-      { label: 'المبلغ المدفوع', value: `${sale.paidAmount} ر.ي` },
-      { label: 'المبلغ المتبقي', value: `${sale.remainingAmount} ر.ي` },
-      { label: 'الإجمالي النهائي', value: `${sale.totalAmount} ر.ي`, highlight: true },
+      { label: 'إجمالي الكروت', value: `${formatNumEn(sale.totalCards)} كرت` },
+      { label: 'الكروت المُسلّمة', value: `${formatNumEn(sale.deliveredCards)} كرت` },
+      { label: 'المبلغ المدفوع', value: `${formatNumEn(sale.paidAmount)} ر.ي` },
+      { label: 'المبلغ المتبقي', value: `${formatNumEn(sale.remainingAmount)} ر.ي` },
+      { label: 'الإجمالي النهائي', value: `${formatNumEn(sale.totalAmount)} ر.ي`, highlight: true },
     ],
     extraSectionTitle: 'أرقام الكروت الإلكترونية المسحوبة',
     extraLines: sale.cardNumbers || [],
     fileName: `فاتورة_${sale.invoiceNumber || sale.id.slice(-6)}`,
     sharePhone: sale.buyerPhone,
-    shareText: buildSaleShareText(sale),
+    shareText: buildSaleShareText(sale, appSettings),
   };
 }
 
 export const SalesListScreen: React.FC<SalesListScreenProps> = ({ hideNumbers, onNavigate }) => {
   const {
     sales,
+    appSettings,
     hasMoreSales,
     loadMoreSales,
     updateSaleRecord,
@@ -217,6 +249,10 @@ export const SalesListScreen: React.FC<SalesListScreenProps> = ({ hideNumbers, o
   const totalRevenue = useMemo(
     () => filteredSales.reduce((acc, s) => acc + (Number(s.totalAmount) || 0), 0),
     [filteredSales]
+  );
+  const filteredBreakdown = useMemo(
+    () => buildSalesListDenominationBreakdown(filteredSales, appSettings),
+    [filteredSales, appSettings]
   );
 
   const openEditModal = (sale: SaleDoc) => {
@@ -400,6 +436,35 @@ export const SalesListScreen: React.FC<SalesListScreenProps> = ({ hideNumbers, o
         )}
       </div>
 
+      {/* Aggregated Per-Denomination Breakdown Strip across Filtered Sales */}
+      {filteredBreakdown.length > 0 && (
+        <div className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37]/70 p-3 shadow-sm space-y-1.5">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-extrabold text-[#1A365D] dark:text-[#FDE68A]">
+              تفصيل الفئات المباعة (العدد × سعر الفئة = الإجمالي)
+            </span>
+            <span className="text-[10px] font-extrabold text-slate-500 tabular-nums">
+              {filteredBreakdown.length} فئة
+            </span>
+          </div>
+          <div className="divide-y divide-slate-100 dark:divide-slate-800">
+            {filteredBreakdown.map((b) => (
+              <div
+                key={b.key}
+                className="py-1.5 flex items-center justify-between gap-2 text-[11px] font-extrabold tabular-nums"
+              >
+                <span className="text-slate-700 dark:text-slate-200 truncate">
+                  فئة {formatNumEn(b.denomination)} ريال ({b.buyerRoleLabel})
+                </span>
+                <span className="text-[#1A365D] dark:text-[#FDE68A] shrink-0">
+                  {hideNumbers ? '••••' : b.formulaText}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Multi-Colored Top-Striped White Sale Cards */}
       {filteredSales.length === 0 ? (
         <div className="rounded-3xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37]/60 p-8 text-center shadow-sm">
@@ -447,6 +512,25 @@ export const SalesListScreen: React.FC<SalesListScreenProps> = ({ hideNumbers, o
                       </div>
                     </div>
                   </div>
+
+                  {/* Per-Denomination Breakdown inside Sale Card */}
+                  {sale.items && sale.items.length > 0 && (
+                    <div className="rounded-xl bg-amber-50/60 dark:bg-amber-950/20 border border-[#D4AF37]/40 px-2.5 py-1.5 space-y-1">
+                      {buildSingleSaleBreakdown(sale, appSettings).map((b) => (
+                        <div
+                          key={b.key}
+                          className="flex items-center justify-between gap-2 text-[11px] font-extrabold tabular-nums"
+                        >
+                          <span className="text-slate-700 dark:text-slate-200 truncate">
+                            فئة {formatNumEn(b.denomination)} ريال ({b.buyerRoleLabel})
+                          </span>
+                          <span className="text-[#1A365D] dark:text-[#FDE68A] shrink-0">
+                            {hideNumbers ? '••••' : b.formulaText}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
 
                   {/* Financial mini-bar */}
                   <div className="grid grid-cols-3 gap-1.5 rounded-xl bg-slate-50 dark:bg-slate-800/80 p-2 text-center text-[11px] font-extrabold tabular-nums">
@@ -554,6 +638,16 @@ export const SalesListScreen: React.FC<SalesListScreenProps> = ({ hideNumbers, o
                             العدد: {item.quantity} | مُسلّم: {item.delivered} | مرتجع: {item.returned || 0}
                           </span>
                         </div>
+                        <div className="text-[11px] font-extrabold text-emerald-700 dark:text-emerald-400 tabular-nums">
+                          {formatDenominationFormula(
+                            item.quantity,
+                            item.unitPrice ||
+                              (selectedSale.saleType === 'direct'
+                                ? item.price
+                                : Math.round((item.price * (selectedSale.discountRate || 100)) / 100))
+                          )}{' '}
+                          ({getBuyerRoleArabicLabel(selectedSale.buyerRole, selectedSale.saleType)})
+                        </div>
                         <div className="flex flex-wrap gap-1.5">
                           {selectedSale.saleType !== 'paper_invoice' && remainingToDeliver > 0 && (
                             <button
@@ -631,7 +725,7 @@ export const SalesListScreen: React.FC<SalesListScreenProps> = ({ hideNumbers, o
                 <button
                   type="button"
                   onClick={() => {
-                    openWhatsAppShare(selectedSale.buyerPhone, buildSaleShareText(selectedSale));
+                    openWhatsAppShare(selectedSale.buyerPhone, buildSaleShareText(selectedSale, appSettings));
                     notifySuccess('تم فتح واتساب لإرسال الفاتورة');
                   }}
                   className="min-h-[42px] rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold flex items-center justify-center gap-1.5"
@@ -642,7 +736,7 @@ export const SalesListScreen: React.FC<SalesListScreenProps> = ({ hideNumbers, o
                 <button
                   type="button"
                   onClick={() => {
-                    openSmsShare(selectedSale.buyerPhone, buildSaleShareText(selectedSale));
+                    openSmsShare(selectedSale.buyerPhone, buildSaleShareText(selectedSale, appSettings));
                     notifySuccess('تم فتح الرسائل النصية SMS');
                   }}
                   className="min-h-[42px] rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-extrabold flex items-center justify-center gap-1.5"
@@ -654,7 +748,7 @@ export const SalesListScreen: React.FC<SalesListScreenProps> = ({ hideNumbers, o
                   type="button"
                   onClick={async () => {
                     try {
-                      const res = await exportAsArabicPDF(buildSalePrintablePayload(selectedSale));
+                      const res = await exportAsArabicPDF(buildSalePrintablePayload(selectedSale, appSettings));
                       notifySuccess('تم تجهيز الملف بنجاح ✅');
                       if (!res.sharedNatively) setExportPreview(res);
                     } catch {
@@ -670,7 +764,7 @@ export const SalesListScreen: React.FC<SalesListScreenProps> = ({ hideNumbers, o
                   type="button"
                   onClick={async () => {
                     try {
-                      const res = await exportAsHDImage(buildSalePrintablePayload(selectedSale));
+                      const res = await exportAsHDImage(buildSalePrintablePayload(selectedSale, appSettings));
                       notifySuccess('تم تجهيز الملف بنجاح ✅');
                       if (!res.sharedNatively) setExportPreview(res);
                     } catch {
@@ -685,7 +779,7 @@ export const SalesListScreen: React.FC<SalesListScreenProps> = ({ hideNumbers, o
                 <button
                   type="button"
                   onClick={() => {
-                    void printRoyalDocument(buildSalePrintablePayload(selectedSale));
+                    void printRoyalDocument(buildSalePrintablePayload(selectedSale, appSettings));
                     notifySuccess('تم تجهيز المستند للطباعة');
                   }}
                   className="col-span-2 sm:col-span-2 min-h-[42px] rounded-xl bg-[#1A365D] text-white text-xs font-extrabold flex items-center justify-center gap-1.5"

@@ -58,6 +58,7 @@ import {
   clearMemorySessionCredentials,
 } from '../lib/biometric';
 import {
+  appendCachedAvailableCards,
   consumeCachedAvailableCards,
   enqueueOfflineSale,
   getCachedAvailableCards,
@@ -96,6 +97,7 @@ export interface ImportCardsResult {
   importedCount: number;
   duplicateCount: number;
   invalidCount: number;
+  elapsedMs?: number;
 }
 
 interface FirebaseContextValue {
@@ -695,29 +697,39 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         )
       );
     } else if (navigator.onLine) {
-      // Background refresh of Admin's offline-ready pool (up to 400 available cards across packages)
-      getDocs(
-        query(
-          collection(db, 'cards'),
-          where('ownerId', '==', activeUser.uid),
-          where('status', '==', 'available'),
-          limit(400)
+      // Parallel background warm-up across all 8 packages (up to 250 cards/package) so card retrieval is 0ms instant!
+      Promise.allSettled(
+        EXCLUSIVE_PACKAGES.map((pkg) =>
+          getDocs(
+            query(
+              collection(db, 'cards'),
+              where('ownerId', '==', activeUser.uid),
+              where('packageId', '==', pkg.id),
+              where('status', '==', 'available'),
+              limit(250)
+            )
+          )
         )
       )
-        .then((snap) => {
-          const cachedAvail: CachedAvailableCard[] = snap.docs
-            .map((d) => {
+        .then((results) => {
+          const cachedAvail: CachedAvailableCard[] = [];
+          for (const res of results) {
+            if (res.status !== 'fulfilled') continue;
+            for (const d of res.value.docs) {
               const data = d.data() as CardDoc;
-              return {
-                id: d.id,
-                packageId: data.packageId,
-                cardNumber: data.cardNumber,
-                ownerId: activeUser.uid,
-              };
-            })
-            .filter((c) => !isCardLocallyLocked(c.cardNumber));
+              if (!isCardLocallyLocked(data.cardNumber)) {
+                cachedAvail.push({
+                  id: d.id,
+                  packageId: data.packageId,
+                  cardNumber: data.cardNumber,
+                  ownerId: activeUser.uid,
+                });
+              }
+            }
+          }
           if (cachedAvail.length > 0) {
             saveCachedAvailableCards(activeUser.uid, cachedAvail);
+            setOfflinePoolVersion((v) => v + 1);
           }
         })
         .catch(() => {});
@@ -1368,7 +1380,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   );
 
   // =========================================================================
-  // ULTRA-FAST PARALLEL CARD IMPORT ENGINE (480 ops × 6 parallel waves)
+  // ULTRA-FAST PARALLEL CARD IMPORT ENGINE (Exact 500-card writeBatch × Promise.all)
   // =========================================================================
   const importCardsBatch = useCallback(
     async (
@@ -1376,10 +1388,11 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       rawCardNumbers: string[],
       onProgress?: (percent: number, done: number, total: number) => void
     ): Promise<ImportCardsResult> => {
+      const startedAt = performance.now();
       const activeUser = auth.currentUser || firebaseUser;
       if (!activeUser || !profile || profile.role !== 'super_admin') {
         notifyError('صلاحية الإدارة فقط', 'استيراد الكروت متاح للمدير العام فقط.');
-        return { totalParsed: 0, importedCount: 0, duplicateCount: 0, invalidCount: 0 };
+        return { totalParsed: 0, importedCount: 0, duplicateCount: 0, invalidCount: 0, elapsedMs: 0 };
       }
 
       // Fast O(n) local validation & deduplication via Set
@@ -1388,8 +1401,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       let invalidCount = 0;
       let duplicateCount = 0;
 
-      for (const raw of rawCardNumbers) {
-        const clean = raw.trim();
+      for (let i = 0; i < rawCardNumbers.length; i++) {
+        const clean = rawCardNumbers[i].trim();
         if (!validRegex.test(clean)) {
           invalidCount++;
           continue;
@@ -1409,81 +1422,117 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           importedCount: 0,
           duplicateCount,
           invalidCount,
+          elapsedMs: Math.round(performance.now() - startedAt),
         };
       }
 
       const batchId = generateSafeDocId('batch');
-      const CHUNK_SIZE = 480; // Maximized safely under Firestore 500-op writeBatch limit
-      const PARALLEL_BATCHES = 6; // Commit 6 batches concurrently for maximum speed
+      const CHUNK_SIZE = 500; // Exact Firestore maximum 500 writes per batch
+      const PARALLEL_WAVES = 10; // Fire up to 10 batches (5,000 cards) simultaneously via Promise.all
       const chunks: string[][] = [];
       for (let i = 0; i < toInsert.length; i += CHUNK_SIZE) {
         chunks.push(toInsert.slice(i, i + CHUNK_SIZE));
       }
 
+      // Pre-populate local RAM + localStorage card pool IMMEDIATELY so newly imported cards
+      // are readable at 0ms latency right away!
+      const addedCards: CachedAvailableCard[] = toInsert.slice(0, 5000).map((cardNumber) => ({
+        id: cardNumber,
+        packageId,
+        cardNumber,
+        ownerId: activeUser.uid,
+      }));
+      appendCachedAvailableCards(activeUser.uid, addedCards);
+
       let done = 0;
       try {
-        for (let wave = 0; wave < chunks.length; wave += PARALLEL_BATCHES) {
-          const waveChunks = chunks.slice(wave, wave + PARALLEL_BATCHES);
+        // Build & commit all 500-card batches in parallel waves via Promise.all
+        const createdTs = serverTimestamp();
+        for (let wave = 0; wave < chunks.length; wave += PARALLEL_WAVES) {
+          const waveChunks = chunks.slice(wave, wave + PARALLEL_WAVES);
           await Promise.all(
             waveChunks.map(async (chunk) => {
               const batch = writeBatch(db);
-              for (const cardNumber of chunk) {
+              for (let j = 0; j < chunk.length; j++) {
+                const cardNumber = chunk[j];
                 batch.set(doc(db, 'cards', cardNumber), {
                   packageId,
                   cardNumber,
                   status: 'available',
                   ownerId: activeUser.uid,
                   batchId,
-                  createdAt: serverTimestamp(),
-                  updatedAt: serverTimestamp(),
+                  createdAt: createdTs,
+                  updatedAt: createdTs,
                 });
               }
               await batch.commit();
               done += chunk.length;
               if (onProgress) {
-                const pct = Math.min(99, Math.round((done / toInsert.length) * 100));
+                const pct = Math.min(98, Math.round((done / toInsert.length) * 100));
                 onProgress(pct, done, toInsert.length);
               }
             })
           );
         }
 
-        // Single atomic counter increment on the package document
+        // Optimistic immediate package counter update in local state & cache
+        setRawPackages((prev) => {
+          const base = prev.length > 0 ? prev : (EXCLUSIVE_PACKAGES as PackageDoc[]);
+          const next = base.map((pkg) =>
+            pkg.id === packageId
+              ? {
+                  ...pkg,
+                  availableCount: (Number(pkg.availableCount) || 0) + done,
+                  uploadedCount: (Number(pkg.uploadedCount) || 0) + done,
+                }
+              : pkg
+          );
+          writeCachedJson(
+            CACHE_PACKAGES_KEY,
+            next.map(({ updatedAt: _u, ...rest }) => rest)
+          );
+          return next;
+        });
+
+        // Single atomic counter increment on the package document in Firestore
         await updateDoc(doc(db, 'packages', packageId), {
           availableCount: increment(done),
           uploadedCount: increment(done),
           updatedAt: serverTimestamp(),
         });
 
-        // Pre-populate Admin's offline card pool with newly imported cards immediately
-        const existingPool = getCachedAvailableCards(activeUser.uid);
-        const addedCards: CachedAvailableCard[] = toInsert.slice(0, 300).map((cardNumber) => ({
-          id: cardNumber,
-          packageId,
-          cardNumber,
-          ownerId: activeUser.uid,
-        }));
-        saveCachedAvailableCards(activeUser.uid, [...addedCards, ...existingPool]);
+        setOfflinePoolVersion((v) => v + 1);
+        const elapsedMs = Math.max(100, Math.round(performance.now() - startedAt));
+        const elapsedSec = (elapsedMs / 1000).toFixed(1);
 
         if (onProgress) {
           onProgress(100, done, toInsert.length);
         }
 
-        // Fire-and-forget audit & notification so UI finishes instantly
+        // Fire-and-forget audit & notification so UI finishes immediately
         writeAuditLog(
           'استيراد دفعة كروت',
-          `تم استيراد ${done} كرت جديد للباقة ${packageId} (استبعاد ${duplicateCount} مكرر محلياً)`
+          `تم استيراد ${done} كرت جديد للباقة ${packageId} خلال ${elapsedSec} ثانية (استبعاد ${duplicateCount} مكرر محلياً)`
         ).catch(() => {});
         sendCloudNotification({
           recipientId: 'super_admin',
           title: 'تم استيراد دفعة كروت جديدة',
-          body: `تمت إضافة ${done} كرت للباقة ${packageId} بنجاح.`,
+          body: `تمت إضافة ${done} كرت للباقة ${packageId} بنجاح خلال ${elapsedSec} ثانية.`,
           category: 'inventory',
           targetRoute: 'packages',
         }).catch(() => {});
 
-        notifySuccess(`تم استيراد ${done} كرت بنجاح ✅`);
+        notifySuccess(`تم استيراد ${done} كرت بنجاح خلال ${elapsedSec} ثانية ⚡`);
+        return {
+          totalParsed: rawCardNumbers.length,
+          importedCount: done,
+          duplicateCount,
+          invalidCount,
+          elapsedMs,
+        };
       } catch (err) {
+        // Rollback pre-cached cards if cloud commit failed
+        removeCardsFromCache(activeUser.uid, toInsert);
         handleFirestoreError(err, OperationType.WRITE, 'cards/batch_import');
         notifyError('حدث خطأ أثناء الاستيراد', 'يرجى التحقق من الاتصال والمحاولة مجدداً.');
       }
@@ -1493,6 +1542,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         importedCount: done,
         duplicateCount,
         invalidCount,
+        elapsedMs: Math.round(performance.now() - startedAt),
       };
     },
     [firebaseUser, notifyError, notifySuccess, notifyWarning, profile, sendCloudNotification, writeAuditLog]
@@ -1659,57 +1709,87 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       };
 
       const lockedCandidateNumbers: string[] = [];
+      let usedLocalCache = false;
 
       try {
         if (!navigator.onLine) {
           return executeOfflineSale();
         }
 
-        // Step 1: Pre-fetch candidate available cards for each requested package (if electronic)
+        // Step 1: Instant Candidate Card Retrieval (RAM/local cache first at 0ms -> parallel Firestore fallback)
+        const fetchCandidatesForItem = async (
+          item: { packageId: string; quantity: number; deliverNow?: number },
+          bypassLocalCache = false
+        ): Promise<Array<{ id: string; cardNumber: string }>> => {
+          const deliverTarget = Math.min(item.quantity, item.deliverNow ?? item.quantity);
+          if (deliverTarget <= 0) return [];
+
+          if (!bypassLocalCache) {
+            const localPool = getCachedAvailableCards(activeUser.uid, item.packageId).filter(
+              (c) => !isCardLocallyLocked(c.cardNumber)
+            );
+            if (localPool.length >= deliverTarget) {
+              return localPool.slice(0, deliverTarget).map((c) => ({
+                id: c.id,
+                cardNumber: c.cardNumber,
+              }));
+            }
+          }
+
+          const q = query(
+            collection(db, 'cards'),
+            where('ownerId', '==', activeUser.uid),
+            where('packageId', '==', item.packageId),
+            where('status', '==', 'available'),
+            limit(Math.max(deliverTarget + 40, 120))
+          );
+          let snap = await getDocs(q);
+          // Fallback for legacy Super Admin cards if ownerId differed from current admin uid
+          if (profile.role === 'super_admin' && snap.docs.length < deliverTarget) {
+            snap = await getDocs(
+              query(
+                collection(db, 'cards'),
+                where('packageId', '==', item.packageId),
+                where('status', '==', 'available'),
+                limit(Math.max(deliverTarget + 40, 120))
+              )
+            );
+          }
+          const list = snap.docs
+            .map((d) => ({
+              id: d.id,
+              cardNumber: (d.data() as CardDoc).cardNumber,
+            }))
+            .filter((c) => !isCardLocallyLocked(c.cardNumber));
+
+          // Cache extra fetched cards locally for instant future sales
+          if (list.length > deliverTarget) {
+            appendCachedAvailableCards(
+              activeUser.uid,
+              list.slice(deliverTarget).map((c) => ({
+                id: c.id,
+                packageId: item.packageId,
+                cardNumber: c.cardNumber,
+                ownerId: activeUser.uid,
+              }))
+            );
+          }
+          return list;
+        };
+
         const candidateCardDocsByPkg: Record<string, Array<{ id: string; cardNumber: string }>> = {};
         if (isElectronic) {
-          for (const item of requestedItems) {
-            const deliverTarget = Math.min(item.quantity, item.deliverNow ?? item.quantity);
-            if (deliverTarget <= 0) {
-              candidateCardDocsByPkg[item.packageId] = [];
-              continue;
-            }
-            const q =
-              profile.role === 'super_admin'
-                ? query(
-                    collection(db, 'cards'),
-                    where('ownerId', '==', activeUser.uid),
-                    where('packageId', '==', item.packageId),
-                    where('status', '==', 'available'),
-                    limit(deliverTarget + 25)
-                  )
-                : query(
-                    collection(db, 'cards'),
-                    where('ownerId', '==', activeUser.uid),
-                    where('packageId', '==', item.packageId),
-                    where('status', '==', 'available'),
-                    limit(deliverTarget + 25)
-                  );
-            let snap = await getDocs(q);
-            // Fallback for legacy Super Admin cards if ownerId differed from current admin uid
-            if (profile.role === 'super_admin' && snap.docs.length < deliverTarget) {
-              snap = await getDocs(
-                query(
-                  collection(db, 'cards'),
-                  where('packageId', '==', item.packageId),
-                  where('status', '==', 'available'),
-                  limit(deliverTarget + 25)
-                )
-              );
-            }
-            // Exclude ANY locally locked card number to guarantee zero duplicate sales
-            const list = snap.docs
-              .map((d) => ({
-                id: d.id,
-                cardNumber: (d.data() as CardDoc).cardNumber,
-              }))
-              .filter((c) => !isCardLocallyLocked(c.cardNumber));
+          const fetchedAll = await Promise.all(
+            requestedItems.map(async (item) => {
+              const deliverTarget = Math.min(item.quantity, item.deliverNow ?? item.quantity);
+              const localCount = getCachedAvailableCards(activeUser.uid, item.packageId).length;
+              if (localCount >= deliverTarget) usedLocalCache = true;
+              const list = await fetchCandidatesForItem(item, false);
+              return { item, deliverTarget, list };
+            })
+          );
 
+          for (const { item, deliverTarget, list } of fetchedAll) {
             if (list.length < deliverTarget) {
               const pkgMeta = packages.find((p) => p.id === item.packageId);
               notifyError(
@@ -1883,11 +1963,11 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               : Math.min(totalAmount, Math.max(0, input.paidAmount));
         const remainingAmount = Math.max(0, totalAmount - paidAmount);
 
-        // Update buyer balance if it's a registered user with remaining balance
+        // Update buyer balance if it's a registered user with remaining balance (non-blocking)
         if (input.buyerId && remainingAmount > 0 && profile.role === 'super_admin') {
           const buyerUser = managedUsers.find((u) => u.uid === input.buyerId);
           if (buyerUser) {
-            await updateDoc(doc(db, 'users', input.buyerId), {
+            updateDoc(doc(db, 'users', input.buyerId), {
               balance: (Number(buyerUser.balance) || 0) + remainingAmount,
               updatedAt: serverTimestamp(),
             }).catch(() => {});
@@ -1901,17 +1981,22 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               ? 'جملة إلكترونية'
               : 'فاتورة كروت ورقية';
 
-        await writeAuditLog(
+        // Fire-and-forget audit & cloud notification so the invoice & card numbers open instantly
+        writeAuditLog(
           typeLabel,
           `فاتورة ${invoiceNumber} للمشتري ${input.buyerName} — ${totalCards} كرت — الإجمالي ${totalAmount} ر.ي`
-        );
-        await sendCloudNotification({
+        ).catch(() => {});
+        sendCloudNotification({
           recipientId: input.buyerId || 'super_admin',
           title: `تم تسجيل ${typeLabel} (${invoiceNumber})`,
           body: `${input.buyerName} • ${totalCards} كرت • الإجمالي ${totalAmount} ر.ي`,
           category: input.saleType === 'paper_invoice' ? 'invoice' : 'sale',
           targetRoute: 'sales_list',
-        });
+        }).catch(() => {});
+
+        if (usedLocalCache) {
+          setOfflinePoolVersion((v) => v + 1);
+        }
 
         notifySuccess(`تم تنفيذ ${typeLabel} (${totalCards} كرت) بنجاح`);
 
@@ -1940,6 +2025,9 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       } catch (err) {
         if (lockedCandidateNumbers.length > 0) {
           releaseCardLocksLocally(lockedCandidateNumbers);
+          if (usedLocalCache) {
+            removeCardsFromCache(activeUser.uid, lockedCandidateNumbers);
+          }
         }
         const msg = err instanceof Error ? err.message : 'تعذر إتمام عملية البيع';
         const isNetworkOffline =

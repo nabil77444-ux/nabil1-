@@ -44,6 +44,13 @@ import {
   TAIBAH_ASSETS,
   type PackageDoc,
 } from '../types/taibah';
+import {
+  buildSalesListDenominationBreakdown,
+  formatNumEn,
+  getBuyerRoleArabicLabel,
+  toPrintableBreakdownItems,
+  type DenominationLineBreakdown,
+} from '../utils/salesBreakdown';
 
 interface ReportsCenterScreenProps {
   hideNumbers: boolean;
@@ -85,7 +92,7 @@ const ALL_REPORTS: ReportCardMeta[] = [
 ];
 
 export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNumbers }) => {
-  const { profile, packages, sales, customers, topupRequests, managedUsers } = useFirebase();
+  const { profile, packages, sales, customers, topupRequests, managedUsers, appSettings } = useFirebase();
   const { notifySuccess, notifyError } = useFeedback();
 
   const isAdmin = profile?.role === 'super_admin';
@@ -144,20 +151,22 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
         );
         const total = list.reduce((a, b) => a + b.totalAmount, 0);
         const cards = list.reduce((a, b) => a + b.totalCards, 0);
+        const breakdown = buildSalesListDenominationBreakdown(list, appSettings);
         return {
           title: 'تقرير المبيعات المباشرة (100%)',
           headers: ['رقم الفاتورة', 'الزبون', 'الكروت', 'الإجمالي', 'التاريخ'],
           rows: list.map((s) => [
             s.invoiceNumber || s.id.slice(-6),
             s.buyerName,
-            String(s.totalCards),
-            `${s.totalAmount} ر.ي`,
+            formatNumEn(s.totalCards),
+            `${formatNumEn(s.totalAmount)} ر.ي`,
             formatDateTimeAr(s.createdAt),
           ]),
+          breakdown,
           summary: [
-            { label: 'عدد العمليات', value: String(list.length) },
-            { label: 'إجمالي الكروت المباعة', value: `${cards} كرت` },
-            { label: 'إجمالي إيراد البيع المباشر', value: `${total} ر.ي`, highlight: true },
+            { label: 'عدد العمليات', value: formatNumEn(list.length) },
+            { label: 'إجمالي الكروت المباعة', value: `${formatNumEn(cards)} كرت` },
+            { label: 'إجمالي إيراد البيع المباشر', value: `${formatNumEn(total)} ر.ي`, highlight: true },
           ],
           fileName: 'تقرير_البيع_المباشر',
         };
@@ -173,21 +182,24 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
         const total = list.reduce((a, b) => a + b.totalAmount, 0);
         const paid = list.reduce((a, b) => a + b.paidAmount, 0);
         const cards = list.reduce((a, b) => a + b.totalCards, 0);
+        const breakdown = buildSalesListDenominationBreakdown(list, appSettings);
         return {
           title: 'تقرير بيع الجملة الإلكتروني',
-          headers: ['الفاتورة', 'المستلم', 'الكروت', 'المُسلّم', 'الإجمالي', 'المتبقي'],
+          headers: ['الفاتورة', 'المستلم', 'نوع الحساب', 'الكروت', 'المُسلّم', 'الإجمالي', 'المتبقي'],
           rows: list.map((s) => [
             s.invoiceNumber || s.id.slice(-6),
             s.buyerName,
-            String(s.totalCards),
-            String(s.deliveredCards),
-            `${s.totalAmount} ر.ي`,
-            `${s.remainingAmount} ر.ي`,
+            getBuyerRoleArabicLabel(s.buyerRole, s.saleType),
+            formatNumEn(s.totalCards),
+            formatNumEn(s.deliveredCards),
+            `${formatNumEn(s.totalAmount)} ر.ي`,
+            `${formatNumEn(s.remainingAmount)} ر.ي`,
           ]),
+          breakdown,
           summary: [
-            { label: 'إجمالي الكروت', value: `${cards} كرت` },
-            { label: 'المدفوع نقداً', value: `${paid} ر.ي` },
-            { label: 'إجمالي الجملة', value: `${total} ر.ي`, highlight: true },
+            { label: 'إجمالي الكروت', value: `${formatNumEn(cards)} كرت` },
+            { label: 'المدفوع نقداً', value: `${formatNumEn(paid)} ر.ي` },
+            { label: 'إجمالي الجملة', value: `${formatNumEn(total)} ر.ي`, highlight: true },
           ],
           fileName: 'تقرير_الجملة_الإلكترونية',
         };
@@ -202,21 +214,24 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
         );
         const total = list.reduce((a, b) => a + b.totalAmount, 0);
         const rem = list.reduce((a, b) => a + b.remainingAmount, 0);
+        const breakdown = buildSalesListDenominationBreakdown(list, appSettings);
         return {
           title: 'تقرير الفواتير والكروت الورقية',
-          headers: ['الفاتورة', 'العميل', 'الكروت', 'الإجمالي', 'المدفوع', 'المتبقي'],
+          headers: ['الفاتورة', 'العميل', 'نوع الحساب', 'الكروت', 'الإجمالي', 'المدفوع', 'المتبقي'],
           rows: list.map((s) => [
             s.invoiceNumber || s.id.slice(-6),
             s.buyerName,
-            String(s.totalCards),
-            `${s.totalAmount} ر.ي`,
-            `${s.paidAmount} ر.ي`,
-            `${s.remainingAmount} ر.ي`,
+            getBuyerRoleArabicLabel(s.buyerRole, s.saleType),
+            formatNumEn(s.totalCards),
+            `${formatNumEn(s.totalAmount)} ر.ي`,
+            `${formatNumEn(s.paidAmount)} ر.ي`,
+            `${formatNumEn(s.remainingAmount)} ر.ي`,
           ]),
+          breakdown,
           summary: [
-            { label: 'عدد الفواتير الورقية', value: String(list.length) },
-            { label: 'إجمالي المتبقي', value: `${rem} ر.ي` },
-            { label: 'إجمالي الفواتير الورقية', value: `${total} ر.ي`, highlight: true },
+            { label: 'عدد الفواتير الورقية', value: formatNumEn(list.length) },
+            { label: 'إجمالي المتبقي', value: `${formatNumEn(rem)} ر.ي` },
+            { label: 'إجمالي الفواتير الورقية', value: `${formatNumEn(total)} ر.ي`, highlight: true },
           ],
           fileName: 'تقرير_الفواتير_الورقية',
         };
@@ -278,19 +293,22 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
         );
         const expected = list.reduce((a, s) => a + (s.expectedProfit || 0), 0);
         const realized = list.reduce((a, s) => a + (s.realizedProfit || 0), 0);
+        const breakdown = buildSalesListDenominationBreakdown(list, appSettings);
         return {
           title: 'تقرير الأرباح المتوقعة والمحققة فعلياً',
-          headers: ['الفاتورة', 'العميل', 'الإجمالي', 'الربح المتوقع', 'الربح المحقق'],
+          headers: ['الفاتورة', 'العميل', 'نوع الحساب', 'الإجمالي', 'الربح المتوقع', 'الربح المحقق'],
           rows: list.map((s) => [
             s.invoiceNumber || s.id.slice(-6),
             s.buyerName,
-            `${s.totalAmount} ر.ي`,
-            `${s.expectedProfit || 0} ر.ي`,
-            `${s.realizedProfit || 0} ر.ي`,
+            getBuyerRoleArabicLabel(s.buyerRole, s.saleType),
+            `${formatNumEn(s.totalAmount)} ر.ي`,
+            `${formatNumEn(s.expectedProfit || 0)} ر.ي`,
+            `${formatNumEn(s.realizedProfit || 0)} ر.ي`,
           ]),
+          breakdown,
           summary: [
-            { label: 'إجمالي الأرباح المتوقعة', value: `${expected} ر.ي` },
-            { label: 'إجمالي الأرباح المحققة نقداً', value: `${realized} ر.ي`, highlight: true },
+            { label: 'إجمالي الأرباح المتوقعة', value: `${formatNumEn(expected)} ر.ي` },
+            { label: 'إجمالي الأرباح المحققة نقداً', value: `${formatNumEn(realized)} ر.ي`, highlight: true },
           ],
           fileName: 'تقرير_الأرباح',
         };
@@ -387,70 +405,92 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
       }
 
       default: {
-        const totalSalesAmt = sales.reduce((a, s) => a + s.totalAmount, 0);
-        const totalPaidAmt = sales.reduce((a, s) => a + s.paidAmount, 0);
-        const totalRemAmt = sales.reduce((a, s) => a + s.remainingAmount, 0);
-        const totalCardsSold = sales.reduce((a, s) => a + s.totalCards, 0);
+        const filteredAllSales = sales.filter((s) => inDateRange(s.createdAt?.toMillis?.()));
+        const totalSalesAmt = filteredAllSales.reduce((a, s) => a + s.totalAmount, 0);
+        const totalPaidAmt = filteredAllSales.reduce((a, s) => a + s.paidAmount, 0);
+        const totalRemAmt = filteredAllSales.reduce((a, s) => a + s.remainingAmount, 0);
+        const totalCardsSold = filteredAllSales.reduce((a, s) => a + s.totalCards, 0);
         const totalAvail = displayPackages.reduce((a, p) => a + p.availableCount, 0);
+        const breakdown = buildSalesListDenominationBreakdown(filteredAllSales, appSettings);
         const rows: string[][] = [
-          ['إجمالي عمليات البيع المسجلة', `${sales.length} عملية`],
-          ['إجمالي الكروت المباعة', `${totalCardsSold} كرت`],
-          ['إجمالي قيمة المبيعات', `${totalSalesAmt} ر.ي`],
-          ['إجمالي التحصيل النقدي الفوري', `${totalPaidAmt} ر.ي`],
-          ['إجمالي الآجل / المتبقي', `${totalRemAmt} ر.ي`],
-          [isAdmin ? 'إجمالي الكروت المتاحة بالمخزون' : 'الكروت المتاحة بحسابك', `${totalAvail} كرت`],
-          ['عدد حسابات الدفتر العام', `${customers.length} حساب`],
-          ['عدد طلبات التغذية المسجلة', `${topupRequests.length} طلب`],
+          ['إجمالي عمليات البيع المسجلة', `${formatNumEn(filteredAllSales.length)} عملية`],
+          ['إجمالي الكروت المباعة', `${formatNumEn(totalCardsSold)} كرت`],
+          ['إجمالي قيمة المبيعات', `${formatNumEn(totalSalesAmt)} ر.ي`],
+          ['إجمالي التحصيل النقدي الفوري', `${formatNumEn(totalPaidAmt)} ر.ي`],
+          ['إجمالي الآجل / المتبقي', `${formatNumEn(totalRemAmt)} ر.ي`],
+          [isAdmin ? 'إجمالي الكروت المتاحة بالمخزون' : 'الكروت المتاحة بحسابك', `${formatNumEn(totalAvail)} كرت`],
+          ['عدد حسابات الدفتر العام', `${formatNumEn(customers.length)} حساب`],
+          ['عدد طلبات التغذية المسجلة', `${formatNumEn(topupRequests.length)} طلب`],
         ];
         if (isAdmin || isAgent) {
           rows.push([
             'عدد الوكلاء ونقاط البيع',
-            `${managedUsers.filter((u) => u.role !== 'super_admin').length} حساب`,
+            `${formatNumEn(managedUsers.filter((u) => u.role !== 'super_admin').length)} حساب`,
           ]);
         }
         return {
           title: 'التقرير المالي الشامل — شبكة طيبة نت',
           headers: ['البند المالي / التشغيلي', 'القيمة الحية'],
           rows,
+          breakdown,
           summary: [
-            { label: 'التحصيل النقدي', value: `${totalPaidAmt} ر.ي` },
-            { label: 'إجمالي المبيعات', value: `${totalSalesAmt} ر.ي`, highlight: true },
+            { label: 'التحصيل النقدي', value: `${formatNumEn(totalPaidAmt)} ر.ي` },
+            { label: 'إجمالي المبيعات', value: `${formatNumEn(totalSalesAmt)} ر.ي`, highlight: true },
           ],
           fileName: 'التقرير_المالي_الشامل',
         };
       }
     }
-  }, [activeReportId, sales, customers, managedUsers, topupRequests, displayPackages, search, fromDate, toDate, isAdmin, isAgent]);
+  }, [activeReportId, sales, customers, managedUsers, topupRequests, displayPackages, search, fromDate, toDate, isAdmin, isAgent, appSettings]);
+
+  const getBreakdownList = (data: NonNullable<typeof reportData>): DenominationLineBreakdown[] =>
+    'breakdown' in data && Array.isArray(data.breakdown) ? data.breakdown : [];
 
   const buildReportShareText = (data: NonNullable<typeof reportData>): string => {
+    const breakdown = getBreakdownList(data);
     const lines = [
       `📶 شبكة طيبة نت اللاسلكية (TAIBAH NET)`,
       `📊 ${data.title}`,
       `🗓 ${formatDateDDMMYYYY(new Date())}`,
       `────────────────────`,
       ...data.summary.map((s) => `• ${s.label}: ${s.value}`),
-      `────────────────────`,
-      `عدد السجلات: ${data.rows.length}`,
-      `📞 ${SUPER_ADMIN_CONFIG.developerCredit}`,
     ];
+    if (breakdown.length > 0) {
+      lines.push(`────────────────────`);
+      lines.push(`🧾 تفصيل الفئات المباعة (العدد × سعر الفئة = الإجمالي):`);
+      for (const b of breakdown) {
+        lines.push(`🔹 ${b.fullLineText}`);
+      }
+    }
+    lines.push(`────────────────────`);
+    lines.push(`عدد السجلات: ${data.rows.length}`);
+    lines.push(`📞 ${SUPER_ADMIN_CONFIG.developerCredit}`);
     return lines.join('\n');
   };
 
-  const buildReportPrintable = (data: NonNullable<typeof reportData>): PrintableDocumentPayload => ({
-    title: data.title,
-    subtitle: `تقرير معتمد — ${profile?.name || SUPER_ADMIN_CONFIG.name}`,
-    metaRows: [
-      { label: 'الشبكة', value: 'شبكة طيبة نت اللاسلكية (TAIBAH NET)' },
-      { label: 'تاريخ التصدير', value: formatDateTimeAr(new Date()) },
-      { label: 'من تاريخ', value: fromDate ? formatInputDateDisplay(fromDate) : 'من البداية' },
-      { label: 'إلى تاريخ', value: toDate ? formatInputDateDisplay(toDate) : 'حتى الآن' },
-    ],
-    tableHeaders: data.headers,
-    tableRows: data.rows,
-    summaryRows: data.summary,
-    fileName: data.fileName,
-    shareText: buildReportShareText(data),
-  });
+  const buildReportPrintable = (data: NonNullable<typeof reportData>): PrintableDocumentPayload => {
+    const breakdown = getBreakdownList(data);
+    return {
+      title: data.title,
+      subtitle: `تقرير معتمد — ${profile?.name || SUPER_ADMIN_CONFIG.name}`,
+      metaRows: [
+        { label: 'الشبكة', value: 'شبكة طيبة نت اللاسلكية (TAIBAH NET)' },
+        { label: 'تاريخ التصدير', value: formatDateTimeAr(new Date()) },
+        { label: 'من تاريخ', value: fromDate ? formatInputDateDisplay(fromDate) : 'من البداية' },
+        { label: 'إلى تاريخ', value: toDate ? formatInputDateDisplay(toDate) : 'حتى الآن' },
+      ],
+      tableHeaders: data.headers,
+      tableRows: data.rows,
+      breakdownTitle:
+        breakdown.length > 0
+          ? 'تفصيل الفئات المباعة حسب نوع الحساب (العدد × سعر الفئة = الإجمالي)'
+          : undefined,
+      breakdownItems: breakdown.length > 0 ? toPrintableBreakdownItems(breakdown) : undefined,
+      summaryRows: data.summary,
+      fileName: data.fileName,
+      shareText: buildReportShareText(data),
+    };
+  };
 
   // Dedicated Independent Report View (scrollable internally inside fixed shell)
   if (activeReportId && reportData) {
@@ -581,7 +621,28 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
             type="button"
             onClick={async () => {
               try {
-                await exportAsExcel(reportData.title, reportData.headers, reportData.rows, reportData.fileName);
+                const breakdown = getBreakdownList(reportData);
+                const extraRows: string[][] =
+                  breakdown.length > 0
+                    ? [
+                        ['', ...reportData.headers.slice(1).map(() => '')],
+                        ['تفصيل الفئات المباعة (العدد × سعر الفئة = الإجمالي)', ...reportData.headers.slice(1).map(() => '')],
+                        ...breakdown.map((b) => {
+                          const padded = [
+                            `فئة ${formatNumEn(b.denomination)} ريال (${b.buyerRoleLabel})`,
+                            b.formulaText,
+                          ];
+                          while (padded.length < reportData.headers.length) padded.push('');
+                          return padded.slice(0, reportData.headers.length);
+                        }),
+                      ]
+                    : [];
+                await exportAsExcel(
+                  reportData.title,
+                  reportData.headers,
+                  [...reportData.rows, ...extraRows],
+                  reportData.fileName
+                );
                 notifySuccess('تم تجهيز ملف Excel بنجاح ✅');
               } catch {
                 notifyError('تعذر إنشاء ملف Excel');
@@ -599,6 +660,35 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
             <Printer className="w-3.5 h-3.5 text-[#FDE68A]" /> طباعة
           </button>
         </div>
+
+        {/* Per-Denomination Breakdown Card (Automatic Buyer-Type Pricing: Agent / Client / Consumer) */}
+        {getBreakdownList(reportData).length > 0 && (
+          <div className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37]/80 p-3 shadow-sm space-y-1.5">
+            <div className="flex items-center justify-between gap-2 border-b border-slate-100 dark:border-slate-800 pb-1.5">
+              <span className="text-xs font-extrabold text-[#1A365D] dark:text-[#FDE68A]">
+                تفصيل الفئات المباعة (العدد × سعر الفئة = الإجمالي)
+              </span>
+              <span className="text-[10px] font-extrabold text-slate-500 tabular-nums">
+                تسعير تلقائي حسب نوع الحساب
+              </span>
+            </div>
+            <div className="divide-y divide-slate-100 dark:divide-slate-800">
+              {getBreakdownList(reportData).map((b) => (
+                <div
+                  key={b.key}
+                  className="py-1.5 flex items-center justify-between gap-2 text-xs font-extrabold tabular-nums"
+                >
+                  <span className="text-slate-700 dark:text-slate-200 truncate">
+                    فئة {formatNumEn(b.denomination)} ريال ({b.buyerRoleLabel})
+                  </span>
+                  <span className="text-[#1A365D] dark:text-[#FDE68A] shrink-0">
+                    {hideNumbers ? '••••' : b.formulaText}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Report Table */}
         <div className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37]/70 overflow-hidden shadow-md">

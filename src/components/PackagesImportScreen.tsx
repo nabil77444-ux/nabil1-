@@ -423,6 +423,9 @@ export const PackagesImportScreen: React.FC<PackagesImportScreenProps> = ({ hide
                   </div>
                   <div className="tabular-nums">
                     • تم استيراد وإضافة: {lastReport.importedCount} كرت جديد
+                    {typeof lastReport.elapsedMs === 'number' && lastReport.elapsedMs > 0
+                      ? ` (خلال ${(lastReport.elapsedMs / 1000).toFixed(1)} ثانية ⚡)`
+                      : ''}
                   </div>
                   <div className="tabular-nums">
                     • تم استبعاد المكرر (بالمخزن أو الملف): {lastReport.duplicateCount} كرت

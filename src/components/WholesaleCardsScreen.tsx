@@ -37,6 +37,14 @@ import {
   type PackageDoc,
   type SaleDoc,
 } from '../types/taibah';
+import {
+  buildSingleSaleBreakdown,
+  formatDenominationFormula,
+  formatNumEn,
+  getBuyerPriceTierLabel,
+  getBuyerRoleArabicLabel,
+  toPrintableBreakdownItems,
+} from '../utils/salesBreakdown';
 
 interface WholesaleCardsScreenProps {
   mode: 'electronic' | 'paper';
@@ -131,6 +139,26 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
       setCustomPhone(found.phone);
       setBuyerRole(found.role);
       setDiscountRate(found.rate);
+    }
+  };
+
+  /**
+   * Automatically detect buyer account type (Agent / Client / Consumer) when a contact
+   * is picked from the official phonebook so unit prices adjust immediately.
+   */
+  const applyAutoPricingFromContact = (name?: string, phone?: string) => {
+    const cleanPhone = (phone || '').replace(/[^\d]/g, '').slice(-9);
+    const cleanName = (name || '').trim().toLowerCase();
+    const matched = recipientOptions.find((o) => {
+      const optPhone = (o.phone || '').replace(/[^\d]/g, '').slice(-9);
+      if (cleanPhone && optPhone && optPhone === cleanPhone) return true;
+      if (cleanName && o.name.trim().toLowerCase() === cleanName) return true;
+      return false;
+    });
+    if (matched) {
+      setSelectedRecipientKey(matched.key);
+      setBuyerRole(matched.role);
+      setDiscountRate(matched.rate);
     }
   };
 
@@ -242,58 +270,74 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
       sale.saleType === 'electronic_wholesale'
         ? 'فاتورة كروت إلكترونية (جملة)'
         : 'فاتورة كروت ورقية معتمدة';
+    const breakdown = buildSingleSaleBreakdown(sale, appSettings);
+    const buyerRoleText = getBuyerRoleArabicLabel(sale.buyerRole, sale.saleType);
+    const tierText = getBuyerPriceTierLabel(sale.buyerRole, sale.saleType, sale.discountRate);
     const lines = [
       `📶 شبكة طيبة نت اللاسلكية (TAIBAH NET)`,
       `📄 ${title} — رقم: ${sale.invoiceNumber}`,
       `👤 المستلم: ${sale.buyerName}${sale.buyerPhone ? ` (${sale.buyerPhone})` : ''}`,
+      `🏷 نوع الحساب: ${buyerRoleText} — ${tierText}`,
       `📅 التاريخ: ${formatDateTimeAr(sale.createdAt)}`,
       `────────────────────`,
+      `📊 تفصيل الفئات المباعة (العدد × سعر الفئة = الإجمالي):`,
     ];
+    for (const b of breakdown) {
+      lines.push(`🔹 ${b.fullLineText}`);
+    }
     for (const item of sale.items || []) {
-      lines.push(
-        `🔹 ${item.packageLabel} | العدد: ${item.quantity} | المُسلّم: ${item.delivered} | السعر: ${item.unitPrice} ر.ي | الإجمالي: ${item.unitPrice * item.quantity} ر.ي`
-      );
       if (item.cardNumbers.length > 0) {
-        lines.push(`   الأرقام: ${item.cardNumbers.join(' ، ')}`);
+        lines.push(`🔑 أرقام ${item.packageLabel} (المُسلّم: ${item.delivered}/${item.quantity}):`);
+        lines.push(`   ${item.cardNumbers.join(' ، ')}`);
       }
     }
     lines.push(`────────────────────`);
-    lines.push(`📦 الإجمالي: ${sale.totalCards} كرت | المُسلّم: ${sale.deliveredCards} كرت`);
-    lines.push(`💰 المطلوب: ${sale.totalAmount} ر.ي | المدفوع: ${sale.paidAmount} ر.ي | المتبقي: ${sale.remainingAmount} ر.ي`);
+    lines.push(`📦 الإجمالي: ${formatNumEn(sale.totalCards)} كرت | المُسلّم: ${formatNumEn(sale.deliveredCards)} كرت`);
+    lines.push(`💰 المطلوب: ${formatNumEn(sale.totalAmount)} ر.ي | المدفوع: ${formatNumEn(sale.paidAmount)} ر.ي | المتبقي: ${formatNumEn(sale.remainingAmount)} ر.ي`);
     lines.push(`📞 ${SUPER_ADMIN_CONFIG.developerCredit}`);
     return lines.join('\n');
   };
 
-  const buildWholesalePrintable = (sale: SaleDoc): PrintableDocumentPayload => ({
-    title: sale.saleType === 'electronic_wholesale' ? 'فاتورة كروت إلكترونية (جملة)' : 'فاتورة كروت ورقية رسمية',
-    subtitle: `رقم الفاتورة: ${sale.invoiceNumber || sale.id.slice(-6)}`,
-    metaRows: [
-      { label: 'اسم المستلم', value: sale.buyerName },
-      { label: 'رقم الهاتف', value: sale.buyerPhone || 'غير مسجل' },
-      { label: 'نسبة التسعير', value: `${sale.discountRate || 100}%` },
-      { label: 'التاريخ', value: formatDateTimeAr(sale.createdAt) },
-    ],
-    tableHeaders: ['الباقة', 'العدد', 'المُسلّم', 'سعر الوحدة', 'الإجمالي'],
-    tableRows: (sale.items || []).map((i) => [
-      i.packageLabel,
-      String(i.quantity),
-      String(i.delivered),
-      `${i.unitPrice} ر.ي`,
-      `${i.unitPrice * i.quantity} ر.ي`,
-    ]),
-    summaryRows: [
-      { label: 'إجمالي الكروت', value: `${sale.totalCards} كرت` },
-      { label: 'المُسلّم حتى الآن', value: `${sale.deliveredCards} كرت` },
-      { label: 'المبلغ المدفوع', value: `${sale.paidAmount} ر.ي` },
-      { label: 'المتبقي (آجل)', value: `${sale.remainingAmount} ر.ي` },
-      { label: 'الإجمالي النهائي', value: `${sale.totalAmount} ر.ي`, highlight: true },
-    ],
-    extraSectionTitle: sale.cardNumbers && sale.cardNumbers.length > 0 ? 'أرقام الكروت الإلكترونية' : undefined,
-    extraLines: sale.cardNumbers || [],
-    fileName: `${sale.saleType === 'electronic_wholesale' ? 'جملة' : 'ورقية'}_${sale.invoiceNumber || sale.id.slice(-6)}`,
-    sharePhone: sale.buyerPhone,
-    shareText: buildWholesaleMessage(sale),
-  });
+  const buildWholesalePrintable = (sale: SaleDoc): PrintableDocumentPayload => {
+    const breakdown = buildSingleSaleBreakdown(sale, appSettings);
+    const buyerRoleText = getBuyerRoleArabicLabel(sale.buyerRole, sale.saleType);
+    const tierText = getBuyerPriceTierLabel(sale.buyerRole, sale.saleType, sale.discountRate);
+    return {
+      title: sale.saleType === 'electronic_wholesale' ? 'فاتورة كروت إلكترونية (جملة)' : 'فاتورة كروت ورقية رسمية',
+      subtitle: `رقم الفاتورة: ${sale.invoiceNumber || sale.id.slice(-6)}`,
+      metaRows: [
+        { label: 'اسم المستلم', value: sale.buyerName },
+        { label: 'نوع الحساب / التسعير', value: `${buyerRoleText} — ${tierText}` },
+        { label: 'رقم الهاتف', value: sale.buyerPhone || 'غير مسجل' },
+        { label: 'التاريخ', value: formatDateTimeAr(sale.createdAt) },
+      ],
+      tableHeaders: ['الفئة / الباقة', 'العدد', 'المُسلّم', 'سعر الوحدة', 'تفصيل الحساب (العدد × السعر = الإجمالي)'],
+      tableRows: (sale.items || []).map((i) => {
+        const unit = i.unitPrice || Math.round((i.price * (sale.discountRate || 100)) / 100);
+        return [
+          i.packageLabel,
+          formatNumEn(i.quantity),
+          formatNumEn(i.delivered),
+          `${formatNumEn(unit)} ر.ي`,
+          formatDenominationFormula(i.quantity, unit, unit * i.quantity),
+        ];
+      }),
+      breakdownTitle: `تفصيل الفئات المباعة — ${buyerRoleText} (العدد × سعر الفئة = الإجمالي)`,
+      breakdownItems: toPrintableBreakdownItems(breakdown),
+      summaryRows: [
+        { label: 'إجمالي الكروت', value: `${formatNumEn(sale.totalCards)} كرت` },
+        { label: 'المُسلّم حتى الآن', value: `${formatNumEn(sale.deliveredCards)} كرت` },
+        { label: 'المبلغ المدفوع', value: `${formatNumEn(sale.paidAmount)} ر.ي` },
+        { label: 'المتبقي (آجل)', value: `${formatNumEn(sale.remainingAmount)} ر.ي` },
+        { label: 'الإجمالي النهائي', value: `${formatNumEn(sale.totalAmount)} ر.ي`, highlight: true },
+      ],
+      extraSectionTitle: sale.cardNumbers && sale.cardNumbers.length > 0 ? 'أرقام الكروت الإلكترونية' : undefined,
+      extraLines: sale.cardNumbers || [],
+      fileName: `${sale.saleType === 'electronic_wholesale' ? 'جملة' : 'ورقية'}_${sale.invoiceNumber || sale.id.slice(-6)}`,
+      sharePhone: sale.buyerPhone,
+      shareText: buildWholesaleMessage(sale),
+    };
+  };
 
   return (
     <div className="space-y-3.5 pb-24">
@@ -376,6 +420,7 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
               onSelect={(c) => {
                 if (c.name) setCustomName(c.name);
                 if (c.phone) setCustomPhone(c.phone);
+                applyAutoPricingFromContact(c.name, c.phone);
               }}
             />
           </div>
@@ -566,11 +611,21 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
           <div className="rounded-2xl royal-header-3d border-2 border-[#D4AF37] p-3 shadow-2xl flex flex-wrap items-center justify-between gap-2">
             <div className="min-w-0">
               <div className="text-xs font-extrabold text-[#FDE68A] tabular-nums">
-                {selectedItems.length} باقات · {totalCards} كرت ({discountRate}%)
+                {selectedItems.length} باقات · {totalCards} كرت ({getBuyerRoleArabicLabel(buyerRole, isElectronic ? 'electronic_wholesale' : 'paper_invoice')} {discountRate}%)
               </div>
               <div className="text-sm font-extrabold text-white tabular-nums">
                 الإجمالي: {formatYER(totalAmount, hideNumbers)}
               </div>
+              {!hideNumbers && (
+                <div className="text-[10px] font-bold text-slate-200 tabular-nums truncate mt-0.5">
+                  {selectedItems
+                    .map((x) => {
+                      const u = Math.round((x.pkg.price * discountRate) / 100);
+                      return `فئة ${x.pkg.price}: ${x.qty}×${u}=${formatNumEn(x.qty * u)}`;
+                    })
+                    .join(' | ')}
+                </div>
+              )}
             </div>
             <div className="flex items-center gap-1.5">
               {!isElectronic && (
@@ -680,6 +735,22 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
             </div>
 
             <div className="p-4 space-y-3">
+              {/* Per-Denomination Breakdown Summary */}
+              <div className="rounded-xl bg-amber-50/70 dark:bg-amber-950/25 border border-[#D4AF37]/60 p-2.5 space-y-1">
+                <div className="text-[11px] font-extrabold text-[#1A365D] dark:text-[#FDE68A]">
+                  تفصيل الفئات ({getBuyerRoleArabicLabel(completedSale.buyerRole, completedSale.saleType)} — {getBuyerPriceTierLabel(completedSale.buyerRole, completedSale.saleType, completedSale.discountRate)}):
+                </div>
+                {buildSingleSaleBreakdown(completedSale, appSettings).map((b) => (
+                  <div
+                    key={b.key}
+                    className="flex items-center justify-between gap-2 text-[11px] font-extrabold tabular-nums"
+                  >
+                    <span className="text-slate-700 dark:text-slate-200">فئة {formatNumEn(b.denomination)} ريال</span>
+                    <span className="text-[#1A365D] dark:text-[#FDE68A]">{b.formulaText}</span>
+                  </div>
+                ))}
+              </div>
+
               <div className="rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 p-3 text-xs font-bold whitespace-pre-wrap leading-relaxed max-h-56 overflow-y-auto">
                 {buildWholesaleMessage(completedSale)}
               </div>
