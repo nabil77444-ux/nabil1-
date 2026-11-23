@@ -772,7 +772,7 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
       </button>
 
       {/* Fixed Single-Viewport Grid (2×5 Mobile, 5×2 Desktop — ZERO SCROLL!) */}
-      <div className="flex-1 min-h-0 grid grid-cols-2 md:grid-cols-5 auto-rows-fr gap-1.5 sm:gap-2 py-0.5 overflow-hidden">
+      <div className="flex-1 min-h-0 grid grid-cols-2 md:grid-cols-5 auto-rows-fr gap-2 py-0.5 px-0.5 overflow-hidden">
         {visibleReports.map((rep) => {
           const Icon = rep.icon;
           return (
@@ -780,23 +780,23 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
               key={rep.id}
               type="button"
               onClick={() => setActiveReportId(rep.id)}
-              className="royal-tile-3d relative w-full h-full min-h-0 rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37]/85 hover:border-[#D4AF37] px-2.5 py-1.5 text-right flex flex-col justify-center gap-1 shadow-md overflow-hidden"
+              className="royal-tile-3d relative w-full h-full min-h-0 rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37]/85 hover:border-[#D4AF37] px-2 py-1 text-right flex flex-col justify-center gap-1 shadow-md overflow-hidden"
             >
               <div className="flex items-center justify-between gap-1.5">
-                <span className="w-5 h-5 rounded-full bg-slate-950 border border-[#D4AF37] text-[#FDE68A] text-[10px] font-extrabold flex items-center justify-center tabular-nums shrink-0">
+                <span className="w-5 h-5 rounded-full bg-slate-950 border border-[#D4AF37] text-[#FDE68A] text-[9.5px] font-extrabold flex items-center justify-center tabular-nums shrink-0">
                   {rep.displayNum}
                 </span>
                 <div
-                  className={`w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-gradient-to-br ${rep.accent} border border-[#D4AF37]/70 text-[#FDE68A] flex items-center justify-center shadow shrink-0`}
+                  className={`w-7 h-7 sm:w-8 sm:h-8 rounded-xl bg-gradient-to-br ${rep.accent} border border-[#D4AF37]/70 text-[#FDE68A] flex items-center justify-center shadow shrink-0`}
                 >
-                  <Icon className="w-4 h-4" />
+                  <Icon className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
                 </div>
               </div>
               <div className="min-w-0">
-                <h3 className="text-[12px] sm:text-[13px] font-extrabold text-slate-900 dark:text-white leading-tight truncate">
+                <h3 className="text-[11.5px] sm:text-[12.5px] font-extrabold text-slate-900 dark:text-white leading-tight truncate">
                   {rep.title}
                 </h3>
-                <p className="text-[10px] font-bold text-slate-500 dark:text-slate-400 truncate mt-0.5">
+                <p className="text-[9.5px] font-bold text-slate-500 dark:text-slate-400 truncate mt-0.5">
                   {rep.subtitle}
                 </p>
               </div>

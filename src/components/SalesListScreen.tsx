@@ -308,7 +308,7 @@ export const SalesListScreen: React.FC<SalesListScreenProps> = ({ hideNumbers, o
   };
 
   return (
-    <div className="space-y-3.5">
+    <div className="space-y-3 safe-bottom-clear">
       {/* UPDATE 3: Royal Hero Card (Cart right, Title + Total Cards center, Official Logo left) */}
       <div className="royal-header-3d rounded-3xl border-2 border-[#D4AF37] p-4 shadow-xl flex items-center justify-between gap-3">
         <div className="w-12 h-12 rounded-2xl bg-white/15 border border-[#D4AF37] flex items-center justify-center text-[#FDE68A] shrink-0 shadow">

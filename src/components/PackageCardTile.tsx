@@ -52,7 +52,7 @@ export const PackageCardTile: React.FC<PackageCardTileProps> = React.memo(
 
     return (
       <div
-        className={`rounded-2xl border-2 ${theme.border} ${theme.cardBg} p-2 shadow-sm flex flex-col justify-between gap-1.5 transition-transform ${
+        className={`rounded-2xl border-2 ${theme.border} ${theme.cardBg} p-1.5 sm:p-2 shadow-sm flex flex-col justify-between gap-1 transition-transform ${
           qty > 0 ? 'ring-2 ring-[#D4AF37]' : ''
         }`}
       >
@@ -60,10 +60,10 @@ export const PackageCardTile: React.FC<PackageCardTileProps> = React.memo(
         <div className="flex items-center justify-between gap-1">
           <div className="flex-1 flex justify-center min-w-0">
             <div
-              className={`w-full max-w-[126px] py-0.5 px-2 rounded-full ${theme.capsuleBg} text-white shadow-sm flex items-center justify-center gap-1`}
+              className={`w-full max-w-[118px] py-0.5 px-2 rounded-full ${theme.capsuleBg} text-white shadow-sm flex items-center justify-center gap-1`}
             >
               <Coins className="w-3 h-3 text-[#FDE68A] shrink-0" />
-              <span className="text-[11.5px] sm:text-[13px] font-extrabold tabular-nums whitespace-nowrap">
+              <span className="text-[11px] sm:text-[12.5px] font-extrabold tabular-nums whitespace-nowrap">
                 {hideNumbers ? '•••' : `${pkg.price} ريال`}
               </span>
             </div>
@@ -73,12 +73,12 @@ export const PackageCardTile: React.FC<PackageCardTileProps> = React.memo(
 
         {/* Title Row: باقة X ريال + Available Badge — flex-wrap prevents ANY clipping */}
         <div className="flex flex-wrap items-center justify-between gap-x-1 gap-y-0.5 px-0.5">
-          <span className="text-[11px] sm:text-xs font-extrabold text-slate-900 dark:text-white leading-tight whitespace-nowrap">
+          <span className="text-[10.5px] sm:text-xs font-extrabold text-slate-900 dark:text-white leading-tight whitespace-nowrap">
             باقة {hideNumbers ? '•••' : pkg.price} ريال
           </span>
           {showStock && (
             <span
-              className={`shrink-0 px-1.5 py-0.5 rounded-full text-[9.5px] sm:text-[10px] font-extrabold border tabular-nums whitespace-nowrap leading-none ${
+              className={`shrink-0 px-1.5 py-0.5 rounded-full text-[9px] sm:text-[10px] font-extrabold border tabular-nums whitespace-nowrap leading-none ${
                 stockZero
                   ? 'bg-red-50 dark:bg-red-950/70 border-red-400 text-red-700 dark:text-red-300'
                   : 'bg-emerald-50 dark:bg-emerald-950/70 border-emerald-500 text-emerald-800 dark:text-emerald-300'

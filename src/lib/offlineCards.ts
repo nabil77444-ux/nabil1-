@@ -279,3 +279,39 @@ export function offlineSaleToSaleDoc(q: OfflineQueuedSale): SaleDoc {
     updatedAt: fakeTs,
   };
 }
+
+/**
+ * Clears only the local offline sales queue (used during sales-only reset).
+ */
+export function clearOfflineSalesQueueOnly(): void {
+  try {
+    localStorage.removeItem(OFFLINE_QUEUE_KEY);
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+/**
+ * Clears all locally cached card pools, local card locks, and offline sales queue
+ * (used during Super Admin full app data reset).
+ */
+export function clearAllLocalOfflineCardCaches(): void {
+  memoryLockedCards.clear();
+  memoryCardPoolByOwner.clear();
+  try {
+    localStorage.removeItem(LOCKED_CARDS_KEY);
+    localStorage.removeItem(OFFLINE_QUEUE_KEY);
+    const keysToRemove: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(CACHED_CARDS_PREFIX)) {
+        keysToRemove.push(k);
+      }
+    }
+    for (const k of keysToRemove) {
+      localStorage.removeItem(k);
+    }
+  } catch {
+    // Ignore storage errors
+  }
+}

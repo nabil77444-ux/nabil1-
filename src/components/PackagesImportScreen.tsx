@@ -199,7 +199,7 @@ export const PackagesImportScreen: React.FC<PackagesImportScreenProps> = ({ hide
   };
 
   return (
-    <div className="space-y-3.5">
+    <div className="space-y-3 safe-bottom-clear">
       {/* Header Banner */}
       <div className="royal-header-3d rounded-3xl border-2 border-[#D4AF37] p-4 shadow-xl flex items-center justify-between gap-3">
         <div className="flex items-center gap-2.5 min-w-0">

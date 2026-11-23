@@ -1,5 +1,6 @@
 import React, { Suspense, lazy, useEffect, useState } from 'react';
 import {
+  AlertTriangle,
   ArrowRight,
   Bell,
   BellRing,
@@ -15,6 +16,7 @@ import {
   Moon,
   Newspaper,
   Plus,
+  RotateCcw,
   Save,
   ScanFace,
   Search,
@@ -179,14 +181,14 @@ const SubScreenShell: React.FC<SubScreenShellProps> = ({
     <main
       className={
         fixedViewport
-          ? 'flex-1 min-h-0 w-full max-w-5xl mx-auto px-2.5 py-2 safe-x overflow-hidden flex flex-col'
-          : 'flex-1 w-full max-w-5xl mx-auto p-3 sm:p-5 pb-12 safe-x'
+          ? 'flex-1 min-h-0 w-full max-w-5xl mx-auto px-3.5 py-2.5 safe-x overflow-hidden flex flex-col'
+          : 'flex-1 w-full max-w-5xl mx-auto px-3.5 pt-3 pb-[calc(env(safe-area-inset-bottom,0px)+28px)] sm:px-5 sm:pt-4 safe-x'
       }
     >
       {children}
     </main>
 
-    <footer className="shrink-0 bg-[#0F172A] border-t-2 border-[#D4AF37]/80 safe-bottom py-1.5 text-center">
+    <footer className="shrink-0 bg-[#0F172A] border-t-2 border-[#D4AF37]/80 pt-1.5 pb-[calc(env(safe-area-inset-bottom,0px)+8px)] text-center">
       <span className="text-[11px] font-extrabold text-[#FDE68A]">
         {SUPER_ADMIN_CONFIG.developerCredit}
       </span>
@@ -227,6 +229,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
     updateAppSettings,
     enablePushNotifications,
     exportCloudBackup,
+    resetAppData,
   } = useFirebase();
   const { notifySuccess, notifyError } = useFeedback();
 
@@ -269,6 +272,14 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
   const [pendingBioMethod, setPendingBioMethod] = useState<BiometricMethod | null>(null);
   const [settingsBioPass, setSettingsBioPass] = useState('');
   const [enrollingSettingsBio, setEnrollingSettingsBio] = useState(false);
+
+  // Super Admin Only: App Data Reset Modal States
+  const [resetScope, setResetScope] = useState<'sales_only' | 'full_reset' | null>(null);
+  const [resetPassword, setResetPassword] = useState('');
+  const [resetConfirmPhrase, setResetConfirmPhrase] = useState('');
+  const [resetAckChecked, setResetAckChecked] = useState(false);
+  const [resettingData, setResettingData] = useState(false);
+  const [resetError, setResetError] = useState('');
 
   useEffect(() => {
     setNewsTicker(appSettings.newsTicker);
@@ -598,12 +609,12 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
         subtitle={SUPER_ADMIN_CONFIG.developerCredit}
         onBack={onBack}
       >
-        <div className="space-y-4">
+        <div className="space-y-3.5 safe-bottom-clear">
           {/* Device & Security Preferences */}
-          <div className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37]/70 p-4 shadow-md space-y-3">
+          <div className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37]/70 p-3.5 shadow-md space-y-2.5">
             <h2 className="text-sm font-extrabold text-[#1A365D] dark:text-[#FDE68A] flex items-center gap-2">
-              <span className="w-7 h-7 rounded-lg bg-[#1A365D] text-[#FDE68A] flex items-center justify-center">
-                <Settings className="w-4 h-4" />
+              <span className="w-6 h-6 rounded-lg bg-[#1A365D] text-[#FDE68A] flex items-center justify-center shrink-0">
+                <Settings className="w-3.5 h-3.5" />
               </span>
               تفضيلات الجهاز والأمان
             </h2>
@@ -1101,13 +1112,222 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                 <button
                   type="submit"
                   disabled={savingSettings}
-                  className="w-full min-h-[48px] royal-btn-3d text-white font-extrabold text-sm rounded-xl flex items-center justify-center gap-2"
+                  className="w-full min-h-[46px] royal-btn-3d text-white font-extrabold text-sm rounded-xl flex items-center justify-center gap-2"
                 >
                   <Save className="w-4 h-4 text-[#FDE68A]" />
                   <span>{savingSettings ? 'جاري الحفظ السحابي...' : 'حفظ جميع الإعدادات وتعميمها فوراً'}</span>
                 </button>
               </div>
             </form>
+          )}
+
+          {/* Super Admin Exclusive: App Data Reset Box (STRICTLY HIDDEN & BLOCKED FOR AGENTS & CLIENTS) */}
+          {isAdmin && (
+            <div className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#DC2626]/80 p-3.5 shadow-md space-y-3">
+              <div className="flex items-start gap-2.5">
+                <span className="w-7 h-7 rounded-lg bg-[#DC2626] text-white flex items-center justify-center shrink-0 shadow-sm mt-0.5">
+                  <AlertTriangle className="w-4 h-4" />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <h2 className="text-sm font-extrabold text-[#DC2626] dark:text-red-400">
+                    تصفير التطبيق وحذف البيانات
+                  </h2>
+                  <p className="text-[11px] font-bold text-slate-600 dark:text-slate-300 mt-0.5 leading-relaxed">
+                    خيارات خاصة بالمدير العام فقط لإعادة تهيئة البيانات عند الحاجة (مع الاحتفاظ بحساب المدير الأساسي وإعدادات الشبكة وسجل التدقيق الرقابي).
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setResetScope('sales_only');
+                    setResetPassword('');
+                    setResetConfirmPhrase('');
+                    setResetAckChecked(false);
+                    setResetError('');
+                  }}
+                  className="min-h-[46px] rounded-xl border-2 border-amber-500/90 bg-amber-50 dark:bg-amber-950/30 hover:bg-amber-100 dark:hover:bg-amber-950/50 px-3 py-2 text-right transition-colors active:scale-[0.99]"
+                >
+                  <div className="flex items-center gap-1.5 text-xs font-extrabold text-amber-900 dark:text-amber-200">
+                    <RotateCcw className="w-3.5 h-3.5 shrink-0" />
+                    <span>تصفير المبيعات والتقارير فقط</span>
+                  </div>
+                  <p className="text-[10.5px] font-bold text-amber-800/90 dark:text-amber-300/90 mt-0.5">
+                    حذف فواتير المبيعات وتصفير عداد المباع مع بقاء الكروت والعملاء.
+                  </p>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setResetScope('full_reset');
+                    setResetPassword('');
+                    setResetConfirmPhrase('');
+                    setResetAckChecked(false);
+                    setResetError('');
+                  }}
+                  className="min-h-[46px] rounded-xl border-2 border-[#DC2626] bg-red-50 dark:bg-red-950/35 hover:bg-red-100 dark:hover:bg-red-950/55 px-3 py-2 text-right transition-colors active:scale-[0.99]"
+                >
+                  <div className="flex items-center gap-1.5 text-xs font-extrabold text-[#DC2626] dark:text-red-300">
+                    <Trash2 className="w-3.5 h-3.5 shrink-0" />
+                    <span>تصفير شامل لبيانات التطبيق</span>
+                  </div>
+                  <p className="text-[10.5px] font-bold text-red-700/90 dark:text-red-300/90 mt-0.5">
+                    حذف المبيعات، العملاء، الدفتر، الكروت، التغذية، والإشعارات وتصفير الأرصدة.
+                  </p>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Super Admin Double-Confirmation Security Modal for Data Reset */}
+          {isAdmin && resetScope && (
+            <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/75 p-4 safe-top safe-bottom">
+              <form
+                onSubmit={async (e) => {
+                  e.preventDefault();
+                  if (!isAdmin || resettingData) return;
+                  if (resetConfirmPhrase.trim() !== 'تأكيد التصفير') {
+                    setResetError('يرجى كتابة عبارة «تأكيد التصفير» بدقة في الحقل المخصص.');
+                    return;
+                  }
+                  if (!resetAckChecked) {
+                    setResetError('يرجى تفعيل مربع الإقرار النهائي قبل المتابعة.');
+                    return;
+                  }
+                  if (resetPassword.trim().length < 6) {
+                    setResetError('يرجى إدخال كلمة مرور المدير العام الصحيحة.');
+                    return;
+                  }
+                  setResetError('');
+                  setResettingData(true);
+                  try {
+                    const res = await resetAppData(resetScope, resetPassword);
+                    if (res.ok) {
+                      setResetScope(null);
+                      setResetPassword('');
+                      setResetConfirmPhrase('');
+                      setResetAckChecked(false);
+                    } else {
+                      setResetError(res.error || 'تعذر تنفيذ عملية التصفير.');
+                    }
+                  } finally {
+                    setResettingData(false);
+                  }
+                }}
+                className="w-full max-w-md rounded-3xl bg-white dark:bg-slate-900 border-2 border-[#DC2626] p-4 sm:p-5 shadow-2xl space-y-3"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-[#DC2626] dark:text-red-400">
+                    <AlertTriangle className="w-5 h-5 shrink-0" />
+                    <h3 className="text-sm font-extrabold">
+                      {resetScope === 'sales_only'
+                        ? 'تأكيد تصفير المبيعات والتقارير فقط'
+                        : 'تأكيد التصفير الشامل لبيانات التطبيق'}
+                    </h3>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={resettingData}
+                    onClick={() => setResetScope(null)}
+                    className="w-8 h-8 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+
+                <div className="rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-300 dark:border-red-900 p-2.5 text-[11.5px] font-bold text-red-800 dark:text-red-200 leading-relaxed">
+                  {resetScope === 'sales_only'
+                    ? 'تحذير: سيتم حذف جميع فواتير المبيعات والتقارير وتصفير عداد الكروت المباعة بشكل نهائي ولا يمكن التراجع عن ذلك. سيبقى رصيد الكروت المتاحة وحسابات العملاء كما هو.'
+                    : 'تحذير نهائي: سيتم حذف جميع المبيعات والعملاء وقيود الدفتر والكروت وطلبات التغذية والانضمام والإشعارات وتصفير أرصدة الباقات والحسابات نهائياً. سيبقى حساب المدير العام وإعدادات الشبكة فقط.'}
+                </div>
+
+                <div>
+                  <label className="block text-xs font-extrabold mb-1 text-slate-800 dark:text-slate-200">
+                    1. أدخل كلمة مرور المدير العام ({SUPER_ADMIN_CONFIG.name})
+                  </label>
+                  <input
+                    type="password"
+                    required
+                    disabled={resettingData}
+                    value={resetPassword}
+                    onChange={(e) => setResetPassword(e.target.value)}
+                    placeholder="كلمة مرور المدير العام..."
+                    className="w-full min-h-[42px] rounded-xl border-2 border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold text-slate-900 dark:text-white focus:border-[#DC2626] focus:outline-none"
+                    autoFocus
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-extrabold mb-1 text-slate-800 dark:text-slate-200">
+                    2. اكتب عبارة التأكيد: <span className="text-[#DC2626] dark:text-red-400">تأكيد التصفير</span>
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    disabled={resettingData}
+                    value={resetConfirmPhrase}
+                    onChange={(e) => setResetConfirmPhrase(e.target.value)}
+                    placeholder="اكتب: تأكيد التصفير"
+                    className="w-full min-h-[42px] rounded-xl border-2 border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold text-slate-900 dark:text-white focus:border-[#DC2626] focus:outline-none"
+                  />
+                </div>
+
+                <label className="flex items-start gap-2 rounded-xl bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 p-2.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    disabled={resettingData}
+                    checked={resetAckChecked}
+                    onChange={(e) => setResetAckChecked(e.target.checked)}
+                    className="w-4 h-4 mt-0.5 accent-[#DC2626] shrink-0"
+                  />
+                  <span className="text-[11px] font-extrabold text-slate-700 dark:text-slate-200 leading-snug">
+                    أُقرّ بأن هذه العملية نهائية ولا يمكن التراجع عنها بعد التنفيذ، وأتحمل مسؤولية حذف البيانات المحددة.
+                  </span>
+                </label>
+
+                {resetError && (
+                  <p className="text-xs font-extrabold text-[#DC2626] dark:text-red-400 bg-red-50 dark:bg-red-950/50 border border-red-300 dark:border-red-900 rounded-xl px-3 py-2">
+                    {resetError}
+                  </p>
+                )}
+
+                <div className="grid grid-cols-2 gap-2 pt-1">
+                  <button
+                    type="button"
+                    disabled={resettingData}
+                    onClick={() => setResetScope(null)}
+                    className="min-h-[42px] rounded-xl border-2 border-slate-300 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-200 text-xs font-extrabold"
+                  >
+                    إلغاء
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={
+                      resettingData ||
+                      !resetAckChecked ||
+                      resetConfirmPhrase.trim() !== 'تأكيد التصفير' ||
+                      resetPassword.trim().length < 6
+                    }
+                    className="min-h-[42px] rounded-xl bg-[#DC2626] hover:bg-red-700 disabled:opacity-45 text-white text-xs font-extrabold flex items-center justify-center gap-1.5 shadow-md"
+                  >
+                    {resettingData ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span>جاري التصفير...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Trash2 className="w-4 h-4" />
+                        <span>تنفيذ التصفير الآن</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </form>
+            </div>
           )}
         </div>
       </SubScreenShell>

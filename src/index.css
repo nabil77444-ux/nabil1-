@@ -2,6 +2,12 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 @layer base {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
   html,
   body,
   #root {
@@ -129,6 +135,10 @@
 
 .safe-bottom-padded {
   padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 0.5rem);
+}
+
+.safe-bottom-clear {
+  padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 24px);
 }
 
 .safe-x {

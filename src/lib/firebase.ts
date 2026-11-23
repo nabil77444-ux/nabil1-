@@ -6,6 +6,7 @@ import {
   setPersistence,
 } from 'firebase/auth';
 import {
+  CACHE_SIZE_UNLIMITED,
   doc,
   getDocFromServer,
   getFirestore,
@@ -13,6 +14,7 @@ import {
   memoryLocalCache,
   persistentLocalCache,
   persistentMultipleTabManager,
+  persistentSingleTabManager,
   type Firestore,
 } from 'firebase/firestore';
 import { getMessaging, getToken, isSupported as isMessagingSupported } from 'firebase/messaging';
@@ -30,43 +32,58 @@ function isEmbeddedIframe(): boolean {
 }
 
 // CRITICAL: Connect to the provisioned Enterprise Firestore database ID using:
-// - `experimentalForceLongPolling: true` to bypass hanging WebChannel streams in mobile networks,
-//   carrier proxies, and sandboxed preview iframes (prevents 10-second offline timeout).
-// - `memoryLocalCache()` inside embedded iframes (zero IndexedDB partition stalls) and
-//   `persistentLocalCache({ tabManager: persistentMultipleTabManager() })` in standalone/PWA/APK
-//   for full Offline-First persistence.
+// - Full Offline-First IndexedDB persistence (`CACHE_SIZE_UNLIMITED`) in standalone/PWA/Android APK
+//   with multi-tab manager and automatic single-tab fallback for Android WebView reliability.
+// - `memoryLocalCache()` inside embedded iframes to avoid partitioned-storage stalls.
 function createOfflineFirstFirestore(): Firestore {
   const embedded = isEmbeddedIframe();
-  try {
-    const localCache = embedded
-      ? memoryLocalCache()
-      : persistentLocalCache({ tabManager: persistentMultipleTabManager() });
+  const pollingOption = embedded
+    ? { experimentalForceLongPolling: true }
+    : { experimentalAutoDetectLongPolling: true };
 
-    return initializeFirestore(
-      app,
-      {
-        localCache,
-        ...(embedded
-          ? { experimentalForceLongPolling: true }
-          : { experimentalAutoDetectLongPolling: true }),
-      },
-      firebaseConfig.firestoreDatabaseId
-    );
-  } catch {
+  if (!embedded) {
     try {
       return initializeFirestore(
         app,
         {
-          localCache: memoryLocalCache(),
-          ...(embedded
-            ? { experimentalForceLongPolling: true }
-            : { experimentalAutoDetectLongPolling: true }),
+          localCache: persistentLocalCache({
+            tabManager: persistentMultipleTabManager(),
+            cacheSizeBytes: CACHE_SIZE_UNLIMITED,
+          }),
+          ...pollingOption,
         },
         firebaseConfig.firestoreDatabaseId
       );
     } catch {
-      return getFirestore(app, firebaseConfig.firestoreDatabaseId);
+      try {
+        return initializeFirestore(
+          app,
+          {
+            localCache: persistentLocalCache({
+              tabManager: persistentSingleTabManager({}),
+              cacheSizeBytes: CACHE_SIZE_UNLIMITED,
+            }),
+            ...pollingOption,
+          },
+          firebaseConfig.firestoreDatabaseId
+        );
+      } catch {
+        // Fall through to memory cache / existing instance
+      }
     }
+  }
+
+  try {
+    return initializeFirestore(
+      app,
+      {
+        localCache: memoryLocalCache(),
+        ...pollingOption,
+      },
+      firebaseConfig.firestoreDatabaseId
+    );
+  } catch {
+    return getFirestore(app, firebaseConfig.firestoreDatabaseId);
   }
 }
 

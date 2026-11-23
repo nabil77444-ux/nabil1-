@@ -44,11 +44,11 @@ interface HomeScreenProps {
 /**
  * Custom crisp colored 3D Royal SVG Icons (slightly scaled for balanced proportions & clearer text)
  */
-const TileIconArtwork: React.FC<{ index: number }> = ({ index }) => {
+const TileIconArtwork: React.FC<{ index: number }> = React.memo(({ index }) => {
   switch (index) {
     case 1: // سلة تسوق زرقاء بموجات WiFi
       return (
-        <svg viewBox="0 0 48 48" className="w-7 h-7 sm:w-9 sm:h-9 shrink-0 drop-shadow-sm" aria-hidden="true">
+        <svg viewBox="0 0 48 48" className="w-6 h-6 sm:w-8 sm:h-8 shrink-0 drop-shadow-sm" aria-hidden="true">
           <path d="M18 11a10 10 0 0 1 12 0" fill="none" stroke="#D4AF37" strokeWidth="2.8" strokeLinecap="round" />
           <path d="M21 15a6 6 0 0 1 6 0" fill="none" stroke="#2563EB" strokeWidth="2.6" strokeLinecap="round" />
           <circle cx="24" cy="18.2" r="1.8" fill="#1A365D" />
@@ -59,7 +59,7 @@ const TileIconArtwork: React.FC<{ index: number }> = ({ index }) => {
       );
     case 2: // بطاقات زرقاء وذهبية بأيقونة WiFi
       return (
-        <svg viewBox="0 0 48 48" className="w-7 h-7 sm:w-9 sm:h-9 shrink-0 drop-shadow-sm" aria-hidden="true">
+        <svg viewBox="0 0 48 48" className="w-6 h-6 sm:w-8 sm:h-8 shrink-0 drop-shadow-sm" aria-hidden="true">
           <rect x="6" y="14" width="28" height="20" rx="4" fill="#D4AF37" stroke="#92400E" strokeWidth="1.6" />
           <rect x="13" y="18" width="29" height="20" rx="4" fill="#1A365D" stroke="#D4AF37" strokeWidth="2" />
           <rect x="17" y="23" width="8" height="5" rx="1" fill="#FDE68A" />
@@ -70,7 +70,7 @@ const TileIconArtwork: React.FC<{ index: number }> = ({ index }) => {
       );
     case 3: // ورقة فاتورة زرقاء بعلامة $ ذهبية
       return (
-        <svg viewBox="0 0 48 48" className="w-7 h-7 sm:w-9 sm:h-9 shrink-0 drop-shadow-sm" aria-hidden="true">
+        <svg viewBox="0 0 48 48" className="w-6 h-6 sm:w-8 sm:h-8 shrink-0 drop-shadow-sm" aria-hidden="true">
           <path d="M11 7h22l6 6v28l-4-2.5L31 41l-4-2.5L23 41l-4-2.5L15 41l-4-2.5V7z" fill="#EFF6FF" stroke="#1E40AF" strokeWidth="2.4" strokeLinejoin="round" />
           <path d="M33 7v6h6" fill="#BFDBFE" stroke="#1E40AF" strokeWidth="2" strokeLinejoin="round" />
           <line x1="16" y1="18" x2="26" y2="18" stroke="#2563EB" strokeWidth="2.4" strokeLinecap="round" />
@@ -81,7 +81,7 @@ const TileIconArtwork: React.FC<{ index: number }> = ({ index }) => {
       );
     case 4: // 3 أشخاص أزرق وذهبي
       return (
-        <svg viewBox="0 0 48 48" className="w-7 h-7 sm:w-9 sm:h-9 shrink-0 drop-shadow-sm" aria-hidden="true">
+        <svg viewBox="0 0 48 48" className="w-6 h-6 sm:w-8 sm:h-8 shrink-0 drop-shadow-sm" aria-hidden="true">
           <circle cx="13" cy="18" r="4.5" fill="#D4AF37" />
           <path d="M6 34c0-4 3-7 7-7s7 3 7 7" fill="#D4AF37" opacity="0.9" />
           <circle cx="35" cy="18" r="4.5" fill="#D4AF37" />
@@ -92,7 +92,7 @@ const TileIconArtwork: React.FC<{ index: number }> = ({ index }) => {
       );
     case 5: // صندوق هدية أزرق بشريط ذهبي
       return (
-        <svg viewBox="0 0 48 48" className="w-7 h-7 sm:w-9 sm:h-9 shrink-0 drop-shadow-sm" aria-hidden="true">
+        <svg viewBox="0 0 48 48" className="w-6 h-6 sm:w-8 sm:h-8 shrink-0 drop-shadow-sm" aria-hidden="true">
           <rect x="9" y="20" width="30" height="20" rx="3" fill="#1E40AF" stroke="#1A365D" strokeWidth="2" />
           <rect x="7" y="14" width="34" height="7" rx="2.5" fill="#2563EB" stroke="#1A365D" strokeWidth="1.8" />
           <rect x="21.5" y="14" width="5" height="26" fill="#D4AF37" />
@@ -101,7 +101,7 @@ const TileIconArtwork: React.FC<{ index: number }> = ({ index }) => {
       );
     case 6: // دائرة خضراء بعلامة + بيضاء
       return (
-        <svg viewBox="0 0 48 48" className="w-7 h-7 sm:w-9 sm:h-9 shrink-0 drop-shadow-sm" aria-hidden="true">
+        <svg viewBox="0 0 48 48" className="w-6 h-6 sm:w-8 sm:h-8 shrink-0 drop-shadow-sm" aria-hidden="true">
           <circle cx="24" cy="24" r="17" fill="#10B981" stroke="#065F46" strokeWidth="2.2" />
           <circle cx="24" cy="24" r="14" fill="none" stroke="#A7F3D0" strokeWidth="1.2" opacity="0.6" />
           <path d="M24 14v20M14 24h20" stroke="#FFFFFF" strokeWidth="4.2" strokeLinecap="round" />
@@ -109,7 +109,7 @@ const TileIconArtwork: React.FC<{ index: number }> = ({ index }) => {
       );
     case 7: // شخص مدير وشارة زرقاء
       return (
-        <svg viewBox="0 0 48 48" className="w-7 h-7 sm:w-9 sm:h-9 shrink-0 drop-shadow-sm" aria-hidden="true">
+        <svg viewBox="0 0 48 48" className="w-6 h-6 sm:w-8 sm:h-8 shrink-0 drop-shadow-sm" aria-hidden="true">
           <circle cx="21" cy="15" r="6.5" fill="#1A365D" stroke="#D4AF37" strokeWidth="1.8" />
           <path d="M9 38c0-6.5 5.2-11 12-11s12 4.5 12 11" fill="#1E40AF" stroke="#1A365D" strokeWidth="2" />
           <polygon points="21,27 18.5,33 21,36 23.5,33" fill="#D4AF37" />
@@ -119,7 +119,7 @@ const TileIconArtwork: React.FC<{ index: number }> = ({ index }) => {
       );
     default: // أعمدة زرقاء وسهم صاعد برتقالي
       return (
-        <svg viewBox="0 0 48 48" className="w-7 h-7 sm:w-9 sm:h-9 shrink-0 drop-shadow-sm" aria-hidden="true">
+        <svg viewBox="0 0 48 48" className="w-6 h-6 sm:w-8 sm:h-8 shrink-0 drop-shadow-sm" aria-hidden="true">
           <rect x="8" y="28" width="7" height="12" rx="1.8" fill="#60A5FA" stroke="#1E40AF" strokeWidth="1.5" />
           <rect x="19" y="21" width="7" height="19" rx="1.8" fill="#2563EB" stroke="#1A365D" strokeWidth="1.5" />
           <rect x="30" y="15" width="7" height="25" rx="1.8" fill="#1A365D" stroke="#D4AF37" strokeWidth="1.5" />
@@ -128,7 +128,8 @@ const TileIconArtwork: React.FC<{ index: number }> = ({ index }) => {
         </svg>
       );
   }
-};
+});
+TileIconArtwork.displayName = 'TileIconArtwork';
 
 interface GridTileItem {
   number: number;
@@ -139,7 +140,7 @@ interface GridTileItem {
   visible: boolean;
 }
 
-export const HomeScreen: React.FC<HomeScreenProps> = ({
+export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
   activeRoute,
   onNavigate,
   onOpenSidebar,
@@ -411,13 +412,13 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
         </div>
       </div>
 
-      {/* MAIN CONTENT BODY — Strictly 100% Viewport Fitted (ZERO SCROLL!) */}
-      <main className="flex-1 min-h-0 flex flex-col w-full max-w-5xl mx-auto px-2.5 pt-1.5 pb-1.5 gap-1.5 overflow-hidden">
+      {/* MAIN CONTENT BODY — Strictly 100% Viewport Fitted with Balanced 4-Sided Margins (ZERO SCROLL!) */}
+      <main className="flex-1 min-h-0 flex flex-col w-full max-w-5xl mx-auto px-3.5 pt-2 pb-2 gap-1.5 overflow-hidden safe-x">
         {/* 3. CONFIGURABLE HERO SLIDER */}
         {sliderEnabled && (
           <section
             aria-label="معرض راوتر MikroTik وشبكة طيبة نت"
-            className="relative shrink-0 h-[13.5vh] min-h-[82px] max-h-[140px] sm:h-[16.5vh] rounded-2xl overflow-hidden border-2 border-[#D4AF37] shadow-lg bg-[#0F172A]"
+            className="relative shrink-0 h-[13vh] min-h-[78px] max-h-[132px] sm:h-[15.5vh] rounded-2xl overflow-hidden border-2 border-[#D4AF37] shadow-lg bg-[#0F172A]"
           >
             {slides.map((slide, idx) => (
               <div
@@ -517,25 +518,25 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
           )}
         </section>
 
-        {/* 5. THE 8-ICON 3D ROYAL GRID — Compact Balanced Tiles + Larger Clearer Arabic Titles (ZERO SCROLL!) */}
+        {/* 5. THE 8-ICON 3D ROYAL GRID — Compact Balanced Tiles + Full 4-Sided Visible Gold Borders (ZERO SCROLL!) */}
         <section
           aria-label="الأيقونات الرئيسية الثماني"
-          className="flex-1 min-h-0 grid grid-cols-2 md:grid-cols-4 auto-rows-fr gap-1.5 sm:gap-2 py-0.5"
+          className="flex-1 min-h-0 grid grid-cols-2 md:grid-cols-4 auto-rows-fr gap-2 sm:gap-2.5 py-0.5 px-0.5"
         >
           {tiles.map((tile) => (
             <button
               key={tile.route}
               type="button"
               onClick={() => onNavigate(tile.route)}
-              className="royal-tile-3d relative w-full h-full min-h-0 rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] px-2 py-1.5 sm:px-2.5 sm:py-2 flex items-center justify-between gap-1.5 overflow-hidden group"
+              className="royal-tile-3d relative w-full h-full min-h-0 rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] px-2 py-1 sm:px-2.5 sm:py-1.5 flex items-center justify-between gap-1 overflow-hidden group"
             >
               {/* Right (RTL): Compact Black Circle with Gold Border Number */}
-              <span className="w-5 h-5 sm:w-6 sm:h-6 rounded-full bg-slate-950 border-2 border-[#D4AF37] text-[#FDE68A] text-[10px] sm:text-[11px] font-extrabold flex items-center justify-center shadow shrink-0 tabular-nums">
+              <span className="w-5 h-5 sm:w-6 sm:h-6 rounded-full bg-slate-950 border-2 border-[#D4AF37] text-[#FDE68A] text-[9.5px] sm:text-[10.5px] font-extrabold flex items-center justify-center shadow shrink-0 tabular-nums">
                 {tile.number}
               </span>
 
-              {/* Center: Slightly Larger Crisp Arabic Title */}
-              <span className="flex-1 min-w-0 text-center text-[13px] sm:text-[15px] font-extrabold text-slate-900 dark:text-white leading-tight line-clamp-2 px-0.5">
+              {/* Center: Crisp Arabic Title */}
+              <span className="flex-1 min-w-0 text-center text-[12.5px] sm:text-[14px] font-extrabold text-slate-900 dark:text-white leading-tight line-clamp-2 px-0.5">
                 {tile.title}
               </span>
 
@@ -547,7 +548,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
               {/* Live Alert / Stock Counter Badge Top-Left */}
               {tile.badgeCount !== undefined && (
                 <span
-                  className={`absolute top-1 left-1 min-w-[19px] h-[17px] px-1.5 rounded-full text-[10px] font-extrabold flex items-center justify-center shadow tabular-nums ${
+                  className={`absolute top-1 left-1 min-w-[18px] h-[16px] px-1 rounded-full text-[9.5px] font-extrabold flex items-center justify-center shadow tabular-nums ${
                     tile.badgeVariant === 'emerald'
                       ? 'bg-emerald-600 text-white'
                       : 'bg-[#DC2626] text-white'
@@ -561,12 +562,12 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
         </section>
       </main>
 
-      {/* 6. FIXED NAVY GOLD-BORDERED BOTTOM NAVIGATION BAR with Safe Area Bottom Inset */}
+      {/* 6. FIXED NAVY GOLD-BORDERED BOTTOM NAVIGATION BAR with Safe Area Bottom Clearance */}
       <nav
         aria-label="التنقل السفلي"
-        className="shrink-0 bg-[#0F172A] dark:bg-slate-950 border-t-2 border-[#D4AF37] safe-bottom z-20"
+        className="shrink-0 bg-[#0F172A] dark:bg-slate-950 border-t-2 border-[#D4AF37] pb-[calc(env(safe-area-inset-bottom,0px)+8px)] z-20"
       >
-        <div className="px-1.5 py-1 grid grid-cols-5 items-center">
+        <div className="px-2 pt-1 pb-0.5 grid grid-cols-5 items-center gap-1">
           {[
             { route: 'home' as AppRoute, label: 'الرئيسية', icon: Home },
             { route: 'direct_sale' as AppRoute, label: 'البيع المباشر', icon: Zap },
@@ -581,12 +582,12 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                 key={navItem.route}
                 type="button"
                 onClick={() => onNavigate(navItem.route)}
-                className={`min-h-[42px] rounded-xl flex flex-col items-center justify-center gap-0.5 transition-all ${
+                className={`min-h-[40px] rounded-xl flex flex-col items-center justify-center gap-0.5 transition-all ${
                   isActive ? 'text-[#FDE68A] bg-white/10' : 'text-slate-300 hover:text-white'
                 }`}
               >
-                <Icon className={`w-4 h-4 sm:w-5 sm:h-5 ${isActive ? 'text-[#D4AF37]' : ''}`} />
-                <span className="text-[10px] font-extrabold whitespace-nowrap">{navItem.label}</span>
+                <Icon className={`w-4 h-4 sm:w-[18px] sm:h-[18px] ${isActive ? 'text-[#D4AF37]' : ''}`} />
+                <span className="text-[9.5px] sm:text-[10px] font-extrabold whitespace-nowrap">{navItem.label}</span>
               </button>
             );
           })}
@@ -594,4 +595,5 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
       </nav>
     </div>
   );
-};
+});
+HomeScreen.displayName = 'HomeScreen';

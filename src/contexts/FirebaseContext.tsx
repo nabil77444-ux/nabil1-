@@ -1,6 +1,8 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  EmailAuthProvider,
   onAuthStateChanged,
+  reauthenticateWithCredential,
   signOut as firebaseSignOut,
   type User as FirebaseUser,
 } from 'firebase/auth';
@@ -59,6 +61,8 @@ import {
 } from '../lib/biometric';
 import {
   appendCachedAvailableCards,
+  clearAllLocalOfflineCardCaches,
+  clearOfflineSalesQueueOnly,
   consumeCachedAvailableCards,
   enqueueOfflineSale,
   getCachedAvailableCards,
@@ -217,9 +221,13 @@ interface FirebaseContextValue {
   transferClientsToAgent: (clientUids: string[], targetAgentId: string) => Promise<void>;
   deleteManagedUser: (user: UserProfile) => Promise<void>;
   resolvePasswordReset: (req: PasswordResetRequest, status: 'approved' | 'rejected') => Promise<void>;
-  // Push & Backup
+  // Push, Backup & Super Admin Reset
   enablePushNotifications: () => Promise<boolean>;
   exportCloudBackup: () => Promise<void>;
+  resetAppData: (
+    scope: 'sales_only' | 'full_reset',
+    adminPassword: string
+  ) => Promise<{ ok: boolean; error?: string; deletedCount: number }>;
 }
 
 const FirebaseContext = createContext<FirebaseContextValue | null>(null);
@@ -227,6 +235,8 @@ const FirebaseContext = createContext<FirebaseContextValue | null>(null);
 const CACHE_PROFILE_KEY = 'taibah_cached_profile_v1';
 const CACHE_PACKAGES_KEY = 'taibah_cached_packages_v1';
 const CACHE_SETTINGS_KEY = 'taibah_cached_settings_v1';
+const CACHE_SALES_PREFIX = 'taibah_cached_sales_v1_';
+const CACHE_CUSTOMERS_PREFIX = 'taibah_cached_customers_v1_';
 
 function readCachedJson<T>(key: string, fallback: T): T {
   try {
@@ -284,8 +294,16 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [pendingOfflineSales, setPendingOfflineSales] = useState<OfflineQueuedSale[]>(() =>
     getPendingOfflineSales()
   );
-  const [sales, setSales] = useState<SaleDoc[]>([]);
-  const [customers, setCustomers] = useState<CustomerAccount[]>([]);
+  const [sales, setSales] = useState<SaleDoc[]>(() =>
+    cachedProfileInitial?.uid
+      ? readCachedJson<SaleDoc[]>(`${CACHE_SALES_PREFIX}${cachedProfileInitial.uid}`, [])
+      : []
+  );
+  const [customers, setCustomers] = useState<CustomerAccount[]>(() =>
+    cachedProfileInitial?.uid
+      ? readCachedJson<CustomerAccount[]>(`${CACHE_CUSTOMERS_PREFIX}${cachedProfileInitial.uid}`, [])
+      : []
+  );
   const [ledgerEntries, setLedgerEntries] = useState<LedgerEntry[]>([]);
   const [notifications, setNotifications] = useState<NotificationDoc[]>([]);
   const [pendingRegistrations, setPendingRegistrations] = useState<RegistrationRequest[]>([]);
@@ -937,6 +955,10 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               .map((d) => ({ id: d.id, ...(d.data() as Omit<SaleDoc, 'id'>) }))
               .sort((a, b) => (b.createdAt?.toMillis?.() ?? 0) - (a.createdAt?.toMillis?.() ?? 0));
             setSales(list);
+            writeCachedJson(
+              `${CACHE_SALES_PREFIX}${activeUser.uid}`,
+              list.slice(0, 60).map(({ createdAt: _c, updatedAt: _u, ...rest }) => rest)
+            );
           },
           (err) => handleFirestoreError(err, OperationType.LIST, 'sales')
         )
@@ -956,6 +978,10 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               .map((d) => ({ id: d.id, ...(d.data() as Omit<CustomerAccount, 'id'>) }))
               .sort((a, b) => (b.updatedAt?.toMillis?.() ?? 0) - (a.updatedAt?.toMillis?.() ?? 0));
             setCustomers(list);
+            writeCachedJson(
+              `${CACHE_CUSTOMERS_PREFIX}${activeUser.uid}`,
+              list.slice(0, 100).map(({ createdAt: _c, updatedAt: _u, ...rest }) => rest)
+            );
           },
           (err) => handleFirestoreError(err, OperationType.LIST, 'customers')
         )
@@ -3009,6 +3035,196 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     writeAuditLog,
   ]);
 
+  // =========================================================================
+  // SUPER ADMIN ONLY: SECURE APP DATA RESET (Password Re-Auth + Chunked Batch)
+  // =========================================================================
+  const resetAppData = useCallback(
+    async (
+      scope: 'sales_only' | 'full_reset',
+      adminPassword: string
+    ): Promise<{ ok: boolean; error?: string; deletedCount: number }> => {
+      const activeUser = auth.currentUser || firebaseUser;
+      if (!activeUser || !profile || profile.role !== 'super_admin' || !activeUser.email) {
+        return {
+          ok: false,
+          error: 'هذه الصلاحية محصورة بالمدير العام (super_admin) فقط.',
+          deletedCount: 0,
+        };
+      }
+
+      if (!navigator.onLine) {
+        return {
+          ok: false,
+          error: 'يتطلب تصفير البيانات السحابية اتصالاً نشطاً بالإنترنت لضمان حذف جميع السجلات بشكل كامل.',
+          deletedCount: 0,
+        };
+      }
+
+      const cleanPass = adminPassword.trim();
+      if (cleanPass.length < 6) {
+        return {
+          ok: false,
+          error: 'يرجى إدخال كلمة مرور المدير العام الصحيحة لتأكيد التصفير.',
+          deletedCount: 0,
+        };
+      }
+
+      // Mandatory Firebase Auth Re-Authentication with Super Admin's real password
+      try {
+        const credential = EmailAuthProvider.credential(activeUser.email, cleanPass);
+        await reauthenticateWithCredential(activeUser, credential);
+      } catch (err) {
+        const code = (err as { code?: string })?.code || '';
+        if (code === 'auth/too-many-requests') {
+          return {
+            ok: false,
+            error: 'تم تجاوز محاولات إدخال كلمة المرور، يرجى الانتظار قليلاً ثم المحاولة.',
+            deletedCount: 0,
+          };
+        }
+        return {
+          ok: false,
+          error: 'كلمة مرور المدير العام غير صحيحة. تم إلغاء عملية التصفير لحماية البيانات.',
+          deletedCount: 0,
+        };
+      }
+
+      // Helper to safely delete an entire Firestore collection in batches of <= 400 docs
+      const deleteCollectionInBatches = async (colName: string): Promise<number> => {
+        let removed = 0;
+        let safetyLoops = 0;
+        while (safetyLoops < 200) {
+          safetyLoops++;
+          const snap = await getDocs(query(collection(db, colName), limit(400)));
+          if (snap.empty) break;
+          const batch = writeBatch(db);
+          for (const d of snap.docs) {
+            batch.delete(d.ref);
+          }
+          await batch.commit();
+          removed += snap.docs.length;
+          if (snap.docs.length < 400) break;
+        }
+        return removed;
+      };
+
+      let totalDeleted = 0;
+      try {
+        if (scope === 'sales_only') {
+          totalDeleted += await deleteCollectionInBatches('sales');
+
+          // Reset soldCount on all 8 packages while preserving available/uploaded stock
+          const pkgSnap = await getDocs(collection(db, 'packages'));
+          if (!pkgSnap.empty) {
+            const pkgBatch = writeBatch(db);
+            for (const pDoc of pkgSnap.docs) {
+              pkgBatch.update(pDoc.ref, {
+                soldCount: 0,
+                updatedAt: serverTimestamp(),
+              });
+            }
+            await pkgBatch.commit();
+          }
+
+          clearOfflineSalesQueueOnly();
+          writeCachedJson(`${CACHE_SALES_PREFIX}${activeUser.uid}`, []);
+          setSales([]);
+          setPendingOfflineSales([]);
+
+          await writeAuditLog(
+            'تصفير المبيعات والتقارير',
+            `تم تصفير سجل المبيعات والتقارير بواسطة المدير العام (حذف ${totalDeleted} فاتورة وتصفير عداد المباع)`
+          );
+          notifySuccess(`تم تصفير المبيعات والتقارير بنجاح (حذف ${totalDeleted} سجل) ✅`);
+          return { ok: true, deletedCount: totalDeleted };
+        }
+
+        // FULL RESET: Deletes operational collections while strictly preserving super_admin, admins, settings/global & immutable auditLogs
+        const targetCollections = [
+          'sales',
+          'customers',
+          'ledgerEntries',
+          'topupRequests',
+          'notifications',
+          'cards',
+          'registrationRequests',
+          'passwordResetRequests',
+        ];
+        for (const colName of targetCollections) {
+          totalDeleted += await deleteCollectionInBatches(colName);
+        }
+
+        // Reset all 8 packages stock counters to 0 (keeping the 8 official packages intact)
+        const pkgSnap = await getDocs(collection(db, 'packages'));
+        if (!pkgSnap.empty) {
+          const pkgBatch = writeBatch(db);
+          for (const pDoc of pkgSnap.docs) {
+            pkgBatch.update(pDoc.ref, {
+              availableCount: 0,
+              soldCount: 0,
+              uploadedCount: 0,
+              injectedCount: 0,
+              updatedAt: serverTimestamp(),
+            });
+          }
+          await pkgBatch.commit();
+        }
+
+        // Reset balances of non-admin users to 0 (preserving user accounts & super_admin intact)
+        const usersSnap = await getDocs(collection(db, 'users'));
+        const nonAdminDocs = usersSnap.docs.filter((u) => {
+          const role = (u.data() as Partial<UserProfile>)?.role;
+          return role !== 'super_admin' && u.id !== activeUser.uid;
+        });
+        for (let i = 0; i < nonAdminDocs.length; i += 400) {
+          const chunk = nonAdminDocs.slice(i, i + 400);
+          const uBatch = writeBatch(db);
+          for (const uDoc of chunk) {
+            uBatch.update(uDoc.ref, {
+              balance: 0,
+              updatedAt: serverTimestamp(),
+            });
+          }
+          await uBatch.commit();
+        }
+
+        // Clear all local offline caches & in-memory operational state
+        clearAllLocalOfflineCardCaches();
+        writeCachedJson(CACHE_PACKAGES_KEY, null);
+        writeCachedJson(`${CACHE_SALES_PREFIX}${activeUser.uid}`, []);
+        writeCachedJson(`${CACHE_CUSTOMERS_PREFIX}${activeUser.uid}`, []);
+        setSales([]);
+        setCustomers([]);
+        setLedgerEntries([]);
+        setTopupRequests([]);
+        setNotifications([]);
+        setPendingRegistrations([]);
+        setPendingPasswordResets([]);
+        setPendingOfflineSales([]);
+        setPersonalCardCounts({});
+        setPersonalSoldCounts({});
+        setOfflinePoolVersion((v) => v + 1);
+        setSyncNonce((n) => n + 1);
+
+        await writeAuditLog(
+          'تصفير شامل لبيانات التطبيق',
+          `تم تنفيذ تصفير شامل لبيانات التطبيق بواسطة المدير العام (حذف ${totalDeleted} سجل وتصفير أرصدة الباقات والحسابات)`
+        );
+        notifySuccess(`تم التصفير الشامل لبيانات التطبيق بنجاح (حذف ${totalDeleted} سجل) ✅`);
+        return { ok: true, deletedCount: totalDeleted };
+      } catch (err) {
+        handleFirestoreError(err, OperationType.DELETE, `resetAppData/${scope}`);
+        const msg =
+          err instanceof Error && err.message
+            ? `تعذر إكمال التصفير: ${err.message}`
+            : 'تعذر إكمال عملية التصفير، يرجى التحقق من الاتصال والمحاولة مجدداً.';
+        notifyError('فشل تصفير البيانات', msg);
+        return { ok: false, error: msg, deletedCount: totalDeleted };
+      }
+    },
+    [firebaseUser, notifyError, notifySuccess, profile, writeAuditLog]
+  );
+
   const value = useMemo<FirebaseContextValue>(
     () => ({
       authReady,
@@ -3074,6 +3290,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       resolvePasswordReset,
       enablePushNotifications,
       exportCloudBackup,
+      resetAppData,
     }),
     [
       authReady,
@@ -3138,6 +3355,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       resolvePasswordReset,
       enablePushNotifications,
       exportCloudBackup,
+      resetAppData,
     ]
   );
 
