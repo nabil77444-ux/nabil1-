@@ -16,6 +16,7 @@ import {
   Newspaper,
   Plus,
   Save,
+  ScanFace,
   Search,
   Settings,
   ShieldCheck,
@@ -28,10 +29,11 @@ import {
 import { useFirebase } from '../contexts/FirebaseContext';
 import { useFeedback } from '../lib/feedback';
 import {
-  clearBiometricEnrollment,
+  disableBiometricMethod,
   enrollDeviceBiometric,
+  getBiometricMethodStatus,
   getMemorySessionCredentials,
-  getSavedBiometricEnrollment,
+  type BiometricMethod,
 } from '../lib/biometric';
 import { DirectSaleScreen } from './DirectSaleScreen';
 import {
@@ -261,7 +263,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
     appSettings.appDescription || DEFAULT_APP_SETTINGS.appDescription || ''
   );
   const [savingSettings, setSavingSettings] = useState(false);
-  const [showSettingsBioPassModal, setShowSettingsBioPassModal] = useState(false);
+  const [pendingBioMethod, setPendingBioMethod] = useState<BiometricMethod | null>(null);
   const [settingsBioPass, setSettingsBioPass] = useState('');
   const [enrollingSettingsBio, setEnrollingSettingsBio] = useState(false);
 
@@ -292,7 +294,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
     setAppDescription(appSettings.appDescription || DEFAULT_APP_SETTINGS.appDescription || '');
   }, [appSettings]);
 
-  const [biometricActive, setBiometricActive] = useState(() => !!getSavedBiometricEnrollment());
+  const [bioStatus, setBioStatus] = useState(() => getBiometricMethodStatus());
   const [auditSearch, setAuditSearch] = useState('');
 
   const isAdmin = profile?.role === 'super_admin';
@@ -605,7 +607,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
               تفضيلات الجهاز والأمان
             </h2>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            <div className="grid grid-cols-1 gap-2.5">
               <button
                 type="button"
                 onClick={onToggleTheme}
@@ -618,19 +620,40 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                 </span>
               </button>
 
-              <button
-                type="button"
-                disabled={enrollingSettingsBio}
-                onClick={async () => {
-                  if (biometricActive) {
-                    clearBiometricEnrollment();
-                    setBiometricActive(false);
-                    notifySuccess('تم إلغاء تفعيل البصمة والوجه على هذا الجهاز');
-                  } else if (profile) {
+              {/* Real Native Biometric Toggle 1: Fingerprint */}
+              {(
+                [
+                  {
+                    method: 'fingerprint' as const,
+                    label: 'تفعيل الدخول ببصمة اليد (Fingerprint)',
+                    enabled: bioStatus.fingerprintEnabled,
+                    Icon: Fingerprint,
+                  },
+                  {
+                    method: 'face' as const,
+                    label: 'تفعيل الدخول ببصمة الوجه (Face Unlock)',
+                    enabled: bioStatus.faceEnabled,
+                    Icon: ScanFace,
+                  },
+                ] as const
+              ).map(({ method, label, enabled, Icon }) => (
+                <button
+                  key={method}
+                  type="button"
+                  disabled={enrollingSettingsBio}
+                  onClick={async () => {
+                    const methodAr = method === 'face' ? 'بصمة الوجه' : 'بصمة اليد';
+                    if (enabled) {
+                      disableBiometricMethod(method);
+                      setBioStatus(getBiometricMethodStatus());
+                      notifySuccess(`تم إيقاف الدخول عبر ${methodAr} على هذا الجهاز`);
+                      return;
+                    }
+                    if (!profile) return;
                     const mem = getMemorySessionCredentials();
-                    if (!mem?.password) {
+                    if (!mem?.password && !bioStatus.hasVault) {
                       setSettingsBioPass('');
-                      setShowSettingsBioPassModal(true);
+                      setPendingBioMethod(method);
                       return;
                     }
                     setEnrollingSettingsBio(true);
@@ -639,61 +662,83 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                         profile.uid,
                         profile.phone || profile.email,
                         profile.name,
-                        { authEmail: mem.email || profile.email, password: mem.password }
+                        {
+                          method,
+                          authEmail: mem?.email || profile.email,
+                          password: mem?.password,
+                        }
                       );
+                      setBioStatus(getBiometricMethodStatus());
                       if (result.success) {
-                        setBiometricActive(true);
                         notifySuccess(
-                          'تم تفعيل الدخول المستقل بالبصمة والوجه بنجاح ✅ — بدون طلب كلمة مرور'
+                          `تم تفعيل الدخول عبر ${methodAr} بنجاح ✅ — دخول فوري بدون كلمة مرور`
+                        );
+                      } else {
+                        notifyError(
+                          `تعذر تفعيل ${methodAr}`,
+                          result.errorMessage || 'تأكد من إعداد البصمة/الوجه في أمان الهاتف.'
                         );
                       }
                     } finally {
                       setEnrollingSettingsBio(false);
                     }
-                  }
-                }}
-                className={`min-h-[46px] rounded-xl border-2 px-3.5 flex items-center justify-between text-xs font-extrabold transition-colors ${
-                  biometricActive
-                    ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-900 dark:text-emerald-200'
-                    : 'border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white'
-                }`}
-              >
-                <span className="flex items-center gap-1.5">
-                  <Fingerprint className="w-4 h-4 text-[#D4AF37]" />
-                  الدخول بالبصمة / الوجه
-                </span>
-                <span
-                  className={
-                    biometricActive
-                      ? 'text-emerald-700 dark:text-emerald-300 font-extrabold'
-                      : 'text-[#1A365D] dark:text-[#FDE68A]'
-                  }
+                  }}
+                  className={`min-h-[48px] rounded-xl border-2 px-3.5 flex items-center justify-between gap-2 text-xs font-extrabold transition-colors ${
+                    enabled
+                      ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-900 dark:text-emerald-200'
+                      : 'border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white'
+                  }`}
                 >
-                  {biometricActive ? 'مُفعّل ✅' : 'تفعيل الآن'}
-                </span>
-              </button>
+                  <span className="flex items-center gap-2 min-w-0">
+                    <Icon className="w-4 h-4 text-[#D4AF37] shrink-0" />
+                    <span className="truncate">{label}</span>
+                  </span>
+                  <span
+                    className={`shrink-0 px-2.5 py-1 rounded-lg text-[11px] font-extrabold ${
+                      enabled
+                        ? 'bg-emerald-600 text-white'
+                        : 'bg-[#1A365D] text-[#FDE68A]'
+                    }`}
+                  >
+                    {enabled ? 'مُفعّل ✅' : 'تفعيل'}
+                  </span>
+                </button>
+              ))}
             </div>
           </div>
 
-          {showSettingsBioPassModal && profile && (
+          {pendingBioMethod && profile && (
             <div className="fixed inset-0 z-[75] flex items-center justify-center bg-black/70 p-4 safe-top safe-bottom">
               <form
                 onSubmit={async (e) => {
                   e.preventDefault();
                   if (!settingsBioPass) return;
+                  const targetMethod = pendingBioMethod;
+                  const methodAr = targetMethod === 'face' ? 'بصمة الوجه' : 'بصمة اليد';
                   setEnrollingSettingsBio(true);
                   try {
                     const result = await enrollDeviceBiometric(
                       profile.uid,
                       profile.phone || profile.email,
                       profile.name,
-                      { authEmail: profile.email, password: settingsBioPass }
+                      {
+                        method: targetMethod,
+                        authEmail: profile.email,
+                        password: settingsBioPass,
+                      }
                     );
+                    setBioStatus(getBiometricMethodStatus());
                     if (result.success) {
-                      setBiometricActive(true);
-                      setShowSettingsBioPassModal(false);
+                      setPendingBioMethod(null);
                       setSettingsBioPass('');
-                      notifySuccess('تم تفعيل الدخول المستقل بالبصمة والوجه بنجاح ✅');
+                      notifySuccess(
+                        `تم تفعيل الدخول عبر ${methodAr} بنجاح ✅ — دخول فوري بدون كلمة مرور`
+                      );
+                    } else {
+                      notifyError(
+                        `تعذر تفعيل ${methodAr}`,
+                        result.errorMessage || 'تأكد من إعداد البصمة/الوجه في أمان الهاتف.'
+                      );
                     }
                   } finally {
                     setEnrollingSettingsBio(false);
@@ -704,18 +749,22 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2 text-[#1A365D] dark:text-[#FDE68A]">
                     <KeyRound className="w-5 h-5" />
-                    <h3 className="text-sm font-extrabold">تأكيد ربط البصمة والوجه</h3>
+                    <h3 className="text-sm font-extrabold">
+                      {pendingBioMethod === 'face'
+                        ? 'تفعيل الدخول ببصمة الوجه (Face Unlock)'
+                        : 'تفعيل الدخول ببصمة اليد (Fingerprint)'}
+                    </h3>
                   </div>
                   <button
                     type="button"
-                    onClick={() => setShowSettingsBioPassModal(false)}
+                    onClick={() => setPendingBioMethod(null)}
                     className="w-8 h-8 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center"
                   >
                     <X className="w-4 h-4" />
                   </button>
                 </div>
                 <p className="text-xs font-bold text-slate-600 dark:text-slate-300 leading-relaxed">
-                  أدخل كلمة المرور لمرة واحدة فقط لتشفير جلستك بأمان داخل الجهاز، وبعدها ستدخل بالبصمة أو الوجه مباشرةً بدون كلمة مرور.
+                  أدخل كلمة المرور لمرة واحدة فقط لتشفير بيانات حسابك داخل خزنة الهاتف الآمنة، وبعد التحقق الحيوي ستدخل مباشرةً بدون كلمة مرور نهائياً.
                 </p>
                 <input
                   type="password"
@@ -730,7 +779,11 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                   disabled={enrollingSettingsBio}
                   className="w-full min-h-[44px] royal-btn-3d text-white font-extrabold text-xs rounded-xl"
                 >
-                  {enrollingSettingsBio ? 'جاري التفعيل...' : 'تفعيل الدخول الفوري بالبصمة / الوجه'}
+                  {enrollingSettingsBio
+                    ? 'جاري التحقق والتشفير...'
+                    : pendingBioMethod === 'face'
+                      ? 'التحقق وتفعيل بصمة الوجه'
+                      : 'التحقق وتفعيل بصمة اليد'}
                 </button>
               </form>
             </div>

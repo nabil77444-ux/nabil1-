@@ -41,7 +41,7 @@ import {
   OperationType,
 } from '../lib/firebase';
 import {
-  getSavedBiometricEnrollment,
+  getBiometricMethodStatus,
   isBiometricHardwareAvailable,
   rememberSessionCredentialInMemory,
   syncBiometricVaultOnPasswordLogin,
@@ -95,15 +95,15 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ isDark, onToggleTheme })
   const [resetIdentifier, setResetIdentifier] = useState('');
   const [resetName, setResetName] = useState('');
 
-  // Biometric & Quick-PIN fallback modal state
-  const [hasEnrolledBiometric, setHasEnrolledBiometric] = useState(() => !!getSavedBiometricEnrollment());
+  // Real Fingerprint & Face Unlock enabled state (activated from Settings)
+  const [bioStatus, setBioStatus] = useState(() => getBiometricMethodStatus());
   const [showPinModal, setShowPinModal] = useState(false);
   const [pinInput, setPinInput] = useState('');
   const [pendingBioMethod, setPendingBioMethod] = useState<BiometricMethod>('fingerprint');
 
   useEffect(() => {
     isBiometricHardwareAvailable().then(() => {
-      setHasEnrolledBiometric(!!getSavedBiometricEnrollment());
+      setBioStatus(getBiometricMethodStatus());
     });
   }, []);
 
@@ -128,16 +128,16 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ isDark, onToggleTheme })
 
       const { email } = normalizeAuthIdentifier(identifier);
       const cred = await signInWithEmailAndPassword(auth, email, password);
-      // Automatically arm encrypted local vault so Fingerprint & Face Unlock work independently right away
+      // Sync encrypted keystore if Fingerprint or Face Unlock is already enabled in Settings,
+      // and keep ephemeral RAM session credential ready for 1-tap activation inside Settings.
       await syncBiometricVaultOnPasswordLogin(
         email,
         password,
         identifier.trim(),
-        cred.user.displayName || (isSuperAdminEmail(email) ? SUPER_ADMIN_CONFIG.name : identifier.trim()),
-        rememberMe
+        cred.user.displayName || (isSuperAdminEmail(email) ? SUPER_ADMIN_CONFIG.name : identifier.trim())
       );
-      setHasEnrolledBiometric(!!getSavedBiometricEnrollment());
-      notifySuccess('مرحباً بك في كروت طيبة نت — تم تسجيل الدخول وتفعيل الدخول السريع بالبصمة والوجه');
+      setBioStatus(getBiometricMethodStatus());
+      notifySuccess('مرحباً بك في كروت طيبة نت — تم تسجيل الدخول بنجاح ✅');
     } catch (err: unknown) {
       const code = (err as { code?: string })?.code || '';
       if (code === 'auth/operation-not-allowed' || code === 'auth/configuration-not-found') {
@@ -240,39 +240,17 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ isDark, onToggleTheme })
   };
 
   const handleBiometricLogin = async (method: BiometricMethod) => {
-    const methodLabel = method === 'face' ? 'التعرف على الوجه' : 'البصمة';
-    let saved = getSavedBiometricEnrollment();
+    const methodLabel = method === 'face' ? 'بصمة الوجه' : 'بصمة اليد';
+    const currentStatus = getBiometricMethodStatus();
+    setBioStatus(currentStatus);
 
-    // If first time on this device and the user entered their credentials above, arm & verify in 1 step!
-    if (!saved && identifier.trim() && password) {
-      setSubmitting(true);
-      try {
-        await applyAuthPersistence(true);
-        const { email } = normalizeAuthIdentifier(identifier);
-        const cred = await signInWithEmailAndPassword(auth, email, password);
-        await syncBiometricVaultOnPasswordLogin(
-          email,
-          password,
-          identifier.trim(),
-          cred.user.displayName || (isSuperAdminEmail(email) ? SUPER_ADMIN_CONFIG.name : identifier.trim()),
-          true
-        );
-        saved = getSavedBiometricEnrollment();
-        setHasEnrolledBiometric(!!saved);
-        notifySuccess(`تم الدخول وتفعيل ${methodLabel} تلقائياً للمرات القادمة ✅`);
-        return;
-      } catch {
-        notifyError('بيانات الحساب غير صحيحة', 'تأكد من البريد أو رقم الهاتف وكلمة المرور لربط الخزنة الآمنة.');
-        return;
-      } finally {
-        setSubmitting(false);
-      }
-    }
+    const isMethodEnabled =
+      method === 'face' ? currentStatus.faceEnabled : currentStatus.fingerprintEnabled;
 
-    if (!saved) {
+    if (!isMethodEnabled) {
       notifyInfo(
-        method === 'face' ? 'ربط الدخول بالوجه (مرة واحدة فقط)' : 'ربط الدخول بالبصمة (مرة واحدة فقط)',
-        'سجّل الدخول بالرمز مرة واحدة فقط لحفظ الجلسة مشفرة على هذا الجهاز، وبعدها ستدخل بالوجه أو البصمة فوراً دون كلمة مرور.'
+        `${methodLabel} غير مُفعّلة بعد`,
+        `سجّل الدخول بكلمة المرور أولاً، ثم افتح «الإعدادات وحول التطبيق» لتفعيل ${methodLabel} رسمياً على هذا الهاتف.`
       );
       return;
     }
@@ -293,7 +271,10 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ isDark, onToggleTheme })
         method
       );
     } else {
-      notifyWarning(`لم يكتمل التحقق عبر ${methodLabel}`, 'أعد المحاولة بالوجه أو البصمة أو الدخول بالرمز.');
+      notifyWarning(
+        `لم يكتمل التحقق عبر ${methodLabel}`,
+        result.errorMessage || 'أعد المحاولة أو استخدم كلمة المرور.'
+      );
     }
   };
 
@@ -832,7 +813,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ isDark, onToggleTheme })
                   <span>{submitting ? 'جاري التحقق...' : 'الدخول بالرمز (كلمة المرور)'}</span>
                 </button>
 
-                {/* Methods 2 & 3: Independent Instant Fingerprint + Face Unlock (Always Visible & Active Together) */}
+                {/* Methods 2 & 3: Real Native Fingerprint + Face Unlock (Activated via Settings) */}
                 <div className="space-y-1.5 pt-0.5">
                   <div className="grid grid-cols-2 gap-2">
                     <button
@@ -840,11 +821,11 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ isDark, onToggleTheme })
                       disabled={submitting}
                       onClick={() => void handleBiometricLogin('fingerprint')}
                       className={`min-h-[46px] rounded-xl px-3 text-xs font-extrabold flex items-center justify-center gap-1.5 relative transition-transform active:scale-[0.98] ${
-                        hasEnrolledBiometric
+                        bioStatus.fingerprintEnabled
                           ? 'bg-emerald-600 hover:bg-emerald-700 text-white border-2 border-[#D4AF37] shadow-md'
                           : 'gold-btn-3d text-[#0F172A]'
                       }`}
-                      aria-label="الدخول الفوري بالبصمة"
+                      aria-label="الدخول الفوري ببصمة اليد"
                     >
                       <Fingerprint className="w-4 h-4 shrink-0" />
                       <span>الدخول بالبصمة</span>
@@ -854,20 +835,20 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ isDark, onToggleTheme })
                       disabled={submitting}
                       onClick={() => void handleBiometricLogin('face')}
                       className={`min-h-[46px] rounded-xl px-3 text-xs font-extrabold flex items-center justify-center gap-1.5 relative transition-transform active:scale-[0.98] ${
-                        hasEnrolledBiometric
+                        bioStatus.faceEnabled
                           ? 'bg-[#1A365D] hover:bg-[#142a4a] text-[#FDE68A] border-2 border-[#D4AF37] shadow-md'
                           : 'bg-[#1A365D] hover:bg-[#142a4a] text-[#FDE68A] border-2 border-[#D4AF37]/85 shadow-sm'
                       }`}
-                      aria-label="الدخول الفوري بالتعرف على الوجه"
+                      aria-label="الدخول الفوري ببصمة الوجه"
                     >
                       <ScanFace className="w-4 h-4 shrink-0" />
                       <span>الدخول بالوجه</span>
                     </button>
                   </div>
                   <p className="text-[10.5px] font-bold text-center text-slate-500 dark:text-slate-400">
-                    {hasEnrolledBiometric
-                      ? 'طرق الدخول الثلاث مفعّلة ومستقلة: الرمز • البصمة • الوجه (دخول فوري بدون كلمة مرور)'
-                      : 'متاح الدخول بالرمز أو بالبصمة أو بالوجه (يُحفظ التشفير تلقائياً بعد أول دخول)'}
+                    {bioStatus.hasAnyEnabled
+                      ? 'الدخول الحيوي مُفعّل من الإعدادات — دخول فوري بدون كلمة مرور'
+                      : 'لتفعيل الدخول ببصمة اليد أو الوجه: ادخل بالرمز ثم فعّلهما من «الإعدادات وحول التطبيق»'}
                   </p>
                 </div>
 

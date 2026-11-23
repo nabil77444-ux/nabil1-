@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React from 'react';
 import {
   BarChart3,
   Bell,
@@ -8,7 +8,6 @@ import {
   FileText,
   Fingerprint,
   Home,
-  KeyRound,
   Layers,
   LogOut,
   Send,
@@ -20,12 +19,7 @@ import {
   Zap,
 } from 'lucide-react';
 import { useFirebase } from '../contexts/FirebaseContext';
-import { useFeedback } from '../lib/feedback';
-import {
-  enrollDeviceBiometric,
-  getMemorySessionCredentials,
-  getSavedBiometricEnrollment,
-} from '../lib/biometric';
+import { getBiometricMethodStatus } from '../lib/biometric';
 import {
   formatYER,
   getRoleArabicLabel,
@@ -50,16 +44,10 @@ export const SidebarDrawer: React.FC<SidebarDrawerProps> = ({
   onNavigate,
 }) => {
   const { profile, unreadNotificationsCount, signOutUser } = useFirebase();
-  const { notifySuccess, notifyWarning } = useFeedback();
-  const [biometricEnrolled, setBiometricEnrolled] = useState(() => {
-    const saved = getSavedBiometricEnrollment();
-    return Boolean(saved && saved.hasVault);
-  });
-  const [showVaultPassModal, setShowVaultPassModal] = useState(false);
-  const [vaultPassword, setVaultPassword] = useState('');
-  const [enrolling, setEnrolling] = useState(false);
 
   if (!open || !profile) return null;
+
+  const bioStatus = getBiometricMethodStatus();
 
   const isAdmin = profile.role === 'super_admin';
   const isAgent = profile.role === 'agent';
@@ -173,44 +161,6 @@ export const SidebarDrawer: React.FC<SidebarDrawerProps> = ({
     },
   ];
 
-  const completeBiometricEnroll = async (pwd?: string) => {
-    setEnrolling(true);
-    try {
-      const mem = getMemorySessionCredentials();
-      const result = await enrollDeviceBiometric(
-        profile.uid,
-        profile.phone || profile.email,
-        profile.name,
-        {
-          authEmail: mem?.email || profile.email,
-          password: pwd || mem?.password,
-        }
-      );
-      if (result.success) {
-        setBiometricEnrolled(result.hasVault);
-        setShowVaultPassModal(false);
-        setVaultPassword('');
-        notifySuccess(
-          'تم تفعيل الدخول المستقل والفوري بالبصمة والوجه بنجاح ✅ — يمكنك الدخول مباشرة دون كلمة مرور'
-        );
-      } else {
-        notifyWarning('لم يكتمل التحقق الحيوي', 'حاول مجدداً بالبصمة أو التعرف على الوجه.');
-      }
-    } finally {
-      setEnrolling(false);
-    }
-  };
-
-  const handleEnrollBiometric = async () => {
-    const mem = getMemorySessionCredentials();
-    if (!mem?.password) {
-      setVaultPassword('');
-      setShowVaultPassModal(true);
-      return;
-    }
-    await completeBiometricEnroll(mem.password);
-  };
-
   return (
     <div dir="rtl" className="fixed inset-0 z-50 flex">
       {/* Backdrop */}
@@ -303,14 +253,16 @@ export const SidebarDrawer: React.FC<SidebarDrawerProps> = ({
               );
             })}
 
-          {/* Biometric Activation + Sign Out Framed Cards */}
+          {/* Biometric Settings Shortcut + Sign Out Framed Cards */}
           <div className="pt-2.5 mt-2.5 border-t-2 border-[#D4AF37]/40 space-y-2">
             <button
               type="button"
-              disabled={enrolling}
-              onClick={handleEnrollBiometric}
+              onClick={() => {
+                onNavigate('settings');
+                onClose();
+              }}
               className={`w-full min-h-[46px] rounded-2xl border-2 px-3 text-xs font-extrabold flex items-center justify-center gap-2 shadow-sm ${
-                biometricEnrolled
+                bioStatus.hasAnyEnabled
                   ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-950/50 text-emerald-900 dark:text-emerald-200'
                   : 'border-[#D4AF37] bg-amber-50 dark:bg-amber-950/40 text-[#1A365D] dark:text-[#FDE68A]'
               }`}
@@ -319,9 +271,9 @@ export const SidebarDrawer: React.FC<SidebarDrawerProps> = ({
                 <Fingerprint className="w-4 h-4" />
               </span>
               <span>
-                {biometricEnrolled
-                  ? 'الدخول بالبصمة والوجه: مُفعّل ✅'
-                  : 'تفعيل الدخول المستقل بالبصمة / الوجه'}
+                {bioStatus.hasAnyEnabled
+                  ? 'إعدادات البصمة والوجه: مُفعّل ✅'
+                  : 'تفعيل البصمة والوجه من الإعدادات'}
               </span>
             </button>
 
@@ -348,55 +300,6 @@ export const SidebarDrawer: React.FC<SidebarDrawerProps> = ({
           </p>
         </footer>
       </aside>
-
-      {/* One-time Password Lock Modal (only when enabling biometric from a previous session) */}
-      {showVaultPassModal && (
-        <div className="fixed inset-0 z-[75] flex items-center justify-center bg-black/70 p-4 safe-top safe-bottom">
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (!vaultPassword) {
-                notifyWarning('أدخل كلمة المرور', 'مطلوبة لمرة واحدة فقط لتشفير جلسة الدخول بالبصمة والوجه.');
-                return;
-              }
-              void completeBiometricEnroll(vaultPassword);
-            }}
-            className="w-full max-w-sm rounded-3xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] p-5 shadow-2xl space-y-3"
-          >
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 text-[#1A365D] dark:text-[#FDE68A]">
-                <KeyRound className="w-5 h-5" />
-                <h3 className="text-sm font-extrabold">ربط البصمة والوجه بالحساب</h3>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowVaultPassModal(false)}
-                className="w-8 h-8 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <p className="text-xs font-bold text-slate-600 dark:text-slate-300 leading-relaxed">
-              أدخل كلمة مرور حسابك <strong>لمرة واحدة فقط</strong> لحفظها مشفرة في خزنة الجهاز الآمنة، وبعدها ستدخل بالبصمة أو الوجه مباشرة دون طلب كلمة المرور نهائياً.
-            </p>
-            <input
-              type="password"
-              value={vaultPassword}
-              onChange={(e) => setVaultPassword(e.target.value)}
-              placeholder="كلمة مرور الحساب..."
-              className="w-full min-h-[44px] rounded-xl border-2 border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-sm font-bold text-slate-900 dark:text-white focus:border-[#D4AF37] focus:outline-none"
-              autoFocus
-            />
-            <button
-              type="submit"
-              disabled={enrolling}
-              className="w-full min-h-[44px] royal-btn-3d text-white font-extrabold text-xs rounded-xl"
-            >
-              {enrolling ? 'جاري التفعيل...' : 'تأكيد وتفعيل الدخول الفوري بالبصمة / الوجه'}
-            </button>
-          </form>
-        </div>
-      )}
     </div>
   );
 };

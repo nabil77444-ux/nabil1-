@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 import {
   CheckCircle2,
   Copy,
@@ -111,7 +111,14 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
     [sales]
   );
 
-  const adjustQty = (pkgId: string, delta: number) => {
+  const latestRef = useRef({
+    cart,
+    buyerName,
+    buyerPhone,
+  });
+  latestRef.current = { cart, buyerName, buyerPhone };
+
+  const adjustQty = useCallback((pkgId: string, delta: number) => {
     setCart((prev) => {
       const next = Math.max(0, (prev[pkgId] || 0) + delta);
       const copy = { ...prev };
@@ -119,43 +126,75 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
       else copy[pkgId] = next;
       return copy;
     });
-  };
+  }, []);
 
-  const handleQuickSingleSale = async (pkg: PackageDoc) => {
-    const qty = cart[pkg.id] || 1;
-    setSubmitting(true);
-    try {
-      const sale = await executeSaleTransaction({
-        saleType: 'direct',
-        buyerName: buyerName.trim() || 'زبون مباشر',
-        buyerPhone: buyerPhone.trim(),
-        buyerRole: 'consumer',
-        paymentMethod: 'cash',
-        discountRate: 100,
-        paidAmount: pkg.price * qty,
-        items: [{ packageId: pkg.id, quantity: qty, deliverNow: qty }],
-      });
-      if (sale) {
-        setCompletedSale(sale);
-        setCart((prev) => {
-          const copy = { ...prev };
-          delete copy[pkg.id];
-          return copy;
+  const handleIncrement = useCallback(
+    (pkgId: string) => adjustQty(pkgId, 1),
+    [adjustQty]
+  );
+
+  const handleDecrement = useCallback(
+    (pkgId: string) => adjustQty(pkgId, -1),
+    [adjustQty]
+  );
+
+  const handleClearPkg = useCallback((pkgId: string) => {
+    setCart((prev) => {
+      if (!prev[pkgId]) return prev;
+      const copy = { ...prev };
+      delete copy[pkgId];
+      return copy;
+    });
+  }, []);
+
+  const handleOpenEdit = useCallback((pkg: PackageDoc) => {
+    setEditingPkg(pkg);
+    setEditPkgData(pkg.dataLabel);
+    setEditPkgHours(pkg.hoursLabel);
+    setEditPkgValidity(pkg.validityLabel);
+  }, []);
+
+  const handleQuickSingleSale = useCallback(
+    async (pkg: PackageDoc) => {
+      const { cart: curCart, buyerName: curName, buyerPhone: curPhone } = latestRef.current;
+      const qty = curCart[pkg.id] || 1;
+      setSubmitting(true);
+      try {
+        const sale = await executeSaleTransaction({
+          saleType: 'direct',
+          buyerName: curName.trim() || 'زبون مباشر',
+          buyerPhone: curPhone.trim(),
+          buyerRole: 'consumer',
+          paymentMethod: 'cash',
+          discountRate: 100,
+          paidAmount: pkg.price * qty,
+          items: [{ packageId: pkg.id, quantity: qty, deliverNow: qty }],
         });
+        if (sale) {
+          setCompletedSale(sale);
+          setCart((prev) => {
+            if (!prev[pkg.id]) return prev;
+            const copy = { ...prev };
+            delete copy[pkg.id];
+            return copy;
+          });
+        }
+      } finally {
+        setSubmitting(false);
       }
-    } finally {
-      setSubmitting(false);
-    }
-  };
+    },
+    [executeSaleTransaction]
+  );
 
-  const handleConfirmMultiBatch = async () => {
+  const handleConfirmMultiBatch = useCallback(async () => {
     if (selectedItems.length === 0) return;
     setSubmitting(true);
     try {
+      const { buyerName: curName, buyerPhone: curPhone } = latestRef.current;
       const sale = await executeSaleTransaction({
         saleType: 'direct',
-        buyerName: buyerName.trim() || 'زبون مباشر',
-        buyerPhone: buyerPhone.trim(),
+        buyerName: curName.trim() || 'زبون مباشر',
+        buyerPhone: curPhone.trim(),
         buyerRole: 'consumer',
         paymentMethod: 'cash',
         discountRate: 100,
@@ -173,7 +212,7 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
     } finally {
       setSubmitting(false);
     }
-  };
+  }, [executeSaleTransaction, selectedItems, selectedTotalAmount]);
 
   const buildUnifiedDirectMessage = (
     sale: SaleDoc,
@@ -263,7 +302,7 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
   };
 
   return (
-    <div className="space-y-3 pb-28 safe-bottom">
+    <div className="space-y-3 pb-[140px] safe-bottom">
       {/* Top Direct Sale Action Bar */}
       <div className="royal-header-3d rounded-3xl border-2 border-[#D4AF37] p-3 shadow-lg space-y-2">
         <div className="flex items-center justify-between gap-2">
@@ -363,32 +402,19 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
               confirmLabel={qty > 1 ? `تأكيد البيع (${qty})` : 'تأكيد البيع'}
               disabledConfirm={submitting || pkg.availableCount <= 0}
               canEdit={isAdmin}
-              onIncrement={() => adjustQty(pkg.id, 1)}
-              onDecrement={() => adjustQty(pkg.id, -1)}
-              onConfirm={() => handleQuickSingleSale(pkg)}
-              onEdit={() => {
-                setEditingPkg(pkg);
-                setEditPkgData(pkg.dataLabel);
-                setEditPkgHours(pkg.hoursLabel);
-                setEditPkgValidity(pkg.validityLabel);
-              }}
-              onClearOrDelete={() => {
-                if (qty > 0) {
-                  setCart((prev) => {
-                    const copy = { ...prev };
-                    delete copy[pkg.id];
-                    return copy;
-                  });
-                }
-              }}
+              onIncrement={handleIncrement}
+              onDecrement={handleDecrement}
+              onConfirm={handleQuickSingleSale}
+              onEdit={handleOpenEdit}
+              onClearOrDelete={handleClearPkg}
             />
           );
         })}
       </div>
 
-      {/* UPDATE 4: FLOATING BOTTOM MULTI-PACKAGE CONFIRMATION BAR (Safe Area Protected) */}
+      {/* FLOATING BOTTOM MULTI-PACKAGE CONFIRMATION BAR (Lifted above Android Navigation Bar) */}
       {selectedPackagesCount > 0 && (
-        <div className="fixed bottom-[calc(env(safe-area-inset-bottom,0px)+0.75rem)] inset-x-3 z-40 max-w-2xl mx-auto">
+        <div className="fixed bottom-[calc(env(safe-area-inset-bottom,0px)+48px)] inset-x-3 z-40 max-w-2xl mx-auto">
           <div className="rounded-2xl royal-header-3d border-2 border-[#D4AF37] p-3 shadow-2xl flex items-center justify-between gap-3">
             <div className="min-w-0">
               <div className="text-xs font-extrabold text-[#FDE68A] tabular-nums">

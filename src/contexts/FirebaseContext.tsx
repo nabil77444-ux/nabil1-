@@ -699,8 +699,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     } else if (navigator.onLine) {
       // Parallel background warm-up across all 8 packages (up to 250 cards/package) so card retrieval is 0ms instant!
       Promise.allSettled(
-        EXCLUSIVE_PACKAGES.map((pkg) =>
-          getDocs(
+        EXCLUSIVE_PACKAGES.map(async (pkg) => {
+          let snap = await getDocs(
             query(
               collection(db, 'cards'),
               where('ownerId', '==', activeUser.uid),
@@ -708,8 +708,19 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               where('status', '==', 'available'),
               limit(250)
             )
-          )
-        )
+          );
+          if (snap.docs.length === 0) {
+            snap = await getDocs(
+              query(
+                collection(db, 'cards'),
+                where('packageId', '==', pkg.id),
+                where('status', '==', 'available'),
+                limit(250)
+              )
+            );
+          }
+          return snap;
+        })
       )
         .then((results) => {
           const cachedAvail: CachedAvailableCard[] = [];
@@ -1570,7 +1581,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   );
 
   // =========================================================================
-  // UPDATE 4: TRANSACTIONAL MULTI-PACKAGE DIRECT, ELECTRONIC & PAPER SALES
+  // UPDATE 4: ULTRA-FAST OPTIMISTIC UI (<0.5s) + BACKGROUND writeBatch SALES
   // =========================================================================
   const executeSaleTransaction = useCallback(
     async (input: SaleExecutionInput): Promise<SaleDoc | null> => {
@@ -1596,49 +1607,184 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         !!input.buyerId &&
         (input.buyerRole === 'agent' || input.buyerRole === 'client');
 
-      // OFFLINE-FIRST EXECUTION PATH (Zero Duplicate Guarantee via Local Card Lock)
-      const executeOfflineSale = (): SaleDoc | null => {
-        const saleId = generateSafeDocId('sale');
-        const invoiceNumber = `TN-${String(Date.now()).slice(-6)}`;
+      const saleId = generateSafeDocId('sale');
+      const nowMs = Date.now();
+      const invoiceNumber = `TN-${String(nowMs).slice(-6)}`;
+      const localTimestamp = {
+        toDate: () => new Date(nowMs),
+        toMillis: () => nowMs,
+        seconds: Math.floor(nowMs / 1000),
+        nanoseconds: 0,
+      } as unknown as SaleDoc['createdAt'];
+
+      const pickedCardsByPkg: Record<string, Array<{ id: string; cardNumber: string }>> = {};
+      const consumedFromCacheList: Array<{ pkgId: string; cards: CachedAvailableCard[] }> = [];
+      const fetchedAndLockedNumbers: string[] = [];
+
+      const rollbackLocalSelection = () => {
+        for (const entry of consumedFromCacheList) {
+          releaseCardLocksLocally(entry.cards.map((c) => c.cardNumber));
+          appendCachedAvailableCards(activeUser.uid, entry.cards);
+        }
+        if (fetchedAndLockedNumbers.length > 0) {
+          releaseCardLocksLocally(fetchedAndLockedNumbers);
+        }
+      };
+
+      try {
+        // STEP 1: INSTANT CARD PULL (0ms synchronous RAM/storage cache first -> parallel Firestore fallback ONLY if needed)
+        if (isElectronic) {
+          const allCachedLocally = requestedItems.every((item) => {
+            const deliverTarget = Math.min(item.quantity, item.deliverNow ?? item.quantity);
+            if (deliverTarget <= 0) return true;
+            return getCachedAvailableCards(activeUser.uid, item.packageId).length >= deliverTarget;
+          });
+
+          if (allCachedLocally) {
+            // 0ms Synchronous Optimistic Pool Consumption (strict local lock prevents duplicate card numbers)
+            for (const item of requestedItems) {
+              const deliverTarget = Math.min(item.quantity, item.deliverNow ?? item.quantity);
+              if (deliverTarget <= 0) {
+                pickedCardsByPkg[item.packageId] = [];
+                continue;
+              }
+              const picked = consumeCachedAvailableCards(activeUser.uid, item.packageId, deliverTarget);
+              if (!picked || picked.length < deliverTarget) {
+                rollbackLocalSelection();
+                notifyWarning('أحد الكروت قيد التنفيذ حالياً، يرجى إعادة المحاولة فوراً.');
+                return null;
+              }
+              consumedFromCacheList.push({ pkgId: item.packageId, cards: picked });
+              pickedCardsByPkg[item.packageId] = picked.map((c) => ({
+                id: c.id,
+                cardNumber: c.cardNumber,
+              }));
+            }
+          } else {
+            // Offline guard when local cache cannot fulfill request
+            if (!navigator.onLine) {
+              const shortageItem = requestedItems.find((item) => {
+                const deliverTarget = Math.min(item.quantity, item.deliverNow ?? item.quantity);
+                return getCachedAvailableCards(activeUser.uid, item.packageId).length < deliverTarget;
+              });
+              const pkgMeta = packages.find((p) => p.id === shortageItem?.packageId);
+              const deliverTarget = shortageItem
+                ? Math.min(shortageItem.quantity, shortageItem.deliverNow ?? shortageItem.quantity)
+                : 0;
+              notifyError(
+                'المخزون المحلي غير كافٍ دون إنترنت',
+                `المتوفر محلياً لباقة ${pkgMeta?.price || shortageItem?.packageId || ''} ر.ي أقل من المطلوب (${deliverTarget}). يرجى الاتصال بالإنترنت للمزامنة.`
+              );
+              return null;
+            }
+
+            // Online fast parallel fetch ONLY for packages not fully satisfied by local RAM cache
+            const fetchedAll = await Promise.all(
+              requestedItems.map(async (item) => {
+                const deliverTarget = Math.min(item.quantity, item.deliverNow ?? item.quantity);
+                if (deliverTarget <= 0) {
+                  return { item, deliverTarget, list: [] as Array<{ id: string; cardNumber: string }>, fromCache: true };
+                }
+                const localPool = getCachedAvailableCards(activeUser.uid, item.packageId);
+                if (localPool.length >= deliverTarget) {
+                  return {
+                    item,
+                    deliverTarget,
+                    list: localPool.slice(0, deliverTarget).map((c) => ({ id: c.id, cardNumber: c.cardNumber })),
+                    fromCache: true,
+                  };
+                }
+
+                let snap = await getDocs(
+                  query(
+                    collection(db, 'cards'),
+                    where('ownerId', '==', activeUser.uid),
+                    where('packageId', '==', item.packageId),
+                    where('status', '==', 'available'),
+                    limit(Math.max(deliverTarget + 60, 150))
+                  )
+                );
+                if (profile.role === 'super_admin' && snap.docs.length < deliverTarget) {
+                  snap = await getDocs(
+                    query(
+                      collection(db, 'cards'),
+                      where('packageId', '==', item.packageId),
+                      where('status', '==', 'available'),
+                      limit(Math.max(deliverTarget + 60, 150))
+                    )
+                  );
+                }
+                const list = snap.docs
+                  .map((d) => ({ id: d.id, cardNumber: (d.data() as CardDoc).cardNumber }))
+                  .filter((c) => !isCardLocallyLocked(c.cardNumber));
+
+                // Top up local cache with surplus cards for subsequent instant sales
+                if (list.length > deliverTarget) {
+                  appendCachedAvailableCards(
+                    activeUser.uid,
+                    list.slice(deliverTarget).map((c) => ({
+                      id: c.id,
+                      packageId: item.packageId,
+                      cardNumber: c.cardNumber,
+                      ownerId: activeUser.uid,
+                    }))
+                  );
+                }
+                return { item, deliverTarget, list, fromCache: false };
+              })
+            );
+
+            for (const { item, deliverTarget, list } of fetchedAll) {
+              if (list.length < deliverTarget) {
+                rollbackLocalSelection();
+                const pkgMeta = packages.find((p) => p.id === item.packageId);
+                notifyError(
+                  'المخزون غير كافٍ',
+                  `المتوفر لباقة ${pkgMeta?.price || item.packageId} ر.ي هو ${list.length} كرت والمطلوب تسليمه ${deliverTarget}.`
+                );
+                return null;
+              }
+              const chosen = list.slice(0, deliverTarget);
+              pickedCardsByPkg[item.packageId] = chosen;
+              for (const c of chosen) {
+                fetchedAndLockedNumbers.push(c.cardNumber);
+              }
+            }
+
+            if (fetchedAndLockedNumbers.length > 0) {
+              if (!lockCardsLocally(fetchedAndLockedNumbers)) {
+                rollbackLocalSelection();
+                notifyWarning('أحد الكروت قيد التنفيذ حالياً، يرجى إعادة المحاولة فوراً.');
+                return null;
+              }
+              removeCardsFromCache(activeUser.uid, fetchedAndLockedNumbers);
+            }
+          }
+        }
+
+        // STEP 2: BUILD INVOICE & OPTIMISTIC SALE DOCUMENT IN RAM (<1ms)
         const lineItems: SaleLineItem[] = [];
         const allPulledNumbers: string[] = [];
         const allPulledDocIds: string[] = [];
+        const deliveredByPkg: Record<string, number> = {};
         let totalAmount = 0;
         let faceValueTotal = 0;
         let totalCards = 0;
         let deliveredCards = 0;
-
-        const consumedByPkg: Array<{ pkgId: string; picked: CachedAvailableCard[] }> = [];
-
-        if (isElectronic) {
-          for (const item of requestedItems) {
-            const deliverTarget = Math.min(item.quantity, item.deliverNow ?? item.quantity);
-            if (deliverTarget <= 0) continue;
-            const picked = consumeCachedAvailableCards(activeUser.uid, item.packageId, deliverTarget);
-            if (!picked || picked.length < deliverTarget) {
-              // Release any already-locked cards from earlier items in this offline batch
-              for (const prev of consumedByPkg) {
-                releaseCardLocksLocally(prev.picked.map((c) => c.cardNumber));
-              }
-              const pkgMeta = packages.find((p) => p.id === item.packageId);
-              notifyError(
-                'المخزون المحلي غير كافٍ دون إنترنت',
-                `المتوفر محلياً لباقة ${pkgMeta?.price || item.packageId} ر.ي أقل من المطلوب (${deliverTarget}). يرجى الاتصال بالإنترنت للمزامنة.`
-              );
-              return null;
-            }
-            consumedByPkg.push({ pkgId: item.packageId, picked });
-          }
-        }
 
         for (const item of requestedItems) {
           const pkg =
             packages.find((p) => p.id === item.packageId) ||
             (EXCLUSIVE_PACKAGES.find((p) => p.id === item.packageId) as PackageDoc | undefined);
           if (!pkg) continue;
+
           const unitPrice = Math.round((pkg.price * input.discountRate) / 100);
-          const picked = consumedByPkg.find((c) => c.pkgId === item.packageId)?.picked || [];
+          const picked = pickedCardsByPkg[item.packageId] || [];
           const deliverCount = isElectronic ? picked.length : item.quantity;
+
+          if (isElectronic && deliverCount > 0) {
+            deliveredByPkg[item.packageId] = (deliveredByPkg[item.packageId] || 0) + deliverCount;
+          }
 
           for (const c of picked) {
             allPulledNumbers.push(c.cardNumber);
@@ -1672,14 +1818,48 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         const expectedProfit = Math.max(0, totalAmount - Math.round(faceValueTotal * 0.65));
         const realizedProfit =
           totalAmount > 0 ? Math.round((expectedProfit * paidAmount) / totalAmount) : 0;
+        const status: SaleDoc['status'] =
+          deliveredCards < totalCards || remainingAmount > 0 ? 'partial' : 'completed';
 
-        const queued: OfflineQueuedSale = {
-          localId: saleId,
-          createdAtMs: Date.now(),
+        const cleanBuyerName = input.buyerName.trim().slice(0, 100) || 'زبون مباشر';
+        const cleanBuyerPhone = (input.buyerPhone || '').slice(0, 20);
+        const cleanBuyerId = (input.buyerId || '').slice(0, 128);
+        const cleanNotes = (input.notes || '').slice(0, 500);
+
+        const optimisticSale: SaleDoc = {
+          id: saleId,
+          invoiceNumber,
           sellerId: activeUser.uid,
-          buyerId: input.buyerId,
-          buyerName: input.buyerName.trim() || 'زبون مباشر',
-          buyerPhone: input.buyerPhone,
+          buyerId: cleanBuyerId,
+          buyerName: cleanBuyerName,
+          buyerPhone: cleanBuyerPhone,
+          buyerRole: input.buyerRole,
+          saleType: input.saleType,
+          paymentMethod: input.paymentMethod,
+          discountRate: input.discountRate,
+          totalAmount,
+          paidAmount,
+          remainingAmount,
+          expectedProfit,
+          realizedProfit,
+          totalCards,
+          deliveredCards,
+          returnedCards: 0,
+          items: lineItems,
+          cardNumbers: allPulledNumbers,
+          status,
+          notes: cleanNotes,
+          createdAt: localTimestamp,
+          updatedAt: localTimestamp,
+        };
+
+        const queuedFallbackPayload: OfflineQueuedSale = {
+          localId: saleId,
+          createdAtMs: nowMs,
+          sellerId: activeUser.uid,
+          buyerId: cleanBuyerId,
+          buyerName: cleanBuyerName,
+          buyerPhone: cleanBuyerPhone,
           buyerRole: input.buyerRole,
           saleType: input.saleType,
           paymentMethod: input.paymentMethod,
@@ -1695,284 +1875,9 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           cardNumbers: allPulledNumbers,
           cardDocIds: allPulledDocIds,
           invoiceNumber,
-          notes: input.notes,
+          notes: cleanNotes,
           transferOwnershipToBuyer,
         };
-
-        enqueueOfflineSale(queued);
-        setPendingOfflineSales(getPendingOfflineSales());
-        setOfflinePoolVersion((v) => v + 1);
-        notifySuccess(
-          `تم تنفيذ البيع محلياً دون إنترنت (${totalCards} كرت) ✅ — محمي من التكرار وستتم المزامنة تلقائياً`
-        );
-        return offlineSaleToSaleDoc(queued);
-      };
-
-      const lockedCandidateNumbers: string[] = [];
-      let usedLocalCache = false;
-
-      try {
-        if (!navigator.onLine) {
-          return executeOfflineSale();
-        }
-
-        // Step 1: Instant Candidate Card Retrieval (RAM/local cache first at 0ms -> parallel Firestore fallback)
-        const fetchCandidatesForItem = async (
-          item: { packageId: string; quantity: number; deliverNow?: number },
-          bypassLocalCache = false
-        ): Promise<Array<{ id: string; cardNumber: string }>> => {
-          const deliverTarget = Math.min(item.quantity, item.deliverNow ?? item.quantity);
-          if (deliverTarget <= 0) return [];
-
-          if (!bypassLocalCache) {
-            const localPool = getCachedAvailableCards(activeUser.uid, item.packageId).filter(
-              (c) => !isCardLocallyLocked(c.cardNumber)
-            );
-            if (localPool.length >= deliverTarget) {
-              return localPool.slice(0, deliverTarget).map((c) => ({
-                id: c.id,
-                cardNumber: c.cardNumber,
-              }));
-            }
-          }
-
-          const q = query(
-            collection(db, 'cards'),
-            where('ownerId', '==', activeUser.uid),
-            where('packageId', '==', item.packageId),
-            where('status', '==', 'available'),
-            limit(Math.max(deliverTarget + 40, 120))
-          );
-          let snap = await getDocs(q);
-          // Fallback for legacy Super Admin cards if ownerId differed from current admin uid
-          if (profile.role === 'super_admin' && snap.docs.length < deliverTarget) {
-            snap = await getDocs(
-              query(
-                collection(db, 'cards'),
-                where('packageId', '==', item.packageId),
-                where('status', '==', 'available'),
-                limit(Math.max(deliverTarget + 40, 120))
-              )
-            );
-          }
-          const list = snap.docs
-            .map((d) => ({
-              id: d.id,
-              cardNumber: (d.data() as CardDoc).cardNumber,
-            }))
-            .filter((c) => !isCardLocallyLocked(c.cardNumber));
-
-          // Cache extra fetched cards locally for instant future sales
-          if (list.length > deliverTarget) {
-            appendCachedAvailableCards(
-              activeUser.uid,
-              list.slice(deliverTarget).map((c) => ({
-                id: c.id,
-                packageId: item.packageId,
-                cardNumber: c.cardNumber,
-                ownerId: activeUser.uid,
-              }))
-            );
-          }
-          return list;
-        };
-
-        const candidateCardDocsByPkg: Record<string, Array<{ id: string; cardNumber: string }>> = {};
-        if (isElectronic) {
-          const fetchedAll = await Promise.all(
-            requestedItems.map(async (item) => {
-              const deliverTarget = Math.min(item.quantity, item.deliverNow ?? item.quantity);
-              const localCount = getCachedAvailableCards(activeUser.uid, item.packageId).length;
-              if (localCount >= deliverTarget) usedLocalCache = true;
-              const list = await fetchCandidatesForItem(item, false);
-              return { item, deliverTarget, list };
-            })
-          );
-
-          for (const { item, deliverTarget, list } of fetchedAll) {
-            if (list.length < deliverTarget) {
-              const pkgMeta = packages.find((p) => p.id === item.packageId);
-              notifyError(
-                'المخزون غير كافٍ',
-                `المتوفر لباقة ${pkgMeta?.price || item.packageId} ر.ي هو ${list.length} كرت والمطلوب تسليمه ${deliverTarget}.`
-              );
-              return null;
-            }
-            const chosen = list.slice(0, deliverTarget);
-            candidateCardDocsByPkg[item.packageId] = chosen;
-            for (const c of chosen) {
-              lockedCandidateNumbers.push(c.cardNumber);
-            }
-          }
-
-          // Synchronously lock all candidate cards BEFORE entering Firestore transaction
-          if (lockedCandidateNumbers.length > 0 && !lockCardsLocally(lockedCandidateNumbers)) {
-            notifyWarning('أحد الكروت قيد التنفيذ حالياً، يرجى إعادة المحاولة فوراً.');
-            return null;
-          }
-        }
-
-        const saleId = generateSafeDocId('sale');
-        const invoiceNumber = `TN-${String(Date.now()).slice(-6)}`;
-        const lineItems: SaleLineItem[] = [];
-        const allPulledNumbers: string[] = [];
-        let totalAmount = 0;
-        let faceValueTotal = 0;
-        let totalCards = 0;
-        let deliveredCards = 0;
-
-        // Step 2: Atomic Firestore Transaction to prevent double-selling any voucher!
-        await runTransaction(db, async (tx) => {
-          const pkgSnaps = new Map<string, PackageDoc>();
-          for (const item of requestedItems) {
-            const pSnap = await tx.get(doc(db, 'packages', item.packageId));
-            if (!pSnap.exists()) throw new Error(`الباقة ${item.packageId} غير موجودة`);
-            pkgSnaps.set(item.packageId, {
-              id: pSnap.id,
-              ...(pSnap.data() as Omit<PackageDoc, 'id'>),
-            });
-          }
-
-          // Re-verify all candidate card docs inside the transaction
-          const verifiedCardsByPkg = new Map<string, Array<{ id: string; cardNumber: string }>>();
-          if (isElectronic) {
-            for (const item of requestedItems) {
-              const candidates = candidateCardDocsByPkg[item.packageId] || [];
-              const verified: Array<{ id: string; cardNumber: string }> = [];
-              for (const c of candidates) {
-                const cSnap = await tx.get(doc(db, 'cards', c.id));
-                const cData = cSnap.exists() ? (cSnap.data() as CardDoc) : null;
-                if (
-                  !cData ||
-                  cData.status !== 'available' ||
-                  (profile.role !== 'super_admin' && cData.ownerId !== activeUser.uid)
-                ) {
-                  throw new Error('أحد الكروت تم بيعه للتو في عملية أخرى، يرجى المحاولة مجدداً.');
-                }
-                verified.push(c);
-              }
-              verifiedCardsByPkg.set(item.packageId, verified);
-            }
-          }
-
-          // Apply card updates & package inventory updates
-          for (const item of requestedItems) {
-            const pkg = pkgSnaps.get(item.packageId)!;
-            const unitPrice = Math.round((pkg.price * input.discountRate) / 100);
-            const verified = verifiedCardsByPkg.get(item.packageId) || [];
-            const deliverCount = isElectronic ? verified.length : item.quantity;
-
-            if (isElectronic && verified.length > 0) {
-              for (const c of verified) {
-                if (transferOwnershipToBuyer && input.buyerId) {
-                  // Transfer real cards into the Agent/Client's isolated personal inventory
-                  tx.update(doc(db, 'cards', c.id), {
-                    status: 'available',
-                    ownerId: input.buyerId,
-                    soldTo: (input.buyerPhone || input.buyerName).slice(0, 128),
-                    saleId,
-                    updatedAt: serverTimestamp(),
-                  });
-                } else {
-                  tx.update(doc(db, 'cards', c.id), {
-                    status: 'sold',
-                    soldTo: (input.buyerPhone || input.buyerName).slice(0, 128),
-                    saleId,
-                    updatedAt: serverTimestamp(),
-                  });
-                }
-                allPulledNumbers.push(c.cardNumber);
-              }
-
-              // Update global central package counters ONLY when Super Admin deducts from central pool
-              if (profile.role === 'super_admin') {
-                tx.update(doc(db, 'packages', item.packageId), {
-                  availableCount: Math.max(0, (Number(pkg.availableCount) || 0) - verified.length),
-                  soldCount: (Number(pkg.soldCount) || 0) + verified.length,
-                  updatedAt: serverTimestamp(),
-                });
-              }
-            }
-
-            lineItems.push({
-              packageId: item.packageId,
-              packageLabel: `باقة ${pkg.price} ر.ي (${pkg.dataLabel})`,
-              price: pkg.price,
-              unitPrice,
-              quantity: item.quantity,
-              delivered: deliverCount,
-              returned: 0,
-              cardNumbers: verified.map((v) => v.cardNumber),
-            });
-
-            totalAmount += unitPrice * item.quantity;
-            faceValueTotal += pkg.price * item.quantity;
-            totalCards += item.quantity;
-            deliveredCards += deliverCount;
-          }
-
-          const paidAmount =
-            input.paymentMethod === 'cash'
-              ? totalAmount
-              : input.paymentMethod === 'credit'
-                ? 0
-                : Math.min(totalAmount, Math.max(0, input.paidAmount));
-          const remainingAmount = Math.max(0, totalAmount - paidAmount);
-          const expectedProfit = Math.max(0, totalAmount - Math.round(faceValueTotal * 0.65));
-          const realizedProfit = totalAmount > 0 ? Math.round((expectedProfit * paidAmount) / totalAmount) : 0;
-          const status: SaleDoc['status'] =
-            deliveredCards < totalCards || remainingAmount > 0 ? 'partial' : 'completed';
-
-          tx.set(doc(db, 'sales', saleId), {
-            invoiceNumber,
-            sellerId: activeUser.uid,
-            buyerId: (input.buyerId || '').slice(0, 128),
-            buyerName: input.buyerName.trim().slice(0, 100) || 'زبون مباشر',
-            buyerPhone: (input.buyerPhone || '').slice(0, 20),
-            buyerRole: input.buyerRole,
-            saleType: input.saleType,
-            paymentMethod: input.paymentMethod,
-            discountRate: input.discountRate,
-            totalAmount,
-            paidAmount,
-            remainingAmount,
-            expectedProfit,
-            realizedProfit,
-            totalCards,
-            deliveredCards,
-            returnedCards: 0,
-            items: lineItems.slice(0, 20),
-            cardNumbers: allPulledNumbers.slice(0, 200),
-            status,
-            notes: (input.notes || '').slice(0, 500),
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          });
-        });
-
-        // Remove sold/transferred cards from seller's local cache immediately
-        if (allPulledNumbers.length > 0) {
-          removeCardsFromCache(activeUser.uid, allPulledNumbers);
-        }
-
-        const paidAmount =
-          input.paymentMethod === 'cash'
-            ? totalAmount
-            : input.paymentMethod === 'credit'
-              ? 0
-              : Math.min(totalAmount, Math.max(0, input.paidAmount));
-        const remainingAmount = Math.max(0, totalAmount - paidAmount);
-
-        // Update buyer balance if it's a registered user with remaining balance (non-blocking)
-        if (input.buyerId && remainingAmount > 0 && profile.role === 'super_admin') {
-          const buyerUser = managedUsers.find((u) => u.uid === input.buyerId);
-          if (buyerUser) {
-            updateDoc(doc(db, 'users', input.buyerId), {
-              balance: (Number(buyerUser.balance) || 0) + remainingAmount,
-              updatedAt: serverTimestamp(),
-            }).catch(() => {});
-          }
-        }
 
         const typeLabel =
           input.saleType === 'direct'
@@ -1981,61 +1886,227 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               ? 'جملة إلكترونية'
               : 'فاتورة كروت ورقية';
 
-        // Fire-and-forget audit & cloud notification so the invoice & card numbers open instantly
-        writeAuditLog(
-          typeLabel,
-          `فاتورة ${invoiceNumber} للمشتري ${input.buyerName} — ${totalCards} كرت — الإجمالي ${totalAmount} ر.ي`
-        ).catch(() => {});
-        sendCloudNotification({
-          recipientId: input.buyerId || 'super_admin',
-          title: `تم تسجيل ${typeLabel} (${invoiceNumber})`,
-          body: `${input.buyerName} • ${totalCards} كرت • الإجمالي ${totalAmount} ر.ي`,
-          category: input.saleType === 'paper_invoice' ? 'invoice' : 'sale',
-          targetRoute: 'sales_list',
-        }).catch(() => {});
-
-        if (usedLocalCache) {
-          setOfflinePoolVersion((v) => v + 1);
-        }
-
-        notifySuccess(`تم تنفيذ ${typeLabel} (${totalCards} كرت) بنجاح`);
-
-        return {
-          id: saleId,
-          invoiceNumber,
-          sellerId: activeUser.uid,
-          buyerId: input.buyerId,
-          buyerName: input.buyerName.trim() || 'زبون مباشر',
-          buyerPhone: input.buyerPhone,
-          buyerRole: input.buyerRole,
-          saleType: input.saleType,
-          paymentMethod: input.paymentMethod,
-          discountRate: input.discountRate,
-          totalAmount,
-          paidAmount,
-          remainingAmount,
-          totalCards,
-          deliveredCards,
-          returnedCards: 0,
-          items: lineItems,
-          cardNumbers: allPulledNumbers,
-          status: deliveredCards < totalCards || remainingAmount > 0 ? 'partial' : 'completed',
-          notes: input.notes,
-        };
-      } catch (err) {
-        if (lockedCandidateNumbers.length > 0) {
-          releaseCardLocksLocally(lockedCandidateNumbers);
-          if (usedLocalCache) {
-            removeCardsFromCache(activeUser.uid, lockedCandidateNumbers);
+        // STEP 3: INSTANT OPTIMISTIC UI UPDATES (Stock + Sales list updated immediately at ~5ms)
+        const applyOptimisticStockDelta = (direction: -1 | 1) => {
+          if (!isElectronic || Object.keys(deliveredByPkg).length === 0) return;
+          if (profile.role === 'super_admin') {
+            setRawPackages((prev) =>
+              prev.map((pkg) => {
+                const delta = deliveredByPkg[pkg.id] || 0;
+                if (!delta) return pkg;
+                return {
+                  ...pkg,
+                  availableCount: Math.max(0, (Number(pkg.availableCount) || 0) + direction * delta),
+                  soldCount: Math.max(0, (Number(pkg.soldCount) || 0) - direction * delta),
+                };
+              })
+            );
+          } else {
+            setPersonalCardCounts((prev) => {
+              const next = { ...prev };
+              for (const [pkgId, delta] of Object.entries(deliveredByPkg)) {
+                if (next[pkgId] !== undefined) {
+                  next[pkgId] = Math.max(0, (Number(next[pkgId]) || 0) + direction * delta);
+                }
+              }
+              return next;
+            });
+            setPersonalSoldCounts((prev) => {
+              const next = { ...prev };
+              for (const [pkgId, delta] of Object.entries(deliveredByPkg)) {
+                next[pkgId] = Math.max(0, (Number(next[pkgId]) || 0) - direction * delta);
+              }
+              return next;
+            });
           }
+        };
+
+        const isOnlineNow = typeof navigator === 'undefined' ? true : navigator.onLine;
+        if (!isOnlineNow) {
+          // Offline mode: queue directly (pendingOfflineSales memo handles stock subtraction once)
+          enqueueOfflineSale(queuedFallbackPayload);
+          setPendingOfflineSales(getPendingOfflineSales());
+          setOfflinePoolVersion((v) => v + 1);
+          notifySuccess(
+            `تم تنفيذ ${typeLabel} محلياً دون إنترنت (${totalCards} كرت) ✅ — محمي من التكرار وستتم المزامنة تلقائياً`
+          );
+          return offlineSaleToSaleDoc(queuedFallbackPayload);
         }
+
+        // Online Optimistic UI: update UI state immediately and open voucher modal in < 0.5s!
+        applyOptimisticStockDelta(-1);
+        setSales((prev) => [optimisticSale, ...prev.filter((s) => s.id !== saleId)]);
+        setOfflinePoolVersion((v) => v + 1);
+        notifySuccess(`تم تنفيذ ${typeLabel} (${totalCards} كرت) بنجاح ✅`);
+
+        // STEP 4: ASYNCHRONOUS BACKGROUND FIRESTORE writeBatch COMMIT (Zero UI Blocking!)
+        const commitSaleInBackground = async () => {
+          try {
+            // Prepare atomic write operations
+            type BatchOp = (b: ReturnType<typeof writeBatch>) => void;
+            const ops: BatchOp[] = [];
+
+            // 4A. Card document status / ownership updates
+            if (isElectronic && allPulledDocIds.length > 0) {
+              const soldToValue = (cleanBuyerPhone || cleanBuyerName).slice(0, 128);
+              for (const cardDocId of allPulledDocIds) {
+                const cardRef = doc(db, 'cards', cardDocId);
+                if (transferOwnershipToBuyer && cleanBuyerId) {
+                  ops.push((b) =>
+                    b.update(cardRef, {
+                      status: 'available',
+                      ownerId: cleanBuyerId,
+                      soldTo: soldToValue,
+                      saleId,
+                      updatedAt: serverTimestamp(),
+                    })
+                  );
+                } else {
+                  ops.push((b) =>
+                    b.update(cardRef, {
+                      status: 'sold',
+                      soldTo: soldToValue,
+                      saleId,
+                      updatedAt: serverTimestamp(),
+                    })
+                  );
+                }
+              }
+            }
+
+            // 4B. Package inventory counter updates (Super Admin central pool — fetch fresh counts in parallel so availableCount >= 0 rule always passes)
+            const touchedPkgIds = Object.keys(deliveredByPkg);
+            if (isElectronic && profile.role === 'super_admin' && touchedPkgIds.length > 0) {
+              const pkgSnapList = await Promise.all(
+                touchedPkgIds.map((pkgId) => getDoc(doc(db, 'packages', pkgId)))
+              );
+              for (const pSnap of pkgSnapList) {
+                if (!pSnap.exists()) continue;
+                const pData = pSnap.data() as PackageDoc;
+                const deliverCount = deliveredByPkg[pSnap.id] || 0;
+                if (deliverCount <= 0) continue;
+                ops.push((b) =>
+                  b.update(doc(db, 'packages', pSnap.id), {
+                    availableCount: Math.max(0, (Number(pData.availableCount) || 0) - deliverCount),
+                    soldCount: (Number(pData.soldCount) || 0) + deliverCount,
+                    updatedAt: serverTimestamp(),
+                  })
+                );
+              }
+            }
+
+            // 4C. Sale document write
+            ops.push((b) =>
+              b.set(doc(db, 'sales', saleId), {
+                invoiceNumber,
+                sellerId: activeUser.uid,
+                buyerId: cleanBuyerId,
+                buyerName: cleanBuyerName,
+                buyerPhone: cleanBuyerPhone,
+                buyerRole: input.buyerRole,
+                saleType: input.saleType,
+                paymentMethod: input.paymentMethod,
+                discountRate: input.discountRate,
+                totalAmount,
+                paidAmount,
+                remainingAmount,
+                expectedProfit,
+                realizedProfit,
+                totalCards,
+                deliveredCards,
+                returnedCards: 0,
+                items: lineItems.slice(0, 20),
+                cardNumbers: allPulledNumbers.slice(0, 200),
+                status,
+                notes: cleanNotes,
+                createdAt: serverTimestamp(),
+                updatedAt: serverTimestamp(),
+              })
+            );
+
+            // Commit in chunks of 450 ops (Firestore hard limit is 500 ops per writeBatch)
+            const CHUNK_SIZE = 450;
+            const batchPromises: Array<Promise<void>> = [];
+            for (let i = 0; i < ops.length; i += CHUNK_SIZE) {
+              const b = writeBatch(db);
+              const slice = ops.slice(i, i + CHUNK_SIZE);
+              for (const applyOp of slice) {
+                applyOp(b);
+              }
+              batchPromises.push(b.commit());
+            }
+            await Promise.all(batchPromises);
+
+            // 4D. Non-blocking buyer balance update, audit log & cloud notification
+            if (cleanBuyerId && remainingAmount > 0 && profile.role === 'super_admin') {
+              const buyerUser = managedUsers.find((u) => u.uid === cleanBuyerId);
+              if (buyerUser) {
+                updateDoc(doc(db, 'users', cleanBuyerId), {
+                  balance: (Number(buyerUser.balance) || 0) + remainingAmount,
+                  updatedAt: serverTimestamp(),
+                }).catch(() => {});
+              }
+            }
+
+            writeAuditLog(
+              typeLabel,
+              `فاتورة ${invoiceNumber} للمشتري ${cleanBuyerName} — ${totalCards} كرت — الإجمالي ${totalAmount} ر.ي`
+            ).catch(() => {});
+
+            sendCloudNotification({
+              recipientId: cleanBuyerId || 'super_admin',
+              title: `تم تسجيل ${typeLabel} (${invoiceNumber})`,
+              body: `${cleanBuyerName} • ${totalCards} كرت • الإجمالي ${totalAmount} ر.ي`,
+              category: input.saleType === 'paper_invoice' ? 'invoice' : 'sale',
+              targetRoute: 'sales_list',
+            }).catch(() => {});
+
+            // 4E. Silent Background Cache Replenishment when any sold package drops below 60 cached cards
+            if (isElectronic && touchedPkgIds.length > 0 && navigator.onLine) {
+              for (const pkgId of touchedPkgIds) {
+                if (getCachedAvailableCards(activeUser.uid, pkgId).length < 60) {
+                  getDocs(
+                    query(
+                      collection(db, 'cards'),
+                      where('ownerId', '==', activeUser.uid),
+                      where('packageId', '==', pkgId),
+                      where('status', '==', 'available'),
+                      limit(150)
+                    )
+                  )
+                    .then((snap) => {
+                      const fresh = snap.docs
+                        .map((d) => ({
+                          id: d.id,
+                          packageId: pkgId,
+                          cardNumber: (d.data() as CardDoc).cardNumber,
+                          ownerId: activeUser.uid,
+                        }))
+                        .filter((c) => !isCardLocallyLocked(c.cardNumber));
+                      if (fresh.length > 0) {
+                        appendCachedAvailableCards(activeUser.uid, fresh);
+                      }
+                    })
+                    .catch(() => {});
+                }
+              }
+            }
+          } catch (bgErr) {
+            // Automatic Offline Queue Safety Net: if network dropped during background commit,
+            // keep cards locked against duplication and enqueue for automatic cloud sync!
+            applyOptimisticStockDelta(1);
+            enqueueOfflineSale(queuedFallbackPayload);
+            setPendingOfflineSales(getPendingOfflineSales());
+            setOfflinePoolVersion((v) => v + 1);
+            handleFirestoreError(bgErr, OperationType.WRITE, 'sales/background_batch');
+          }
+        };
+
+        void commitSaleInBackground();
+        return optimisticSale;
+      } catch (err) {
+        rollbackLocalSelection();
         const msg = err instanceof Error ? err.message : 'تعذر إتمام عملية البيع';
-        const isNetworkOffline =
-          !navigator.onLine ||
-          /offline|unavailable|failed to get document|network|client is offline/i.test(msg);
-        if (isNetworkOffline) {
-          return executeOfflineSale();
-        }
         handleFirestoreError(err, OperationType.WRITE, 'sales/transaction');
         notifyError('تعذر إتمام البيع', msg);
         return null;

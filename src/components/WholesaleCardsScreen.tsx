@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 import {
   CheckCircle2,
   CreditCard,
@@ -190,7 +190,7 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
     [sales, isElectronic]
   );
 
-  const adjustQty = (pkgId: string, delta: number) => {
+  const adjustQty = useCallback((pkgId: string, delta: number) => {
     setCart((prev) => {
       const next = Math.max(0, (prev[pkgId] || 0) + delta);
       const copy = { ...prev };
@@ -198,9 +198,19 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
       else copy[pkgId] = next;
       return copy;
     });
-  };
+  }, []);
 
-  const setQtyDirect = (pkgId: string, nextQty: number) => {
+  const handleIncrement = useCallback(
+    (pkgId: string) => adjustQty(pkgId, 1),
+    [adjustQty]
+  );
+
+  const handleDecrement = useCallback(
+    (pkgId: string) => adjustQty(pkgId, -1),
+    [adjustQty]
+  );
+
+  const setQtyDirect = useCallback((pkgId: string, nextQty: number) => {
     const val = Math.max(0, nextQty);
     setCart((prev) => {
       const copy = { ...prev };
@@ -208,7 +218,12 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
       else copy[pkgId] = val;
       return copy;
     });
-  };
+  }, []);
+
+  const handleClearPkg = useCallback(
+    (pkgId: string) => setQtyDirect(pkgId, 0),
+    [setQtyDirect]
+  );
 
   const handleExecuteWholesale = async (autoPrint = false) => {
     if (selectedItems.length === 0) {
@@ -264,6 +279,21 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
       setSubmitting(false);
     }
   };
+
+  const tileActionRef = useRef({ cart, handleExecuteWholesale });
+  tileActionRef.current = { cart, handleExecuteWholesale };
+
+  const handleTileConfirm = useCallback(
+    (pkg: PackageDoc) => {
+      const curQty = tileActionRef.current.cart[pkg.id] || 0;
+      if (curQty === 0) {
+        adjustQty(pkg.id, 10);
+      } else {
+        void tileActionRef.current.handleExecuteWholesale(false);
+      }
+    },
+    [adjustQty]
+  );
 
   const buildWholesaleMessage = (sale: SaleDoc): string => {
     const title =
@@ -340,7 +370,7 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
   };
 
   return (
-    <div className="space-y-3.5 pb-24">
+    <div className="space-y-3.5 pb-[140px] safe-bottom">
       {/* Compact Royal Header Banner */}
       <div className="royal-header-3d rounded-3xl border-2 border-[#D4AF37] p-3.5 shadow-lg flex items-center justify-between gap-3">
         <div className="flex items-center gap-2.5 min-w-0">
@@ -549,17 +579,11 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
               }
               disabledConfirm={submitting || (isElectronic && pkg.availableCount <= 0)}
               canEdit={false}
-              onIncrement={() => adjustQty(pkg.id, 1)}
-              onDecrement={() => adjustQty(pkg.id, -1)}
-              onSetQty={(next) => setQtyDirect(pkg.id, next)}
-              onConfirm={() => {
-                if (qty === 0) {
-                  adjustQty(pkg.id, 10);
-                } else {
-                  void handleExecuteWholesale(false);
-                }
-              }}
-              onClearOrDelete={() => setQtyDirect(pkg.id, 0)}
+              onIncrement={handleIncrement}
+              onDecrement={handleDecrement}
+              onSetQty={setQtyDirect}
+              onConfirm={handleTileConfirm}
+              onClearOrDelete={handleClearPkg}
             />
           );
         })}
@@ -605,9 +629,9 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
         </div>
       )}
 
-      {/* UPDATE 4: FLOATING BOTTOM MULTI-PACKAGE CONFIRMATION BAR */}
+      {/* FLOATING BOTTOM MULTI-PACKAGE CONFIRMATION BAR (Lifted above Android Navigation Bar) */}
       {selectedItems.length > 0 && (
-        <div className="fixed bottom-3 inset-x-3 z-40 max-w-2xl mx-auto">
+        <div className="fixed bottom-[calc(env(safe-area-inset-bottom,0px)+48px)] inset-x-3 z-40 max-w-2xl mx-auto">
           <div className="rounded-2xl royal-header-3d border-2 border-[#D4AF37] p-3 shadow-2xl flex flex-wrap items-center justify-between gap-2">
             <div className="min-w-0">
               <div className="text-xs font-extrabold text-[#FDE68A] tabular-nums">

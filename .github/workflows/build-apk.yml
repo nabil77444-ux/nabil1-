@@ -186,11 +186,12 @@ jobs:
           echo "APK_VERSION_CODE=${VERSION_CODE}" >> "$GITHUB_ENV"
           echo "APK_VERSION_NAME=${VERSION_NAME}" >> "$GITHUB_ENV"
 
-          # 3. Configure Required Native Permissions (Contacts, BiometricPrompt & Notifications)
+          # 3. Configure Required Native Permissions (Contacts, BiometricPrompt/Fingerprint & Notifications)
           MANIFEST="android/app/src/main/AndroidManifest.xml"
           for PERM in \
             "android.permission.READ_CONTACTS" \
             "android.permission.USE_BIOMETRIC" \
+            "android.permission.USE_FINGERPRINT" \
             "android.permission.POST_NOTIFICATIONS"; do
             if ! grep -q "$PERM" "$MANIFEST"; then
               sed -i "0,/<application/{s|<application|<uses-permission android:name=\"$PERM\" />\n    <application|}" "$MANIFEST"

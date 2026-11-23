@@ -14,12 +14,12 @@ interface PackageCardTileProps {
   confirmLabel?: string;
   disabledConfirm?: boolean;
   canEdit?: boolean;
-  onIncrement: () => void;
-  onDecrement: () => void;
-  onSetQty?: (nextQty: number) => void;
-  onConfirm: () => void;
-  onEdit?: () => void;
-  onClearOrDelete: () => void;
+  onIncrement: (pkgId: string) => void;
+  onDecrement: (pkgId: string) => void;
+  onSetQty?: (pkgId: string, nextQty: number) => void;
+  onConfirm: (pkg: PackageDoc) => void;
+  onEdit?: (pkg: PackageDoc) => void;
+  onClearOrDelete: (pkgId: string) => void;
   clearLabel?: string;
 }
 
@@ -134,7 +134,7 @@ export const PackageCardTile: React.FC<PackageCardTileProps> = React.memo(
         <div className="rounded-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 px-1 py-0.5 flex items-center justify-between shadow-xs">
           <button
             type="button"
-            onClick={onIncrement}
+            onClick={() => onIncrement(pkg.id)}
             aria-label="زيادة الكمية"
             className="w-6 h-6 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white flex items-center justify-center active:scale-95 transition-transform shrink-0 shadow-xs"
           >
@@ -146,7 +146,7 @@ export const PackageCardTile: React.FC<PackageCardTileProps> = React.memo(
               type="number"
               min={0}
               value={qty}
-              onChange={(e) => onSetQty(Math.max(0, Number(e.target.value) || 0))}
+              onChange={(e) => onSetQty(pkg.id, Math.max(0, Number(e.target.value) || 0))}
               aria-label="الكمية"
               className="w-11 text-center bg-transparent text-xs font-extrabold text-slate-900 dark:text-white tabular-nums focus:outline-none"
             />
@@ -158,7 +158,7 @@ export const PackageCardTile: React.FC<PackageCardTileProps> = React.memo(
 
           <button
             type="button"
-            onClick={onDecrement}
+            onClick={() => onDecrement(pkg.id)}
             disabled={qty === 0}
             aria-label="إنقاص الكمية"
             className="w-6 h-6 rounded-full bg-slate-200 dark:bg-slate-700 text-slate-800 dark:text-slate-100 flex items-center justify-center disabled:opacity-40 active:scale-95 transition-transform shrink-0"
@@ -171,7 +171,7 @@ export const PackageCardTile: React.FC<PackageCardTileProps> = React.memo(
         <button
           type="button"
           disabled={disabledConfirm}
-          onClick={onConfirm}
+          onClick={() => onConfirm(pkg)}
           className="w-full min-h-[32px] rounded-full bg-gradient-to-b from-emerald-500 to-emerald-700 hover:from-emerald-600 hover:to-emerald-800 text-white text-[11px] sm:text-xs font-extrabold shadow-sm active:scale-[0.98] transition-all disabled:opacity-45 flex items-center justify-center gap-1 px-2"
         >
           <ShoppingCart className="w-3 h-3 shrink-0" />
@@ -183,7 +183,7 @@ export const PackageCardTile: React.FC<PackageCardTileProps> = React.memo(
           <button
             type="button"
             disabled={!canEdit || !onEdit}
-            onClick={onEdit}
+            onClick={() => onEdit?.(pkg)}
             className="min-h-[27px] rounded-full bg-white dark:bg-slate-900 border border-blue-400/90 text-blue-700 dark:text-blue-300 text-[10.5px] font-extrabold flex items-center justify-center gap-1 disabled:opacity-45 active:scale-95 transition-transform"
           >
             <Edit3 className="w-2.5 h-2.5 shrink-0" />
@@ -191,7 +191,7 @@ export const PackageCardTile: React.FC<PackageCardTileProps> = React.memo(
           </button>
           <button
             type="button"
-            onClick={onClearOrDelete}
+            onClick={() => onClearOrDelete(pkg.id)}
             className="min-h-[27px] rounded-full bg-white dark:bg-slate-900 border border-red-400/90 text-red-600 dark:text-red-400 text-[10.5px] font-extrabold flex items-center justify-center gap-1 active:scale-95 transition-transform"
           >
             <Trash2 className="w-2.5 h-2.5 shrink-0" />
