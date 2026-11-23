@@ -19,6 +19,7 @@ import { useFirebase } from '../contexts/FirebaseContext';
 import { useFeedback } from '../lib/feedback';
 import { verifyDeviceBiometric } from '../lib/biometric';
 import {
+  applyMessageTemplate,
   exportAsArabicPDF,
   exportAsHDImage,
   openSmsShare,
@@ -166,17 +167,33 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
     }
   };
 
-  const buildUnifiedDirectMessage = (sale: SaleDoc): string => {
+  const buildUnifiedDirectMessage = (
+    sale: SaleDoc,
+    channel: 'default' | 'sms' | 'whatsapp' = 'default'
+  ): string => {
     const items = sale.items || [];
+    const formattedDate = formatDateTimeAr(sale.createdAt);
+    const invoiceNum = sale.invoiceNumber || sale.id.slice(-6);
     if (items.length === 1 && items[0].cardNumbers.length === 1) {
-      const tpl = appSettings.directSaleMessageTemplate || '';
-      return tpl
-        .replace(/\{package\}/g, items[0].packageLabel)
-        .replace(/\{card\}/g, items[0].cardNumbers[0]);
+      const tpl =
+        channel === 'sms'
+          ? appSettings.smsMessageTemplate || appSettings.directSaleMessageTemplate || ''
+          : channel === 'whatsapp'
+            ? appSettings.whatsappMessageTemplate || appSettings.directSaleMessageTemplate || ''
+            : appSettings.directSaleMessageTemplate || appSettings.whatsappMessageTemplate || '';
+      return applyMessageTemplate(tpl, {
+        package: items[0].packageLabel,
+        card: items[0].cardNumbers[0],
+        buyer: sale.buyerName,
+        total: `${sale.totalAmount} ر.ي`,
+        invoice: invoiceNum,
+        date: formattedDate,
+      });
     }
     const lines = [
       `📶 شبكة طيبة نت اللاسلكية (TAIBAH NET)`,
-      `🧾 فاتورة بيع مباشر #${sale.invoiceNumber || sale.id.slice(-6)}`,
+      `🧾 فاتورة بيع مباشر #${invoiceNum}`,
+      `📅 التاريخ: ${formattedDate}`,
       `👤 الزبون: ${sale.buyerName}`,
       `────────────────────`,
     ];
@@ -251,7 +268,7 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
         </div>
 
         {/* Utility Buttons Row */}
-        <div className="grid grid-cols-2 gap-2">
+        <div className={`grid gap-2 ${isAdmin ? 'grid-cols-2' : 'grid-cols-1'}`}>
           <button
             type="button"
             onClick={() => setShowReturnsModal(true)}
@@ -260,17 +277,19 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
             <RotateCcw className="w-3.5 h-3.5 text-[#FDE68A]" />
             <span>التسليم / المرتجعات</span>
           </button>
-          <button
-            type="button"
-            onClick={() => {
-              setTemplateText(appSettings.directSaleMessageTemplate);
-              setShowTemplateModal(true);
-            }}
-            className="min-h-[38px] rounded-xl bg-white/15 hover:bg-white/25 border border-[#D4AF37]/70 text-white text-xs font-extrabold flex items-center justify-center gap-1.5"
-          >
-            <Settings2 className="w-3.5 h-3.5 text-[#FDE68A]" />
-            <span>تحرير صيغة الرسالة</span>
-          </button>
+          {isAdmin && (
+            <button
+              type="button"
+              onClick={() => {
+                setTemplateText(appSettings.directSaleMessageTemplate);
+                setShowTemplateModal(true);
+              }}
+              className="min-h-[38px] rounded-xl bg-white/15 hover:bg-white/25 border border-[#D4AF37]/70 text-white text-xs font-extrabold flex items-center justify-center gap-1.5"
+            >
+              <Settings2 className="w-3.5 h-3.5 text-[#FDE68A]" />
+              <span>تحرير صيغة الرسالة</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -404,7 +423,10 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
                 <button
                   type="button"
                   onClick={() => {
-                    openWhatsAppShare(completedSale.buyerPhone, buildUnifiedDirectMessage(completedSale));
+                    openWhatsAppShare(
+                      completedSale.buyerPhone,
+                      buildUnifiedDirectMessage(completedSale, 'whatsapp')
+                    );
                     notifySuccess('تم فتح واتساب لإرسال الكروت');
                   }}
                   className="min-h-[42px] rounded-xl bg-emerald-600 text-white text-xs font-extrabold flex items-center justify-center gap-1.5"
@@ -415,7 +437,10 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
                 <button
                   type="button"
                   onClick={() => {
-                    openSmsShare(completedSale.buyerPhone, buildUnifiedDirectMessage(completedSale));
+                    openSmsShare(
+                      completedSale.buyerPhone,
+                      buildUnifiedDirectMessage(completedSale, 'sms')
+                    );
                     notifySuccess('تم فتح SMS لإرسال الكروت');
                   }}
                   className="min-h-[42px] rounded-xl bg-blue-600 text-white text-xs font-extrabold flex items-center justify-center gap-1.5"
@@ -530,7 +555,7 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
           <div className="w-full max-w-md rounded-3xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] shadow-2xl overflow-hidden max-h-[85dvh] flex flex-col">
             <div className="royal-header-3d px-4 py-3 flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <img src={TAIBAH_ASSETS.logo} alt="طيبة نت" className="w-8 h-8 rounded-full object-cover border border-[#D4AF37]" />
+                <img src={TAIBAH_ASSETS.logo} alt="طيبة نت" className="w-8 h-8 rounded-full object-contain bg-white p-0.5 border border-[#D4AF37]" />
                 <h3 className="text-sm font-extrabold text-white">سجل التسليم والمرتجعات المباشرة</h3>
               </div>
               <button

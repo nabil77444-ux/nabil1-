@@ -1,5 +1,5 @@
-import React, { useMemo, useRef, useState } from 'react';
-import { Contact, Search, Upload, User, X } from 'lucide-react';
+import React, { useMemo, useState } from 'react';
+import { Contact, Phone, Search, User, X } from 'lucide-react';
 import { useFirebase } from '../contexts/FirebaseContext';
 import { useFeedback } from '../lib/feedback';
 import { cleanYemeniPhone } from '../utils/shareExport';
@@ -17,16 +17,22 @@ interface ContactPickerButtonProps {
   unauthenticated?: boolean;
 }
 
+interface NativeContactEntry {
+  name?: { display?: string; given?: string; family?: string };
+  phones?: Array<{ number?: string }>;
+}
+
 interface CapacitorContactsWindow extends Window {
   Capacitor?: {
     isNativePlatform?: () => boolean;
     Plugins?: {
       Contacts?: {
+        requestPermissions?: () => Promise<{ contacts?: string }>;
         pickContact?: (opts?: { projection?: Record<string, boolean> }) => Promise<{
-          contact?: {
-            name?: { display?: string };
-            phones?: Array<{ number?: string }>;
-          };
+          contact?: NativeContactEntry;
+        }>;
+        getContacts?: (opts?: { projection?: Record<string, boolean> }) => Promise<{
+          contacts?: NativeContactEntry[];
         }>;
       };
     };
@@ -34,33 +40,15 @@ interface CapacitorContactsWindow extends Window {
 }
 
 /**
- * Parse a .vcf (vCard) file exported from Android/iOS contacts into { name, phone } entries.
- */
-function parseVCardContacts(vcfText: string): PickedContact[] {
-  const results: PickedContact[] = [];
-  const cards = vcfText.split(/BEGIN:VCARD/i).slice(1);
-  for (const card of cards) {
-    const fnMatch = card.match(/FN[^:]*:([^\r\n]+)/i);
-    const telMatch = card.match(/TEL[^:]*:([^\r\n]+)/i);
-    const name = (fnMatch?.[1] || '').trim();
-    const phone = cleanYemeniPhone(telMatch?.[1] || '');
-    if (name || phone) {
-      results.push({ name: name || phone, phone });
-    }
-  }
-  return results;
-}
-
-/**
- * Universal Contact Picker (Update 13):
- * 1. Native Android APK Capacitor Contacts plugin
- * 2. Web Contact Picker API (navigator.contacts.select)
- * 3. In-app Smart Contact Modal (searchable app customers/agents + .vcf phone contact file import)
+ * Direct Real Phone Contacts Picker:
+ * 1. Native Android APK via @capacitor-community/contacts (requestPermissions -> pickContact / getContacts)
+ * 2. Mobile Web/PWA via navigator.contacts.select
+ * 3. Searchable In-App Directory fallback (only when browser/iframe lacks native Phonebook API — NO .vcf button)
  */
 export const ContactPickerButton: React.FC<ContactPickerButtonProps> = ({
   onSelect,
   className,
-  title = 'جلب من جهات الاتصال',
+  title = 'جلب من جهات اتصال الهاتف',
   unauthenticated = false,
 }) => {
   const { customers, managedUsers } = useFirebase();
@@ -68,15 +56,18 @@ export const ContactPickerButton: React.FC<ContactPickerButtonProps> = ({
 
   const [modalOpen, setModalOpen] = useState(false);
   const [search, setSearch] = useState('');
-  const [vcfContacts, setVcfContacts] = useState<PickedContact[]>([]);
-  const vcfInputRef = useRef<HTMLInputElement | null>(null);
+  const [phonebookContacts, setPhonebookContacts] = useState<PickedContact[]>([]);
 
   const directoryContacts = useMemo(() => {
     const map = new Map<string, PickedContact & { tag: string }>();
 
-    for (const c of vcfContacts) {
-      const key = `${c.phone || c.name}`;
-      if (!map.has(key)) map.set(key, { ...c, tag: 'ملف جهات اتصال' });
+    // Real device contacts fetched via Capacitor getContacts (if pickContact wasn't used)
+    for (const c of phonebookContacts) {
+      const phone = cleanYemeniPhone(c.phone);
+      const key = phone || c.name;
+      if (key && !map.has(key)) {
+        map.set(key, { name: c.name || phone, phone, tag: 'دليل الهاتف' });
+      }
     }
 
     if (!unauthenticated) {
@@ -113,35 +104,81 @@ export const ContactPickerButton: React.FC<ContactPickerButtonProps> = ({
         item.phone.includes(q) ||
         item.tag.toLowerCase().includes(q)
     );
-  }, [customers, managedUsers, vcfContacts, search, unauthenticated]);
+  }, [customers, managedUsers, phonebookContacts, search, unauthenticated]);
 
   const handleFinishPick = (picked: PickedContact) => {
     const cleanPhone = cleanYemeniPhone(picked.phone);
     onSelect({ name: picked.name.trim(), phone: cleanPhone });
-    notifySuccess('تم جلب الاسم والرقم بنجاح ✅');
+    notifySuccess('تم جلب الاسم والرقم من جهات الاتصال ✅');
     setModalOpen(false);
   };
 
   const handleClick = async () => {
-    // Tier 1: Native Android APK via Capacitor Contacts plugin
     const capWin = window as CapacitorContactsWindow;
-    if (capWin.Capacitor?.isNativePlatform?.() && capWin.Capacitor.Plugins?.Contacts?.pickContact) {
+    const nativeContacts = capWin.Capacitor?.Plugins?.Contacts;
+
+    // Tier 1: Native Android APK — Direct Real Phonebook Access
+    if (capWin.Capacitor?.isNativePlatform?.() && nativeContacts) {
       try {
-        const res = await capWin.Capacitor.Plugins.Contacts.pickContact({
-          projection: { name: true, phones: true },
-        });
-        const name = (res.contact?.name?.display || '').trim();
-        const phone = cleanYemeniPhone(res.contact?.phones?.[0]?.number || '');
-        if (name || phone) {
-          handleFinishPick({ name, phone });
+        if (typeof nativeContacts.requestPermissions === 'function') {
+          const perm = await nativeContacts.requestPermissions();
+          if (perm?.contacts === 'denied') {
+            notifyInfo('يرجى السماح بصلاحية جهات الاتصال من إعدادات الهاتف للوصول المباشر لدليل الهاتف');
+          }
+        }
+
+        if (typeof nativeContacts.pickContact === 'function') {
+          const res = await nativeContacts.pickContact({
+            projection: { name: true, phones: true },
+          });
+          const entry = res?.contact;
+          const displayName = (
+            entry?.name?.display ||
+            [entry?.name?.given, entry?.name?.family].filter(Boolean).join(' ') ||
+            ''
+          ).trim();
+          const rawNumber = entry?.phones?.find((p) => p.number)?.number || '';
+          const phone = cleanYemeniPhone(rawNumber);
+          if (displayName || phone) {
+            handleFinishPick({ name: displayName || phone, phone });
+            return;
+          }
+          // If user dismissed native contact picker, stop without opening extra modal
           return;
         }
       } catch {
-        // Fallback cleanly to next tier
+        // If native pickContact failed on a specific ROM, try direct getContacts list
+        if (typeof nativeContacts.getContacts === 'function') {
+          try {
+            const listRes = await nativeContacts.getContacts({
+              projection: { name: true, phones: true },
+            });
+            const extracted: PickedContact[] = [];
+            for (const entry of listRes?.contacts || []) {
+              const name = (
+                entry.name?.display ||
+                [entry.name?.given, entry.name?.family].filter(Boolean).join(' ') ||
+                ''
+              ).trim();
+              const phone = cleanYemeniPhone(entry.phones?.find((p) => p.number)?.number || '');
+              if (phone || name) {
+                extracted.push({ name: name || phone, phone });
+              }
+            }
+            if (extracted.length > 0) {
+              setPhonebookContacts(extracted);
+              setSearch('');
+              setModalOpen(true);
+              return;
+            }
+          } catch {
+            // Fall through cleanly
+          }
+        }
       }
     }
 
-    // Tier 2: Web Contact Picker API (Android Chrome / PWA)
+    // Tier 2: Mobile Web / PWA Contact Picker API (Direct Phone Contacts)
     try {
       const nav = navigator as Navigator & {
         contacts?: {
@@ -157,38 +194,19 @@ export const ContactPickerButton: React.FC<ContactPickerButtonProps> = ({
           const name = (picked[0].name?.[0] || '').trim();
           const phone = cleanYemeniPhone(picked[0].tel?.[0] || '');
           if (name || phone) {
-            handleFinishPick({ name, phone });
+            handleFinishPick({ name: name || phone, phone });
             return;
           }
         }
-        return; // User dismissed native sheet
+        return; // User closed native contact sheet
       }
     } catch {
-      // Blocked in iframe/desktop — fall through to smart in-app picker modal
+      // Blocked in desktop browser/iframe — open searchable in-app directory
     }
 
-    // Tier 3: Smart In-App Contact Directory + .vcf Phone File Picker
+    // Tier 3: Searchable In-App Directory (Customers & Agents)
     setSearch('');
     setModalOpen(true);
-  };
-
-  const handleVcfFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    try {
-      const text = await file.text();
-      const parsed = parseVCardContacts(text);
-      if (parsed.length === 0) {
-        notifyInfo('لم يُعثر على أرقام داخل ملف جهات الاتصال');
-      } else if (parsed.length === 1) {
-        handleFinishPick(parsed[0]);
-      } else {
-        setVcfContacts(parsed);
-        notifySuccess(`تم استيراد ${parsed.length} جهة اتصال من الملف — اختر اسماً`);
-      }
-    } finally {
-      if (vcfInputRef.current) vcfInputRef.current.value = '';
-    }
   };
 
   return (
@@ -214,8 +232,8 @@ export const ContactPickerButton: React.FC<ContactPickerButtonProps> = ({
           <div className="w-full max-w-md rounded-3xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] shadow-2xl overflow-hidden my-auto max-h-[85dvh] flex flex-col">
             <div className="royal-header-3d px-4 py-3 flex items-center justify-between">
               <div className="flex items-center gap-2 text-white">
-                <Contact className="w-5 h-5 text-[#FDE68A]" />
-                <h3 className="text-sm font-extrabold">اختيار من جهات الاتصال</h3>
+                <Phone className="w-5 h-5 text-[#FDE68A]" />
+                <h3 className="text-sm font-extrabold">دليل جهات الاتصال</h3>
               </div>
               <button
                 type="button"
@@ -227,43 +245,25 @@ export const ContactPickerButton: React.FC<ContactPickerButtonProps> = ({
             </div>
 
             <div className="p-3.5 space-y-3 flex-1 overflow-y-auto">
-              {/* Search existing directory */}
               <div className="relative">
                 <Search className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2" />
                 <input
                   type="text"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
-                  placeholder="بحث بالاسم أو الرقم..."
+                  placeholder="بحث بالاسم أو رقم الهاتف..."
                   className="w-full min-h-[40px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 pr-9 pl-3 text-xs font-bold focus:border-[#D4AF37] focus:outline-none"
                 />
               </div>
 
-              {/* .vcf vCard phone contacts import fallback */}
-              <input
-                ref={vcfInputRef}
-                type="file"
-                accept=".vcf,text/vcard"
-                onChange={handleVcfFile}
-                className="hidden"
-              />
-              <button
-                type="button"
-                onClick={() => vcfInputRef.current?.click()}
-                className="w-full min-h-[40px] rounded-xl border border-dashed border-[#D4AF37] bg-amber-50/70 dark:bg-amber-950/25 text-[#1A365D] dark:text-[#FDE68A] text-xs font-extrabold flex items-center justify-center gap-1.5"
-              >
-                <Upload className="w-4 h-4" />
-                <span>استيراد جهة اتصال من ملف الهاتف (.vcf)</span>
-              </button>
-
               {directoryContacts.length === 0 ? (
                 <div className="rounded-2xl bg-slate-50 dark:bg-slate-800 p-5 text-center text-xs font-bold text-slate-500 dark:text-slate-400 leading-relaxed">
-                  لا توجد جهات اتصال محفوظة في القائمة حالياً.
+                  لا توجد جهات اتصال مطابقة حالياً.
                   <br />
-                  يمكنك استيراد ملف <strong>.vcf</strong> من الهاتف أو فتح التطبيق على الهاتف/APK للوصول المباشر لدليل الهاتف.
+                  عند استخدام تطبيق أندرويد (APK) أو متصفح الهاتف يتم فتح دليل جهات اتصال الهاتف مباشرة بضغطة واحدة.
                 </div>
               ) : (
-                <div className="space-y-1.5 max-h-64 overflow-y-auto">
+                <div className="space-y-1.5 max-h-72 overflow-y-auto">
                   {directoryContacts.map((c, idx) => (
                     <button
                       key={`${c.phone}_${idx}`}

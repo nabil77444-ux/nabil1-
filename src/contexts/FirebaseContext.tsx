@@ -54,6 +54,22 @@ import {
   type UserProfile,
 } from '../types/taibah';
 import { useFeedback } from '../lib/feedback';
+import {
+  consumeCachedAvailableCards,
+  enqueueOfflineSale,
+  getCachedAvailableCards,
+  getPendingOfflineSales,
+  isCardLocallyLocked,
+  lockCardsLocally,
+  offlineSaleToSaleDoc,
+  releaseCardLocksLocally,
+  removeCardsFromCache,
+  removeSyncedOfflineSale,
+  saveCachedAvailableCards,
+  type CachedAvailableCard,
+  type OfflineQueuedSale,
+} from '../lib/offlineCards';
+import { setGlobalShareTemplates } from '../utils/shareExport';
 
 export interface SaleExecutionInput {
   saleType: 'direct' | 'electronic_wholesale' | 'paper_invoice';
@@ -254,8 +270,14 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [customersLimit, setCustomersLimit] = useState(50);
   const [auditLogsLimit, setAuditLogsLimit] = useState(40);
 
-  const [packages, setPackages] = useState<PackageDoc[]>(() =>
+  const [rawPackages, setRawPackages] = useState<PackageDoc[]>(() =>
     readCachedJson<PackageDoc[]>(CACHE_PACKAGES_KEY, [])
+  );
+  const [personalCardCounts, setPersonalCardCounts] = useState<Record<string, number>>({});
+  const [personalSoldCounts, setPersonalSoldCounts] = useState<Record<string, number>>({});
+  const [offlinePoolVersion, setOfflinePoolVersion] = useState(0);
+  const [pendingOfflineSales, setPendingOfflineSales] = useState<OfflineQueuedSale[]>(() =>
+    getPendingOfflineSales()
   );
   const [sales, setSales] = useState<SaleDoc[]>([]);
   const [customers, setCustomers] = useState<CustomerAccount[]>([]);
@@ -274,6 +296,11 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const loadMoreSales = useCallback(() => setSalesLimit((prev) => prev + 40), []);
   const loadMoreCustomers = useCallback(() => setCustomersLimit((prev) => prev + 50), []);
   const loadMoreAuditLogs = useCallback(() => setAuditLogsLimit((prev) => prev + 40), []);
+
+  // Keep global PDF/SMS/WhatsApp templates synchronized with live AppSettings
+  useEffect(() => {
+    setGlobalShareTemplates(appSettings);
+  }, [appSettings]);
 
   // Silent background connectivity probe + public settings/global listener (non-blocking)
   useEffect(() => {
@@ -302,10 +329,20 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           setAppSettings(merged);
           writeCachedJson(CACHE_SETTINGS_KEY, {
             newsTicker: merged.newsTicker,
+            newsTickerEnabled: merged.newsTickerEnabled,
+            newsTickerSpeed: merged.newsTickerSpeed,
+            sliderEnabled: merged.sliderEnabled,
+            sliderSpeed: merged.sliderSpeed,
+            sliderSlides: merged.sliderSlides,
             lowStockThreshold: merged.lowStockThreshold,
             agentDiscountPercent: merged.agentDiscountPercent,
             clientDiscountPercent: merged.clientDiscountPercent,
             directSaleMessageTemplate: merged.directSaleMessageTemplate,
+            smsMessageTemplate: merged.smsMessageTemplate,
+            whatsappMessageTemplate: merged.whatsappMessageTemplate,
+            pdfHeaderTitle: merged.pdfHeaderTitle,
+            pdfHeaderSubtitle: merged.pdfHeaderSubtitle,
+            pdfFooterText: merged.pdfFooterText,
             appDescription: merged.appDescription,
           });
         }
@@ -335,7 +372,9 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         writeCachedJson(CACHE_PROFILE_KEY, null);
         setProfile(null);
         setProfileLoading(false);
-        setPackages([]);
+        setRawPackages([]);
+        setPersonalCardCounts({});
+        setPersonalSoldCounts({});
         setSales([]);
         setCustomers([]);
         setLedgerEntries([]);
@@ -601,7 +640,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const isAdmin = profile.role === 'super_admin';
     const isAgent = profile.role === 'agent';
 
-    // 1. Live Packages Inventory (8 small documents — cached locally for <0.5s instant display)
+    // 1. Live Packages Metadata (8 small documents — cached locally for instant display)
     unsubscribers.push(
       onSnapshot(
         query(collection(db, 'packages'), where('price', '>', 0)),
@@ -609,7 +648,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           const list = snap.docs
             .map((d) => ({ id: d.id, ...(d.data() as Omit<PackageDoc, 'id'>) }))
             .sort((a, b) => a.sortOrder - b.sortOrder);
-          setPackages(list);
+          setRawPackages(list);
           writeCachedJson(
             CACHE_PACKAGES_KEY,
             list.map(({ updatedAt: _u, ...rest }) => rest)
@@ -619,6 +658,67 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         (err) => handleFirestoreError(err, OperationType.LIST, 'packages')
       )
     );
+
+    // 1B. STRICT ACCOUNT ISOLATION + OFFLINE CARD POOL SYNC
+    // Non-admins (agent/client) ONLY see their own cards (`ownerId == uid`), never Admin stock.
+    // Super Admin caches a lightweight pool of own available cards for seamless offline selling.
+    if (!isAdmin) {
+      unsubscribers.push(
+        onSnapshot(
+          query(collection(db, 'cards'), where('ownerId', '==', activeUser.uid), limit(1500)),
+          (snap) => {
+            const availCounts: Record<string, number> = {};
+            const soldCounts: Record<string, number> = {};
+            const cachedAvail: CachedAvailableCard[] = [];
+            for (const d of snap.docs) {
+              const data = d.data() as CardDoc;
+              if (data.status === 'available' && !isCardLocallyLocked(data.cardNumber)) {
+                availCounts[data.packageId] = (availCounts[data.packageId] || 0) + 1;
+                cachedAvail.push({
+                  id: d.id,
+                  packageId: data.packageId,
+                  cardNumber: data.cardNumber,
+                  ownerId: activeUser.uid,
+                });
+              } else if (data.status === 'sold') {
+                soldCounts[data.packageId] = (soldCounts[data.packageId] || 0) + 1;
+              }
+            }
+            setPersonalCardCounts(availCounts);
+            setPersonalSoldCounts(soldCounts);
+            saveCachedAvailableCards(activeUser.uid, cachedAvail);
+          },
+          (err) => handleFirestoreError(err, OperationType.LIST, 'cards')
+        )
+      );
+    } else if (navigator.onLine) {
+      // Background refresh of Admin's offline-ready pool (up to 400 available cards across packages)
+      getDocs(
+        query(
+          collection(db, 'cards'),
+          where('ownerId', '==', activeUser.uid),
+          where('status', '==', 'available'),
+          limit(400)
+        )
+      )
+        .then((snap) => {
+          const cachedAvail: CachedAvailableCard[] = snap.docs
+            .map((d) => {
+              const data = d.data() as CardDoc;
+              return {
+                id: d.id,
+                packageId: data.packageId,
+                cardNumber: data.cardNumber,
+                ownerId: activeUser.uid,
+              };
+            })
+            .filter((c) => !isCardLocallyLocked(c.cardNumber));
+          if (cachedAvail.length > 0) {
+            saveCachedAvailableCards(activeUser.uid, cachedAvail);
+          }
+        })
+        .catch(() => {});
+    }
 
     // 2. Lightweight Notifications Stream (limit 30)
     const notifQuery = isAdmin
@@ -902,6 +1002,67 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     syncNonce,
   ]);
 
+  // Account-isolated packages view: Super Admin sees central inventory; Agents & Clients see ONLY their own cards!
+  const packages = useMemo<PackageDoc[]>(() => {
+    const baseList = rawPackages.length > 0 ? rawPackages : (EXCLUSIVE_PACKAGES as PackageDoc[]);
+    const activeUid = auth.currentUser?.uid || firebaseUser?.uid || profile?.uid || '';
+    const isAdmin = profile?.role === 'super_admin';
+
+    // Subtract any unsynced offline sales for instant accurate counts
+    const offlineSoldByPkg: Record<string, number> = {};
+    for (const qSale of pendingOfflineSales) {
+      if (qSale.sellerId !== activeUid) continue;
+      if (qSale.saleType === 'direct' || qSale.saleType === 'electronic_wholesale') {
+        for (const item of qSale.items) {
+          offlineSoldByPkg[item.packageId] = (offlineSoldByPkg[item.packageId] || 0) + item.delivered;
+        }
+      }
+    }
+
+    if (isAdmin) {
+      return baseList.map((pkg) => {
+        const offlineUsed = offlineSoldByPkg[pkg.id] || 0;
+        return {
+          ...pkg,
+          availableCount: Math.max(0, (Number(pkg.availableCount) || 0) - offlineUsed),
+          soldCount: (Number(pkg.soldCount) || 0) + offlineUsed,
+        };
+      });
+    }
+
+    // Strict Isolation for Agent & Client: NEVER expose Admin's availableCount/uploadedCount/soldCount/injectedCount
+    const cachedOfflinePool = activeUid ? getCachedAvailableCards(activeUid) : [];
+    const cachedByPkg: Record<string, number> = {};
+    for (const c of cachedOfflinePool) {
+      cachedByPkg[c.packageId] = (cachedByPkg[c.packageId] || 0) + 1;
+    }
+
+    return baseList.map((pkg) => {
+      const livePersonal = personalCardCounts[pkg.id];
+      const baseAvail =
+        livePersonal !== undefined ? livePersonal : cachedByPkg[pkg.id] || 0;
+      const offlineUsed = offlineSoldByPkg[pkg.id] || 0;
+      return {
+        ...pkg,
+        availableCount: Math.max(0, baseAvail - offlineUsed),
+        soldCount: (personalSoldCounts[pkg.id] || 0) + offlineUsed,
+        uploadedCount: 0,
+        injectedCount: 0,
+      };
+    });
+  }, [rawPackages, profile?.role, profile?.uid, firebaseUser?.uid, personalCardCounts, personalSoldCounts, pendingOfflineSales, offlinePoolVersion]);
+
+  // Merge pending offline sales at the top of live Firestore sales so they show up immediately in all lists/reports
+  const mergedSales = useMemo<SaleDoc[]>(() => {
+    const activeUid = auth.currentUser?.uid || firebaseUser?.uid || profile?.uid;
+    const relevantOffline = pendingOfflineSales
+      .filter((q) => !activeUid || q.sellerId === activeUid || profile?.role === 'super_admin')
+      .map(offlineSaleToSaleDoc);
+    if (relevantOffline.length === 0) return sales;
+    const liveIds = new Set(sales.map((s) => s.id));
+    return [...relevantOffline.filter((s) => !liveIds.has(s.id)), ...sales];
+  }, [pendingOfflineSales, sales, firebaseUser?.uid, profile?.uid, profile?.role]);
+
   const totalAvailableCards = useMemo(
     () => packages.reduce((sum, p) => sum + (Number(p.availableCount) || 0), 0),
     [packages]
@@ -916,6 +1077,115 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     () => topupRequests.filter((t) => t.status === 'pending'),
     [topupRequests]
   );
+
+  // Automatic Background Sync for Offline Queued Sales whenever internet reconnects
+  const flushOfflineSalesQueue = useCallback(async () => {
+    const activeUser = auth.currentUser || firebaseUser;
+    if (!activeUser || !profile || !navigator.onLine) return;
+    const queue = getPendingOfflineSales(activeUser.uid);
+    if (queue.length === 0) return;
+
+    let syncedCount = 0;
+    for (const qSale of queue) {
+      const syncKey = `sync_offline_${qSale.localId}`;
+      if (inFlightOpsRef.current.has(syncKey)) continue;
+      inFlightOpsRef.current.add(syncKey);
+      try {
+        await runTransaction(db, async (tx) => {
+          const isElectronic =
+            qSale.saleType === 'direct' || qSale.saleType === 'electronic_wholesale';
+
+          // Update card documents
+          if (isElectronic && qSale.cardDocIds.length > 0) {
+            for (const cardDocId of qSale.cardDocIds) {
+              const cardRef = doc(db, 'cards', cardDocId);
+              const cSnap = await tx.get(cardRef);
+              if (cSnap.exists()) {
+                if (qSale.transferOwnershipToBuyer && qSale.buyerId) {
+                  tx.update(cardRef, {
+                    status: 'available',
+                    ownerId: qSale.buyerId,
+                    soldTo: (qSale.buyerPhone || qSale.buyerName).slice(0, 128),
+                    saleId: qSale.localId,
+                    updatedAt: serverTimestamp(),
+                  });
+                } else {
+                  tx.update(cardRef, {
+                    status: 'sold',
+                    soldTo: (qSale.buyerPhone || qSale.buyerName).slice(0, 128),
+                    saleId: qSale.localId,
+                    updatedAt: serverTimestamp(),
+                  });
+                }
+              }
+            }
+
+            // Decrement global Admin package counters only when Super Admin executed the sale
+            if (profile.role === 'super_admin') {
+              for (const item of qSale.items) {
+                if (item.delivered <= 0) continue;
+                const pkgRef = doc(db, 'packages', item.packageId);
+                const pSnap = await tx.get(pkgRef);
+                if (pSnap.exists()) {
+                  const pData = pSnap.data() as PackageDoc;
+                  tx.update(pkgRef, {
+                    availableCount: Math.max(0, (Number(pData.availableCount) || 0) - item.delivered),
+                    soldCount: (Number(pData.soldCount) || 0) + item.delivered,
+                    updatedAt: serverTimestamp(),
+                  });
+                }
+              }
+            }
+          }
+
+          tx.set(doc(db, 'sales', qSale.localId), {
+            invoiceNumber: qSale.invoiceNumber,
+            sellerId: qSale.sellerId,
+            buyerId: (qSale.buyerId || '').slice(0, 128),
+            buyerName: qSale.buyerName.slice(0, 100),
+            buyerPhone: (qSale.buyerPhone || '').slice(0, 20),
+            buyerRole: qSale.buyerRole || 'consumer',
+            saleType: qSale.saleType,
+            paymentMethod: qSale.paymentMethod,
+            discountRate: qSale.discountRate,
+            totalAmount: qSale.totalAmount,
+            paidAmount: qSale.paidAmount,
+            remainingAmount: qSale.remainingAmount,
+            expectedProfit: qSale.expectedProfit,
+            realizedProfit: qSale.realizedProfit,
+            totalCards: qSale.totalCards,
+            deliveredCards: qSale.deliveredCards,
+            returnedCards: 0,
+            items: qSale.items.slice(0, 20),
+            cardNumbers: qSale.cardNumbers.slice(0, 200),
+            status: qSale.remainingAmount > 0 ? 'partial' : 'completed',
+            notes: (qSale.notes || '').slice(0, 500),
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        });
+
+        removeSyncedOfflineSale(qSale.localId);
+        syncedCount++;
+      } catch {
+        // Keep in queue for next connectivity retry
+      } finally {
+        inFlightOpsRef.current.delete(syncKey);
+      }
+    }
+
+    if (syncedCount > 0) {
+      setPendingOfflineSales(getPendingOfflineSales());
+      setOfflinePoolVersion((v) => v + 1);
+      notifySuccess(`تمت مزامنة ${syncedCount} عملية بيع محلية مع السحابة بنجاح ✅`);
+    }
+  }, [firebaseUser, notifySuccess, profile]);
+
+  useEffect(() => {
+    if (isOnline && authReady && profile?.status === 'active') {
+      flushOfflineSalesQueue().catch(() => {});
+    }
+  }, [isOnline, authReady, profile?.status, flushOfflineSalesQueue]);
 
   const refreshVerificationStatus = useCallback(async (): Promise<boolean> => {
     if (!auth.currentUser) return false;
@@ -1000,6 +1270,9 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     try {
       const ok = await testFirestoreConnection();
       setFirestoreConnected(ok);
+      if (ok) {
+        await flushOfflineSalesQueue();
+      }
       setSyncNonce((n) => n + 1);
       if (ok) {
         notifySuccess('تمت المزامنة السحابية اللحظية مع Firebase Firestore');
@@ -1009,7 +1282,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     } finally {
       setTimeout(() => setIsSyncing(false), 500);
     }
-  }, [notifyError, notifySuccess]);
+  }, [flushOfflineSalesQueue, notifyError, notifySuccess]);
 
   const signOutUser = useCallback(async () => {
     try {
@@ -1047,12 +1320,31 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const updateAppSettings = useCallback(
     async (updates: Partial<Omit<AppSettingsDoc, 'updatedAt'>>) => {
       if (!profile || profile.role !== 'super_admin') return;
+      const cleanSlides = (updates.sliderSlides ?? appSettings.sliderSlides ?? DEFAULT_APP_SETTINGS.sliderSlides ?? [])
+        .slice(0, 6)
+        .map((s, idx) => ({
+          id: (s.id || `slide_${idx + 1}`).slice(0, 40),
+          image: (s.image || '').slice(0, 120000),
+          title: (s.title || '').slice(0, 120),
+          subtitle: (s.subtitle || '').slice(0, 200),
+        }));
+
       const merged: Omit<AppSettingsDoc, 'updatedAt'> = {
         newsTicker: (updates.newsTicker ?? appSettings.newsTicker).slice(0, 500),
+        newsTickerEnabled: updates.newsTickerEnabled ?? appSettings.newsTickerEnabled ?? true,
+        newsTickerSpeed: Math.min(90, Math.max(6, Number(updates.newsTickerSpeed ?? appSettings.newsTickerSpeed ?? 22))),
+        sliderEnabled: updates.sliderEnabled ?? appSettings.sliderEnabled ?? true,
+        sliderSpeed: Math.min(30, Math.max(2, Number(updates.sliderSpeed ?? appSettings.sliderSpeed ?? 5))),
+        sliderSlides: cleanSlides,
         lowStockThreshold: Math.max(0, Number(updates.lowStockThreshold ?? appSettings.lowStockThreshold)),
         agentDiscountPercent: Math.min(100, Math.max(1, Number(updates.agentDiscountPercent ?? appSettings.agentDiscountPercent))),
         clientDiscountPercent: Math.min(100, Math.max(1, Number(updates.clientDiscountPercent ?? appSettings.clientDiscountPercent))),
         directSaleMessageTemplate: (updates.directSaleMessageTemplate ?? appSettings.directSaleMessageTemplate).slice(0, 1000),
+        smsMessageTemplate: (updates.smsMessageTemplate ?? appSettings.smsMessageTemplate ?? DEFAULT_APP_SETTINGS.smsMessageTemplate ?? '').slice(0, 1000),
+        whatsappMessageTemplate: (updates.whatsappMessageTemplate ?? appSettings.whatsappMessageTemplate ?? DEFAULT_APP_SETTINGS.whatsappMessageTemplate ?? '').slice(0, 1500),
+        pdfHeaderTitle: (updates.pdfHeaderTitle ?? appSettings.pdfHeaderTitle ?? DEFAULT_APP_SETTINGS.pdfHeaderTitle ?? '').slice(0, 150),
+        pdfHeaderSubtitle: (updates.pdfHeaderSubtitle ?? appSettings.pdfHeaderSubtitle ?? DEFAULT_APP_SETTINGS.pdfHeaderSubtitle ?? '').slice(0, 250),
+        pdfFooterText: (updates.pdfFooterText ?? appSettings.pdfFooterText ?? DEFAULT_APP_SETTINGS.pdfFooterText ?? '').slice(0, 300),
         appDescription: (updates.appDescription ?? appSettings.appDescription ?? DEFAULT_APP_SETTINGS.appDescription ?? '').slice(0, 600),
         apkDownloadUrl: (updates.apkDownloadUrl ?? appSettings.apkDownloadUrl ?? '').slice(0, 300),
       };
@@ -1061,18 +1353,18 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           ...merged,
           updatedAt: serverTimestamp(),
         });
-        await writeAuditLog('تحديث الإعدادات العامة', 'تم تعديل إعدادات شبكة طيبة نت ووصف التطبيق والرابط المباشر');
-        notifySuccess('تم حفظ إعدادات الشبكة وتعميمها لحظياً');
+        await writeAuditLog('تحديث الإعدادات العامة', 'تم تعديل إعدادات شبكة طيبة نت والسلايدر وشريط الأخبار وصيغ الرسائل');
+        notifySuccess('تم حفظ إعدادات الشبكة وتعميمها لحظياً ✅');
       } catch (err) {
         handleFirestoreError(err, OperationType.WRITE, 'settings/global');
-        notifyError('فشل حفظ الإعدادات', 'تحقق من صلاحيات المدير العام.');
+        notifyError('فشل حفظ الإعدادات', 'تحقق من صلاحيات المدير العام أو حجم صور السلايدر.');
       }
     },
     [appSettings, notifyError, notifySuccess, profile, writeAuditLog]
   );
 
   // =========================================================================
-  // UPDATE 14: ULTRA-FAST PARALLEL CARD IMPORT ENGINE (3,000–5,000+ cards in seconds)
+  // ULTRA-FAST PARALLEL CARD IMPORT ENGINE (480 ops × 6 parallel waves)
   // =========================================================================
   const importCardsBatch = useCallback(
     async (
@@ -1117,8 +1409,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       }
 
       const batchId = generateSafeDocId('batch');
-      const CHUNK_SIZE = 450; // Safe under Firestore 500-op writeBatch limit
-      const PARALLEL_BATCHES = 4; // Commit 4 batches concurrently for blazing speed
+      const CHUNK_SIZE = 480; // Maximized safely under Firestore 500-op writeBatch limit
+      const PARALLEL_BATCHES = 6; // Commit 6 batches concurrently for maximum speed
       const chunks: string[][] = [];
       for (let i = 0; i < toInsert.length; i += CHUNK_SIZE) {
         chunks.push(toInsert.slice(i, i + CHUNK_SIZE));
@@ -1126,16 +1418,12 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
       let done = 0;
       try {
-        // Ensure admin token is fresh before launching parallel writes
-        await activeUser.getIdTokenResult(true);
-
         for (let wave = 0; wave < chunks.length; wave += PARALLEL_BATCHES) {
           const waveChunks = chunks.slice(wave, wave + PARALLEL_BATCHES);
           await Promise.all(
             waveChunks.map(async (chunk) => {
               const batch = writeBatch(db);
               for (const cardNumber of chunk) {
-                // Update 14: Card number IS the Document ID — instant deduplication without slow pre-reads!
                 batch.set(doc(db, 'cards', cardNumber), {
                   packageId,
                   cardNumber,
@@ -1156,12 +1444,22 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           );
         }
 
-        // Single atomic counter increment on the package document (Update 14)
+        // Single atomic counter increment on the package document
         await updateDoc(doc(db, 'packages', packageId), {
           availableCount: increment(done),
           uploadedCount: increment(done),
           updatedAt: serverTimestamp(),
         });
+
+        // Pre-populate Admin's offline card pool with newly imported cards immediately
+        const existingPool = getCachedAvailableCards(activeUser.uid);
+        const addedCards: CachedAvailableCard[] = toInsert.slice(0, 300).map((cardNumber) => ({
+          id: cardNumber,
+          packageId,
+          cardNumber,
+          ownerId: activeUser.uid,
+        }));
+        saveCachedAvailableCards(activeUser.uid, [...addedCards, ...existingPool]);
 
         if (onProgress) {
           onProgress(100, done, toInsert.length);
@@ -1239,8 +1537,130 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       inFlightOpsRef.current.add(opKey);
 
       const isElectronic = input.saleType === 'direct' || input.saleType === 'electronic_wholesale';
+      const transferOwnershipToBuyer =
+        input.saleType === 'electronic_wholesale' &&
+        !!input.buyerId &&
+        (input.buyerRole === 'agent' || input.buyerRole === 'client');
+
+      // OFFLINE-FIRST EXECUTION PATH (Zero Duplicate Guarantee via Local Card Lock)
+      const executeOfflineSale = (): SaleDoc | null => {
+        const saleId = generateSafeDocId('sale');
+        const invoiceNumber = `TN-${String(Date.now()).slice(-6)}`;
+        const lineItems: SaleLineItem[] = [];
+        const allPulledNumbers: string[] = [];
+        const allPulledDocIds: string[] = [];
+        let totalAmount = 0;
+        let faceValueTotal = 0;
+        let totalCards = 0;
+        let deliveredCards = 0;
+
+        const consumedByPkg: Array<{ pkgId: string; picked: CachedAvailableCard[] }> = [];
+
+        if (isElectronic) {
+          for (const item of requestedItems) {
+            const deliverTarget = Math.min(item.quantity, item.deliverNow ?? item.quantity);
+            if (deliverTarget <= 0) continue;
+            const picked = consumeCachedAvailableCards(activeUser.uid, item.packageId, deliverTarget);
+            if (!picked || picked.length < deliverTarget) {
+              // Release any already-locked cards from earlier items in this offline batch
+              for (const prev of consumedByPkg) {
+                releaseCardLocksLocally(prev.picked.map((c) => c.cardNumber));
+              }
+              const pkgMeta = packages.find((p) => p.id === item.packageId);
+              notifyError(
+                'المخزون المحلي غير كافٍ دون إنترنت',
+                `المتوفر محلياً لباقة ${pkgMeta?.price || item.packageId} ر.ي أقل من المطلوب (${deliverTarget}). يرجى الاتصال بالإنترنت للمزامنة.`
+              );
+              return null;
+            }
+            consumedByPkg.push({ pkgId: item.packageId, picked });
+          }
+        }
+
+        for (const item of requestedItems) {
+          const pkg =
+            packages.find((p) => p.id === item.packageId) ||
+            (EXCLUSIVE_PACKAGES.find((p) => p.id === item.packageId) as PackageDoc | undefined);
+          if (!pkg) continue;
+          const unitPrice = Math.round((pkg.price * input.discountRate) / 100);
+          const picked = consumedByPkg.find((c) => c.pkgId === item.packageId)?.picked || [];
+          const deliverCount = isElectronic ? picked.length : item.quantity;
+
+          for (const c of picked) {
+            allPulledNumbers.push(c.cardNumber);
+            allPulledDocIds.push(c.id);
+          }
+
+          lineItems.push({
+            packageId: item.packageId,
+            packageLabel: `باقة ${pkg.price} ر.ي (${pkg.dataLabel})`,
+            price: pkg.price,
+            unitPrice,
+            quantity: item.quantity,
+            delivered: deliverCount,
+            returned: 0,
+            cardNumbers: picked.map((p) => p.cardNumber),
+          });
+
+          totalAmount += unitPrice * item.quantity;
+          faceValueTotal += pkg.price * item.quantity;
+          totalCards += item.quantity;
+          deliveredCards += deliverCount;
+        }
+
+        const paidAmount =
+          input.paymentMethod === 'cash'
+            ? totalAmount
+            : input.paymentMethod === 'credit'
+              ? 0
+              : Math.min(totalAmount, Math.max(0, input.paidAmount));
+        const remainingAmount = Math.max(0, totalAmount - paidAmount);
+        const expectedProfit = Math.max(0, totalAmount - Math.round(faceValueTotal * 0.65));
+        const realizedProfit =
+          totalAmount > 0 ? Math.round((expectedProfit * paidAmount) / totalAmount) : 0;
+
+        const queued: OfflineQueuedSale = {
+          localId: saleId,
+          createdAtMs: Date.now(),
+          sellerId: activeUser.uid,
+          buyerId: input.buyerId,
+          buyerName: input.buyerName.trim() || 'زبون مباشر',
+          buyerPhone: input.buyerPhone,
+          buyerRole: input.buyerRole,
+          saleType: input.saleType,
+          paymentMethod: input.paymentMethod,
+          discountRate: input.discountRate,
+          totalAmount,
+          paidAmount,
+          remainingAmount,
+          expectedProfit,
+          realizedProfit,
+          totalCards,
+          deliveredCards,
+          items: lineItems,
+          cardNumbers: allPulledNumbers,
+          cardDocIds: allPulledDocIds,
+          invoiceNumber,
+          notes: input.notes,
+          transferOwnershipToBuyer,
+        };
+
+        enqueueOfflineSale(queued);
+        setPendingOfflineSales(getPendingOfflineSales());
+        setOfflinePoolVersion((v) => v + 1);
+        notifySuccess(
+          `تم تنفيذ البيع محلياً دون إنترنت (${totalCards} كرت) ✅ — محمي من التكرار وستتم المزامنة تلقائياً`
+        );
+        return offlineSaleToSaleDoc(queued);
+      };
+
+      const lockedCandidateNumbers: string[] = [];
 
       try {
+        if (!navigator.onLine) {
+          return executeOfflineSale();
+        }
+
         // Step 1: Pre-fetch candidate available cards for each requested package (if electronic)
         const candidateCardDocsByPkg: Record<string, Array<{ id: string; cardNumber: string }>> = {};
         if (isElectronic) {
@@ -1254,22 +1674,38 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               profile.role === 'super_admin'
                 ? query(
                     collection(db, 'cards'),
+                    where('ownerId', '==', activeUser.uid),
                     where('packageId', '==', item.packageId),
                     where('status', '==', 'available'),
-                    limit(deliverTarget + 10)
+                    limit(deliverTarget + 25)
                   )
                 : query(
                     collection(db, 'cards'),
                     where('ownerId', '==', activeUser.uid),
                     where('packageId', '==', item.packageId),
                     where('status', '==', 'available'),
-                    limit(deliverTarget + 10)
+                    limit(deliverTarget + 25)
                   );
-            const snap = await getDocs(q);
-            const list = snap.docs.map((d) => ({
-              id: d.id,
-              cardNumber: (d.data() as CardDoc).cardNumber,
-            }));
+            let snap = await getDocs(q);
+            // Fallback for legacy Super Admin cards if ownerId differed from current admin uid
+            if (profile.role === 'super_admin' && snap.docs.length < deliverTarget) {
+              snap = await getDocs(
+                query(
+                  collection(db, 'cards'),
+                  where('packageId', '==', item.packageId),
+                  where('status', '==', 'available'),
+                  limit(deliverTarget + 25)
+                )
+              );
+            }
+            // Exclude ANY locally locked card number to guarantee zero duplicate sales
+            const list = snap.docs
+              .map((d) => ({
+                id: d.id,
+                cardNumber: (d.data() as CardDoc).cardNumber,
+              }))
+              .filter((c) => !isCardLocallyLocked(c.cardNumber));
+
             if (list.length < deliverTarget) {
               const pkgMeta = packages.find((p) => p.id === item.packageId);
               notifyError(
@@ -1278,7 +1714,17 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               );
               return null;
             }
-            candidateCardDocsByPkg[item.packageId] = list.slice(0, deliverTarget);
+            const chosen = list.slice(0, deliverTarget);
+            candidateCardDocsByPkg[item.packageId] = chosen;
+            for (const c of chosen) {
+              lockedCandidateNumbers.push(c.cardNumber);
+            }
+          }
+
+          // Synchronously lock all candidate cards BEFORE entering Firestore transaction
+          if (lockedCandidateNumbers.length > 0 && !lockCardsLocally(lockedCandidateNumbers)) {
+            notifyWarning('أحد الكروت قيد التنفيذ حالياً، يرجى إعادة المحاولة فوراً.');
+            return null;
           }
         }
 
@@ -1311,7 +1757,12 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               const verified: Array<{ id: string; cardNumber: string }> = [];
               for (const c of candidates) {
                 const cSnap = await tx.get(doc(db, 'cards', c.id));
-                if (!cSnap.exists() || (cSnap.data() as CardDoc).status !== 'available') {
+                const cData = cSnap.exists() ? (cSnap.data() as CardDoc) : null;
+                if (
+                  !cData ||
+                  cData.status !== 'available' ||
+                  (profile.role !== 'super_admin' && cData.ownerId !== activeUser.uid)
+                ) {
                   throw new Error('أحد الكروت تم بيعه للتو في عملية أخرى، يرجى المحاولة مجدداً.');
                 }
                 verified.push(c);
@@ -1329,20 +1780,34 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
             if (isElectronic && verified.length > 0) {
               for (const c of verified) {
-                tx.update(doc(db, 'cards', c.id), {
-                  status: 'sold',
-                  soldTo: (input.buyerPhone || input.buyerName).slice(0, 128),
-                  saleId,
-                  updatedAt: serverTimestamp(),
-                });
+                if (transferOwnershipToBuyer && input.buyerId) {
+                  // Transfer real cards into the Agent/Client's isolated personal inventory
+                  tx.update(doc(db, 'cards', c.id), {
+                    status: 'available',
+                    ownerId: input.buyerId,
+                    soldTo: (input.buyerPhone || input.buyerName).slice(0, 128),
+                    saleId,
+                    updatedAt: serverTimestamp(),
+                  });
+                } else {
+                  tx.update(doc(db, 'cards', c.id), {
+                    status: 'sold',
+                    soldTo: (input.buyerPhone || input.buyerName).slice(0, 128),
+                    saleId,
+                    updatedAt: serverTimestamp(),
+                  });
+                }
                 allPulledNumbers.push(c.cardNumber);
               }
 
-              tx.update(doc(db, 'packages', item.packageId), {
-                availableCount: Math.max(0, (Number(pkg.availableCount) || 0) - verified.length),
-                soldCount: (Number(pkg.soldCount) || 0) + verified.length,
-                updatedAt: serverTimestamp(),
-              });
+              // Update global central package counters ONLY when Super Admin deducts from central pool
+              if (profile.role === 'super_admin') {
+                tx.update(doc(db, 'packages', item.packageId), {
+                  availableCount: Math.max(0, (Number(pkg.availableCount) || 0) - verified.length),
+                  soldCount: (Number(pkg.soldCount) || 0) + verified.length,
+                  updatedAt: serverTimestamp(),
+                });
+              }
             }
 
             lineItems.push({
@@ -1400,6 +1865,11 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             updatedAt: serverTimestamp(),
           });
         });
+
+        // Remove sold/transferred cards from seller's local cache immediately
+        if (allPulledNumbers.length > 0) {
+          removeCardsFromCache(activeUser.uid, allPulledNumbers);
+        }
 
         const paidAmount =
           input.paymentMethod === 'cash'
@@ -1464,7 +1934,16 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           notes: input.notes,
         };
       } catch (err) {
+        if (lockedCandidateNumbers.length > 0) {
+          releaseCardLocksLocally(lockedCandidateNumbers);
+        }
         const msg = err instanceof Error ? err.message : 'تعذر إتمام عملية البيع';
+        const isNetworkOffline =
+          !navigator.onLine ||
+          /offline|unavailable|failed to get document|network|client is offline/i.test(msg);
+        if (isNetworkOffline) {
+          return executeOfflineSale();
+        }
         handleFirestoreError(err, OperationType.WRITE, 'sales/transaction');
         notifyError('تعذر إتمام البيع', msg);
         return null;
@@ -2379,7 +2858,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       isSyncing,
       packages,
       totalAvailableCards,
-      sales,
+      sales: mergedSales,
       customers,
       ledgerEntries,
       notifications,
@@ -2393,7 +2872,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       managedUsers,
       activeRoute,
       setActiveRoute,
-      hasMoreSales: sales.length >= salesLimit,
+      hasMoreSales: mergedSales.length >= salesLimit,
       loadMoreSales,
       hasMoreCustomers: customers.length >= customersLimit,
       loadMoreCustomers,
@@ -2444,7 +2923,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       isSyncing,
       packages,
       totalAvailableCards,
-      sales,
+      mergedSales,
       customers,
       ledgerEntries,
       notifications,

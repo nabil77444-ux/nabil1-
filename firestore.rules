@@ -238,12 +238,41 @@ service cloud.firestore {
 
     function isValidAppSettingsDoc(data) {
       return data.keys().hasAll(['newsTicker', 'lowStockThreshold', 'agentDiscountPercent', 'clientDiscountPercent', 'directSaleMessageTemplate', 'updatedAt']) &&
-        data.keys().hasOnly(['newsTicker', 'lowStockThreshold', 'agentDiscountPercent', 'clientDiscountPercent', 'directSaleMessageTemplate', 'appDescription', 'apkDownloadUrl', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'newsTicker',
+          'newsTickerEnabled',
+          'newsTickerSpeed',
+          'sliderEnabled',
+          'sliderSpeed',
+          'sliderSlides',
+          'lowStockThreshold',
+          'agentDiscountPercent',
+          'clientDiscountPercent',
+          'directSaleMessageTemplate',
+          'smsMessageTemplate',
+          'whatsappMessageTemplate',
+          'pdfHeaderTitle',
+          'pdfHeaderSubtitle',
+          'pdfFooterText',
+          'appDescription',
+          'apkDownloadUrl',
+          'updatedAt'
+        ]) &&
         isValidString(data.newsTicker, 0, 500) &&
+        (!('newsTickerEnabled' in data) || data.newsTickerEnabled is bool) &&
+        (!('newsTickerSpeed' in data) || (data.newsTickerSpeed is number && data.newsTickerSpeed >= 6 && data.newsTickerSpeed <= 90)) &&
+        (!('sliderEnabled' in data) || data.sliderEnabled is bool) &&
+        (!('sliderSpeed' in data) || (data.sliderSpeed is number && data.sliderSpeed >= 2 && data.sliderSpeed <= 30)) &&
+        (!('sliderSlides' in data) || (data.sliderSlides is list && data.sliderSlides.size() <= 6 && (data.sliderSlides.size() == 0 || data.sliderSlides[0] is map))) &&
         data.lowStockThreshold is number && data.lowStockThreshold >= 0 &&
         data.agentDiscountPercent is number && data.agentDiscountPercent >= 1 && data.agentDiscountPercent <= 100 &&
         data.clientDiscountPercent is number && data.clientDiscountPercent >= 1 && data.clientDiscountPercent <= 100 &&
         isValidString(data.directSaleMessageTemplate, 0, 1000) &&
+        (!('smsMessageTemplate' in data) || isValidString(data.smsMessageTemplate, 0, 1000)) &&
+        (!('whatsappMessageTemplate' in data) || isValidString(data.whatsappMessageTemplate, 0, 1500)) &&
+        (!('pdfHeaderTitle' in data) || isValidString(data.pdfHeaderTitle, 0, 150)) &&
+        (!('pdfHeaderSubtitle' in data) || isValidString(data.pdfHeaderSubtitle, 0, 250)) &&
+        (!('pdfFooterText' in data) || isValidString(data.pdfFooterText, 0, 300)) &&
         (!('appDescription' in data) || isValidString(data.appDescription, 0, 600)) &&
         (!('apkDownloadUrl' in data) || isValidString(data.apkDownloadUrl, 0, 300)) &&
         data.updatedAt is timestamp;

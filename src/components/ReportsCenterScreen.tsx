@@ -37,8 +37,8 @@ import { ExportPreviewModal } from './ExportPreviewModal';
 import {
   EXCLUSIVE_PACKAGES,
   formatCount,
+  formatDateDDMMYYYY,
   formatDateTimeAr,
-  formatYER,
   getRoleArabicLabel,
   SUPER_ADMIN_CONFIG,
   TAIBAH_ASSETS,
@@ -68,26 +68,42 @@ interface ReportCardMeta {
   subtitle: string;
   accent: string;
   icon: React.FC<{ className?: string }>;
+  adminOrAgentOnly?: boolean;
 }
 
-const TEN_REPORTS: ReportCardMeta[] = [
+const ALL_REPORTS: ReportCardMeta[] = [
   { id: 'direct_sales', num: 1, title: 'البيع المباشر', subtitle: 'كروت المستهلك 100%', accent: 'from-green-600 to-emerald-800', icon: Zap },
   { id: 'electronic_wholesale', num: 2, title: 'الجملة الإلكترونية', subtitle: 'توريد الوكلاء والعملاء', accent: 'from-blue-600 to-[#1A365D]', icon: CreditCard },
   { id: 'paper_invoices', num: 3, title: 'الفواتير الورقية', subtitle: 'مبيعات الكروت الورقية', accent: 'from-indigo-600 to-slate-800', icon: FileText },
   { id: 'customers_ledger', num: 4, title: 'الدفتر المحاسبي', subtitle: 'حسابات العملاء والقيود', accent: 'from-amber-500 to-yellow-700', icon: BookOpen },
   { id: 'debts_receivables', num: 5, title: 'الديون والمتبقي', subtitle: 'المبالغ الآجلة للتحصيل', accent: 'from-red-600 to-rose-800', icon: ShieldAlert },
   { id: 'profits_analysis', num: 6, title: 'تقرير الأرباح', subtitle: 'المتوقعة والمحققة فعلياً', accent: 'from-emerald-600 to-teal-800', icon: TrendingUp },
-  { id: 'agents_performance', num: 7, title: 'الوكلاء ونقاط البيع', subtitle: 'الحسابات والأرصدة', accent: 'from-slate-700 to-[#0F172A]', icon: UserCheck },
+  { id: 'agents_performance', num: 7, title: 'الوكلاء ونقاط البيع', subtitle: 'الحسابات والأرصدة', accent: 'from-slate-700 to-[#0F172A]', icon: UserCheck, adminOrAgentOnly: true },
   { id: 'topup_requests', num: 8, title: 'طلبات التغذية', subtitle: 'المعتمدة والمعلقة والمرفوضة', accent: 'from-cyan-600 to-blue-800', icon: Send },
-  { id: 'packages_inventory', num: 9, title: 'جرد الباقات الثماني', subtitle: 'المتاح والمباع والمرفوع', accent: 'from-purple-600 to-violet-900', icon: Layers },
+  { id: 'packages_inventory', num: 9, title: 'جرد الباقات الثماني', subtitle: 'المتاح والمباع بحسابك', accent: 'from-purple-600 to-violet-900', icon: Layers },
   { id: 'comprehensive_summary', num: 10, title: 'التقرير المالي الشامل', subtitle: 'ملخص الأداء العام', accent: 'from-[#B4860B] to-[#1A365D]', icon: Wallet },
 ];
 
 export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNumbers }) => {
-  const { packages, sales, customers, topupRequests, managedUsers } = useFirebase();
+  const { profile, packages, sales, customers, topupRequests, managedUsers } = useFirebase();
   const { notifySuccess, notifyError } = useFeedback();
 
+  const isAdmin = profile?.role === 'super_admin';
+  const isAgent = profile?.role === 'agent';
   const displayPackages = packages.length > 0 ? packages : (EXCLUSIVE_PACKAGES as PackageDoc[]);
+
+  const visibleReports = useMemo(
+    () =>
+      ALL_REPORTS.filter((rep) => !rep.adminOrAgentOnly || isAdmin || isAgent).map((rep, idx) => ({
+        ...rep,
+        displayNum: idx + 1,
+        subtitle:
+          rep.id === 'packages_inventory' && isAdmin
+            ? 'المتاح والمباع والمرفوع'
+            : rep.subtitle,
+      })),
+    [isAdmin, isAgent]
+  );
 
   const [activeReportId, setActiveReportId] = useState<ReportId | null>(null);
   const [showStockMonitor, setShowStockMonitor] = useState(false);
@@ -96,7 +112,13 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
 
-  // Build strict independent data for the selected report
+  const formatInputDateDisplay = (isoDate: string) => {
+    if (!isoDate) return '';
+    const [yyyy, mm, dd] = isoDate.split('-');
+    return dd && mm && yyyy ? `${dd}/${mm}/${yyyy}` : isoDate;
+  };
+
+  // Build strict role-isolated data for the selected report
   const reportData = useMemo(() => {
     if (!activeReportId) return null;
 
@@ -225,7 +247,10 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
 
       case 'debts_receivables': {
         const saleDebts = sales.filter(
-          (s) => s.remainingAmount > 0 && inDateRange(s.createdAt?.toMillis?.()) && matchSearch([s.buyerName, s.buyerPhone || ''])
+          (s) =>
+            s.remainingAmount > 0 &&
+            inDateRange(s.createdAt?.toMillis?.()) &&
+            matchSearch([s.buyerName, s.buyerPhone || ''])
         );
         const custDebts = customers.filter((c) => c.balance > 0 && matchSearch([c.name, c.phone || '']));
         const rows = [
@@ -323,6 +348,22 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
         const list = displayPackages.filter((p) => matchSearch([String(p.price), p.dataLabel]));
         const avail = list.reduce((a, p) => a + p.availableCount, 0);
         const sold = list.reduce((a, p) => a + p.soldCount, 0);
+        if (!isAdmin) {
+          return {
+            title: 'تقرير جرد الباقات المتاحة بحسابك',
+            headers: ['الباقة', 'الكروت المتاحة', 'الكروت المباعة'],
+            rows: list.map((p) => [
+              `${p.price} ر.ي (${p.dataLabel})`,
+              String(p.availableCount),
+              String(p.soldCount),
+            ]),
+            summary: [
+              { label: 'إجمالي المباعة', value: `${sold} كرت` },
+              { label: 'إجمالي المتاح بحسابك', value: `${avail} كرت`, highlight: true },
+            ],
+            fileName: 'تقرير_جرد_مخزوني',
+          };
+        }
         const uploaded = list.reduce((a, p) => a + p.uploadedCount, 0);
         const injected = list.reduce((a, p) => a + p.injectedCount, 0);
         return {
@@ -351,20 +392,26 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
         const totalRemAmt = sales.reduce((a, s) => a + s.remainingAmount, 0);
         const totalCardsSold = sales.reduce((a, s) => a + s.totalCards, 0);
         const totalAvail = displayPackages.reduce((a, p) => a + p.availableCount, 0);
+        const rows: string[][] = [
+          ['إجمالي عمليات البيع المسجلة', `${sales.length} عملية`],
+          ['إجمالي الكروت المباعة', `${totalCardsSold} كرت`],
+          ['إجمالي قيمة المبيعات', `${totalSalesAmt} ر.ي`],
+          ['إجمالي التحصيل النقدي الفوري', `${totalPaidAmt} ر.ي`],
+          ['إجمالي الآجل / المتبقي', `${totalRemAmt} ر.ي`],
+          [isAdmin ? 'إجمالي الكروت المتاحة بالمخزون' : 'الكروت المتاحة بحسابك', `${totalAvail} كرت`],
+          ['عدد حسابات الدفتر العام', `${customers.length} حساب`],
+          ['عدد طلبات التغذية المسجلة', `${topupRequests.length} طلب`],
+        ];
+        if (isAdmin || isAgent) {
+          rows.push([
+            'عدد الوكلاء ونقاط البيع',
+            `${managedUsers.filter((u) => u.role !== 'super_admin').length} حساب`,
+          ]);
+        }
         return {
           title: 'التقرير المالي الشامل — شبكة طيبة نت',
           headers: ['البند المالي / التشغيلي', 'القيمة الحية'],
-          rows: [
-            ['إجمالي عمليات البيع المسجلة', `${sales.length} عملية`],
-            ['إجمالي الكروت المباعة', `${totalCardsSold} كرت`],
-            ['إجمالي قيمة المبيعات', `${totalSalesAmt} ر.ي`],
-            ['إجمالي التحصيل النقدي الفوري', `${totalPaidAmt} ر.ي`],
-            ['إجمالي الآجل / المتبقي', `${totalRemAmt} ر.ي`],
-            ['إجمالي الكروت المتاحة بالمخزون', `${totalAvail} كرت`],
-            ['عدد حسابات الدفتر العام', `${customers.length} حساب`],
-            ['عدد الوكلاء ونقاط البيع', `${managedUsers.filter((u) => u.role !== 'super_admin').length} حساب`],
-            ['عدد طلبات التغذية المسجلة', `${topupRequests.length} طلب`],
-          ],
+          rows,
           summary: [
             { label: 'التحصيل النقدي', value: `${totalPaidAmt} ر.ي` },
             { label: 'إجمالي المبيعات', value: `${totalSalesAmt} ر.ي`, highlight: true },
@@ -373,29 +420,13 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
         };
       }
     }
-  }, [activeReportId, sales, customers, managedUsers, topupRequests, displayPackages, search, fromDate, toDate]);
-
-  const buildReportPrintable = (data: NonNullable<typeof reportData>): PrintableDocumentPayload => ({
-    title: data.title,
-    subtitle: `تقرير معتمد — ${SUPER_ADMIN_CONFIG.name}`,
-    metaRows: [
-      { label: 'الشبكة', value: 'شبكة طيبة نت اللاسلكية (TAIBAH NET)' },
-      { label: 'تاريخ التصدير', value: formatDateTimeAr(new Date()) },
-      { label: 'من تاريخ', value: fromDate || 'من البداية' },
-      { label: 'إلى تاريخ', value: toDate || 'حتى الآن' },
-    ],
-    tableHeaders: data.headers,
-    tableRows: data.rows,
-    summaryRows: data.summary,
-    fileName: data.fileName,
-    shareText: buildReportShareText(data),
-  });
+  }, [activeReportId, sales, customers, managedUsers, topupRequests, displayPackages, search, fromDate, toDate, isAdmin, isAgent]);
 
   const buildReportShareText = (data: NonNullable<typeof reportData>): string => {
     const lines = [
       `📶 شبكة طيبة نت اللاسلكية (TAIBAH NET)`,
       `📊 ${data.title}`,
-      `🗓 ${formatDateTimeAr(new Date())}`,
+      `🗓 ${formatDateDDMMYYYY(new Date())}`,
       `────────────────────`,
       ...data.summary.map((s) => `• ${s.label}: ${s.value}`),
       `────────────────────`,
@@ -405,26 +436,44 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
     return lines.join('\n');
   };
 
-  // Dedicated Independent Report View
+  const buildReportPrintable = (data: NonNullable<typeof reportData>): PrintableDocumentPayload => ({
+    title: data.title,
+    subtitle: `تقرير معتمد — ${profile?.name || SUPER_ADMIN_CONFIG.name}`,
+    metaRows: [
+      { label: 'الشبكة', value: 'شبكة طيبة نت اللاسلكية (TAIBAH NET)' },
+      { label: 'تاريخ التصدير', value: formatDateTimeAr(new Date()) },
+      { label: 'من تاريخ', value: fromDate ? formatInputDateDisplay(fromDate) : 'من البداية' },
+      { label: 'إلى تاريخ', value: toDate ? formatInputDateDisplay(toDate) : 'حتى الآن' },
+    ],
+    tableHeaders: data.headers,
+    tableRows: data.rows,
+    summaryRows: data.summary,
+    fileName: data.fileName,
+    shareText: buildReportShareText(data),
+  });
+
+  // Dedicated Independent Report View (scrollable internally inside fixed shell)
   if (activeReportId && reportData) {
     return (
-      <div className="space-y-3.5">
-        <div className="royal-header-3d rounded-3xl border-2 border-[#D4AF37] p-3.5 flex items-center justify-between gap-2 shadow-lg">
+      <div className="h-full min-h-0 overflow-y-auto taibah-scroll space-y-3 pb-4">
+        <div className="royal-header-3d rounded-2xl border-2 border-[#D4AF37] p-3 flex items-center justify-between gap-2 shadow-lg">
           <button
             type="button"
             onClick={() => {
               setActiveReportId(null);
               setSearch('');
             }}
-            className="min-h-[38px] px-3 rounded-xl bg-white/15 border border-[#D4AF37] text-white text-xs font-extrabold flex items-center gap-1"
+            className="min-h-[36px] px-3 rounded-xl bg-white/15 border border-[#D4AF37] text-white text-xs font-extrabold flex items-center gap-1 shrink-0"
           >
             <ArrowRight className="w-4 h-4" />
             مركز التقارير
           </button>
-          <h2 className="text-sm font-extrabold text-[#FDE68A] truncate flex-1 text-center">
+          <h2 className="text-xs sm:text-sm font-extrabold text-[#FDE68A] truncate flex-1 text-center">
             {reportData.title}
           </h2>
-          <img src={TAIBAH_ASSETS.logo} alt="طيبة نت" className="w-9 h-9 rounded-full object-cover border border-[#D4AF37] shrink-0" />
+          <div className="w-9 h-9 rounded-full bg-white p-0.5 border border-[#D4AF37] shrink-0 overflow-hidden">
+            <img src={TAIBAH_ASSETS.logo} alt="طيبة نت" className="w-full h-full object-contain" />
+          </div>
         </div>
 
         {/* Date Range + Search Filters */}
@@ -466,7 +515,7 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
           {reportData.summary.map((s, i) => (
             <div
               key={i}
-              className={`rounded-2xl p-3 text-center border-2 ${
+              className={`rounded-2xl p-2.5 text-center border-2 ${
                 s.highlight
                   ? 'bg-[#1A365D] border-[#D4AF37] text-[#FDE68A]'
                   : 'bg-white dark:bg-slate-900 border-[#D4AF37]/60'
@@ -482,7 +531,7 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
           ))}
         </div>
 
-        {/* Export Suite: WhatsApp, SMS, PDF, HD Image (scale 3), Excel, Print */}
+        {/* Export Suite: WhatsApp, SMS, PDF, HD Image, Excel, Print */}
         <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5">
           <button
             type="button"
@@ -503,7 +552,7 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
             onClick={async () => {
               try {
                 const res = await exportAsArabicPDF(buildReportPrintable(reportData));
-                notifySuccess('تم تجهيز الملف بنجاح ✅');
+                notifySuccess('تم تجهيز ملف PDF بنجاح ✅');
                 if (!res.sharedNatively) setExportPreview(res);
               } catch {
                 notifyError('تعذر إنشاء PDF');
@@ -518,7 +567,7 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
             onClick={async () => {
               try {
                 const res = await exportAsHDImage(buildReportPrintable(reportData));
-                notifySuccess('تم تجهيز الملف بنجاح ✅');
+                notifySuccess('تم تجهيز الصورة HD بنجاح ✅');
                 if (!res.sharedNatively) setExportPreview(res);
               } catch {
                 notifyError('تعذر إنشاء الصورة');
@@ -533,7 +582,7 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
             onClick={async () => {
               try {
                 await exportAsExcel(reportData.title, reportData.headers, reportData.rows, reportData.fileName);
-                notifySuccess('تم تجهيز الملف بنجاح ✅');
+                notifySuccess('تم تجهيز ملف Excel بنجاح ✅');
               } catch {
                 notifyError('تعذر إنشاء ملف Excel');
               }
@@ -595,67 +644,69 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
     );
   }
 
-  // Main Reports Center Overview (Update 9)
+  // FIXED SINGLE-SCREEN REPORTS CENTER HUB (100% Viewport — ZERO Vertical or Horizontal Scroll!)
   return (
-    <div className="space-y-3.5">
-      {/* Royal Hero Card with Official Logo */}
-      <div className="royal-header-3d rounded-3xl border-2 border-[#D4AF37] p-4 shadow-xl flex items-center justify-between gap-3">
-        <div className="w-12 h-12 rounded-2xl bg-white/15 border border-[#D4AF37] flex items-center justify-center text-[#FDE68A] shrink-0">
-          <BarChart3 className="w-6 h-6" />
+    <div className="h-full min-h-0 flex flex-col gap-1.5 overflow-hidden">
+      {/* Compact Royal Header Bar */}
+      <div className="shrink-0 royal-header-3d rounded-2xl border-2 border-[#D4AF37] px-3 py-2 shadow-lg flex items-center justify-between gap-2">
+        <div className="w-9 h-9 rounded-xl bg-white/15 border border-[#D4AF37] flex items-center justify-center text-[#FDE68A] shrink-0">
+          <BarChart3 className="w-5 h-5" />
         </div>
         <div className="flex-1 min-w-0 text-center">
-          <h2 className="text-base sm:text-lg font-extrabold text-white truncate">
-            مركز التقارير الشامل (10 تقارير مستقلة)
+          <h2 className="text-sm sm:text-base font-extrabold text-white truncate leading-tight">
+            مركز التقارير الشامل ({visibleReports.length} تقارير مستقلة)
           </h2>
-          <p className="text-[11px] font-bold text-[#FDE68A] truncate">
-            تصدير فوري PDF • صور HD • Excel • واتساب و SMS بالشعار الرسمي
+          <p className="text-[10px] sm:text-[11px] font-bold text-[#FDE68A] truncate">
+            تصدير ومشاركة فورية: PDF • صورة HD • Excel • واتساب • SMS
           </p>
         </div>
-        <div className="w-12 h-12 rounded-full p-0.5 bg-gradient-to-tr from-[#B4860B] via-[#FDE68A] to-[#D4AF37] shrink-0 shadow-lg">
-          <img
-            src={TAIBAH_ASSETS.logo}
-            alt="شعار طيبة نت"
-            className="w-full h-full rounded-full object-cover"
-          />
+        <div className="w-9 h-9 rounded-full p-0.5 bg-gradient-to-tr from-[#B4860B] via-[#FDE68A] to-[#D4AF37] shrink-0 shadow">
+          <div className="w-full h-full rounded-full bg-white flex items-center justify-center overflow-hidden p-0.5">
+            <img src={TAIBAH_ASSETS.logo} alt="شعار طيبة نت" className="w-full h-full object-contain" />
+          </div>
         </div>
       </div>
 
-      {/* Prominent Gold-Bordered Stock & Sales Monitoring Button (Update 9) */}
+      {/* Compact Stock Monitor Trigger */}
       <button
         type="button"
         onClick={() => setShowStockMonitor(true)}
-        className="w-full min-h-[52px] rounded-2xl bg-gradient-to-l from-[#0F172A] via-[#1A365D] to-[#1E3A8A] border-2 border-[#D4AF37] px-4 py-2.5 text-[#FDE68A] font-extrabold text-xs sm:text-sm shadow-xl flex items-center justify-center gap-2 active:scale-[0.99] transition-transform"
+        className="shrink-0 w-full h-10 rounded-xl bg-gradient-to-l from-[#0F172A] via-[#1A365D] to-[#1E3A8A] border-2 border-[#D4AF37] px-3 text-[#FDE68A] font-extrabold text-[11px] sm:text-xs shadow flex items-center justify-center gap-1.5 active:scale-[0.99] transition-transform"
       >
-        <Layers className="w-5 h-5 shrink-0" />
-        <span>مراقبة مخزون الكروت والمبيعات (المرفوعة • المتاحة • المباعة • المحقونة)</span>
+        <Layers className="w-4 h-4 shrink-0" />
+        <span className="truncate">
+          {isAdmin
+            ? 'مراقبة مخزون الكروت والمبيعات (المرفوعة • المتاحة • المباعة • المحقونة)'
+            : 'مراقبة مخزون كروت حسابك والمبيعات الفورية'}
+        </span>
       </button>
 
-      {/* 2×5 Grid of 10 Strictly Independent Reports */}
-      <div className="grid grid-cols-2 gap-2.5">
-        {TEN_REPORTS.map((rep) => {
+      {/* Fixed Single-Viewport Grid (2×5 Mobile, 5×2 Desktop — ZERO SCROLL!) */}
+      <div className="flex-1 min-h-0 grid grid-cols-2 md:grid-cols-5 auto-rows-fr gap-1.5 sm:gap-2 py-0.5 overflow-hidden">
+        {visibleReports.map((rep) => {
           const Icon = rep.icon;
           return (
             <button
               key={rep.id}
               type="button"
               onClick={() => setActiveReportId(rep.id)}
-              className="royal-tile-3d relative rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37]/80 hover:border-[#D4AF37] p-3 text-right flex flex-col justify-between gap-2 shadow-md"
+              className="royal-tile-3d relative w-full h-full min-h-0 rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37]/85 hover:border-[#D4AF37] px-2.5 py-1.5 text-right flex flex-col justify-center gap-1 shadow-md overflow-hidden"
             >
-              <div className="flex items-center justify-between gap-2">
-                <span className="w-6 h-6 rounded-full bg-slate-950 border border-[#D4AF37] text-[#FDE68A] text-[10px] font-extrabold flex items-center justify-center tabular-nums">
-                  {rep.num}
+              <div className="flex items-center justify-between gap-1.5">
+                <span className="w-5 h-5 rounded-full bg-slate-950 border border-[#D4AF37] text-[#FDE68A] text-[10px] font-extrabold flex items-center justify-center tabular-nums shrink-0">
+                  {rep.displayNum}
                 </span>
                 <div
-                  className={`w-10 h-10 rounded-xl bg-gradient-to-br ${rep.accent} border border-[#D4AF37]/70 text-[#FDE68A] flex items-center justify-center shadow`}
+                  className={`w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-gradient-to-br ${rep.accent} border border-[#D4AF37]/70 text-[#FDE68A] flex items-center justify-center shadow shrink-0`}
                 >
-                  <Icon className="w-5 h-5" />
+                  <Icon className="w-4 h-4" />
                 </div>
               </div>
-              <div>
-                <h3 className="text-xs sm:text-sm font-extrabold text-slate-900 dark:text-white leading-snug">
+              <div className="min-w-0">
+                <h3 className="text-[12px] sm:text-[13px] font-extrabold text-slate-900 dark:text-white leading-tight truncate">
                   {rep.title}
                 </h3>
-                <p className="text-[10px] font-bold text-slate-500 dark:text-slate-400 mt-0.5 line-clamp-1">
+                <p className="text-[10px] font-bold text-slate-500 dark:text-slate-400 truncate mt-0.5">
                   {rep.subtitle}
                 </p>
               </div>
@@ -670,10 +721,16 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
           <div className="w-full max-w-xl rounded-3xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] shadow-2xl overflow-hidden my-auto max-h-[90dvh] flex flex-col">
             <div className="royal-header-3d px-4 py-3.5 flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <img src={TAIBAH_ASSETS.logo} alt="طيبة نت" className="w-9 h-9 rounded-full object-cover border border-[#D4AF37]" />
+                <div className="w-9 h-9 rounded-full bg-white p-0.5 border border-[#D4AF37] overflow-hidden shrink-0">
+                  <img src={TAIBAH_ASSETS.logo} alt="طيبة نت" className="w-full h-full object-contain" />
+                </div>
                 <div>
-                  <h3 className="text-sm font-extrabold text-white">مراقبة مخزون الكروت والمبيعات</h3>
-                  <p className="text-[11px] font-bold text-[#FDE68A]">المرفوعة • المتاحة • المباعة • المحقونة</p>
+                  <h3 className="text-sm font-extrabold text-white">
+                    {isAdmin ? 'مراقبة مخزون الكروت والمبيعات' : 'مخزون الكروت المتاحة بحسابك'}
+                  </h3>
+                  <p className="text-[11px] font-bold text-[#FDE68A]">
+                    {isAdmin ? 'المرفوعة • المتاحة • المباعة • المحقونة' : 'المتاحة • المباعة من رصيدك الخاص'}
+                  </p>
                 </div>
               </div>
               <button
@@ -691,20 +748,24 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
                   <thead>
                     <tr className="bg-[#1A365D] text-[#FDE68A]">
                       <th className="p-2.5 font-extrabold">الباقة</th>
-                      <th className="p-2.5 font-extrabold text-center">المرفوعة</th>
+                      {isAdmin && <th className="p-2.5 font-extrabold text-center">المرفوعة</th>}
                       <th className="p-2.5 font-extrabold text-center">المتاحة</th>
                       <th className="p-2.5 font-extrabold text-center">المباعة</th>
-                      <th className="p-2.5 font-extrabold text-center">المحقونة</th>
+                      {isAdmin && <th className="p-2.5 font-extrabold text-center">المحقونة</th>}
                     </tr>
                   </thead>
                   <tbody>
                     {displayPackages.map((p) => (
                       <tr key={p.id} className="border-t border-slate-200 dark:border-slate-800 font-bold tabular-nums">
                         <td className="p-2.5">{p.price} ر.ي ({p.dataLabel})</td>
-                        <td className="p-2.5 text-center text-blue-600">{formatCount(p.uploadedCount, hideNumbers)}</td>
+                        {isAdmin && (
+                          <td className="p-2.5 text-center text-blue-600">{formatCount(p.uploadedCount, hideNumbers)}</td>
+                        )}
                         <td className="p-2.5 text-center text-emerald-600">{formatCount(p.availableCount, hideNumbers)}</td>
                         <td className="p-2.5 text-center text-amber-600">{formatCount(p.soldCount, hideNumbers)}</td>
-                        <td className="p-2.5 text-center text-purple-600">{formatCount(p.injectedCount, hideNumbers)}</td>
+                        {isAdmin && (
+                          <td className="p-2.5 text-center text-purple-600">{formatCount(p.injectedCount, hideNumbers)}</td>
+                        )}
                       </tr>
                     ))}
                   </tbody>

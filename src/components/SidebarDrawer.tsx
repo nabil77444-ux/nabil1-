@@ -57,34 +57,109 @@ export const SidebarDrawer: React.FC<SidebarDrawerProps> = ({
     route: AppRoute;
     label: string;
     icon: React.FC<{ className?: string }>;
+    iconBg: string;
     badge?: number;
     visible: boolean;
   }> = [
-    { route: 'home', label: 'الشاشة الرئيسية', icon: Home, visible: true },
-    { route: 'direct_sale', label: 'البيع المباشر للمستهلك', icon: Zap, visible: true },
-    { route: 'electronic_cards', label: 'الكروت الإلكترونية (جملة)', icon: CreditCard, visible: true },
-    { route: 'invoices', label: 'الفواتير والكروت الورقية', icon: FileText, visible: true },
-    { route: 'sales_list', label: 'المبيعات والتقارير المالية', icon: ShoppingBag, visible: true },
-    { route: 'customers', label: 'العملاء والدفتر المحاسبي', icon: Users, visible: true },
-    { route: 'packages', label: 'الباقات واستيراد الكروت', icon: Layers, visible: isAdmin },
-    { route: 'topup_requests', label: 'طلبات التغذية', icon: Send, visible: true },
+    {
+      route: 'home',
+      label: 'الشاشة الرئيسية',
+      icon: Home,
+      iconBg: 'bg-gradient-to-br from-[#1A365D] to-blue-700 text-[#FDE68A]',
+      visible: true,
+    },
+    {
+      route: 'direct_sale',
+      label: 'البيع المباشر للمستهلك',
+      icon: Zap,
+      iconBg: 'bg-gradient-to-br from-emerald-500 to-green-700 text-white',
+      visible: true,
+    },
+    {
+      route: 'electronic_cards',
+      label: 'الكروت الإلكترونية (جملة)',
+      icon: CreditCard,
+      iconBg: 'bg-gradient-to-br from-blue-600 to-indigo-800 text-white',
+      visible: true,
+    },
+    {
+      route: 'invoices',
+      label: 'الفواتير والكروت الورقية',
+      icon: FileText,
+      iconBg: 'bg-gradient-to-br from-indigo-500 to-slate-800 text-[#FDE68A]',
+      visible: true,
+    },
+    {
+      route: 'sales_list',
+      label: 'المبيعات والتقارير المالية',
+      icon: ShoppingBag,
+      iconBg: 'bg-gradient-to-br from-amber-500 to-yellow-700 text-white',
+      visible: true,
+    },
+    {
+      route: 'customers',
+      label: 'العملاء والدفتر المحاسبي',
+      icon: Users,
+      iconBg: 'bg-gradient-to-br from-teal-500 to-emerald-800 text-white',
+      visible: true,
+    },
+    {
+      route: 'packages',
+      label: 'الباقات واستيراد الكروت',
+      icon: Layers,
+      iconBg: 'bg-gradient-to-br from-purple-600 to-violet-800 text-white',
+      visible: isAdmin,
+    },
+    {
+      route: 'topup_requests',
+      label: 'طلبات التغذية',
+      icon: Send,
+      iconBg: 'bg-gradient-to-br from-cyan-600 to-blue-800 text-white',
+      visible: true,
+    },
     {
       route: 'agents_management',
       label: 'إدارة الوكلاء والعملاء',
       icon: UserCheck,
+      iconBg: 'bg-gradient-to-br from-sky-600 to-[#1A365D] text-[#FDE68A]',
       visible: isAdmin || isAgent,
     },
-    { route: 'reports', label: 'منظومة التقارير (10 تقارير)', icon: BarChart3, visible: true },
+    {
+      route: 'reports',
+      label: isAdmin ? 'منظومة التقارير (10 تقارير)' : 'مركز التقارير الشامل',
+      icon: BarChart3,
+      iconBg: 'bg-gradient-to-br from-orange-500 to-amber-700 text-white',
+      visible: true,
+    },
     {
       route: 'notifications',
       label: 'مركز الإشعارات',
       icon: Bell,
+      iconBg: 'bg-gradient-to-br from-rose-500 to-red-700 text-white',
       badge: unreadNotificationsCount > 0 ? unreadNotificationsCount : undefined,
       visible: true,
     },
-    { route: 'settings', label: 'الإعدادات وحول التطبيق', icon: Settings, visible: true },
-    { route: 'backup', label: 'النسخ الاحتياطي السحابي', icon: DatabaseBackup, visible: true },
-    { route: 'audit_logs', label: 'سجل العمليات (Audit Log)', icon: FileClock, visible: isAdmin },
+    {
+      route: 'settings',
+      label: 'الإعدادات وحول التطبيق',
+      icon: Settings,
+      iconBg: 'bg-gradient-to-br from-slate-600 to-slate-900 text-[#FDE68A]',
+      visible: true,
+    },
+    {
+      route: 'backup',
+      label: 'النسخ الاحتياطي السحابي',
+      icon: DatabaseBackup,
+      iconBg: 'bg-gradient-to-br from-emerald-600 to-teal-800 text-white',
+      visible: true,
+    },
+    {
+      route: 'audit_logs',
+      label: 'سجل العمليات (Audit Log)',
+      icon: FileClock,
+      iconBg: 'bg-gradient-to-br from-[#B4860B] to-[#1A365D] text-white',
+      visible: isAdmin,
+    },
   ];
 
   const handleEnrollBiometric = async () => {
@@ -111,18 +186,20 @@ export const SidebarDrawer: React.FC<SidebarDrawerProps> = ({
       />
 
       {/* Drawer Panel (slides from right in RTL) */}
-      <aside className="relative z-10 w-[84vw] max-w-[325px] h-[100dvh] bg-white dark:bg-slate-900 border-l-2 border-[#D4AF37] shadow-2xl flex flex-col overflow-hidden">
-        {/* Royal Profile Header */}
-        <div className="royal-header-3d p-4 shrink-0">
+      <aside className="relative z-10 w-[84vw] max-w-[330px] h-[100dvh] bg-white dark:bg-slate-900 border-l-2 border-[#D4AF37] shadow-2xl flex flex-col overflow-hidden">
+        {/* Royal Profile Header with Safe Area Top */}
+        <div className="royal-header-3d safe-top px-4 pb-3.5 pt-3 shrink-0">
           <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2.5">
-              <div className="w-12 h-12 rounded-full p-0.5 bg-gradient-to-tr from-[#B4860B] via-[#FDE68A] to-[#D4AF37] shrink-0">
-                <img
-                  src={TAIBAH_ASSETS.logo}
-                  alt="شعار شبكة طيبة نت"
-                  referrerPolicy="no-referrer"
-                  className="w-full h-full rounded-full object-cover"
-                />
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="w-12 h-12 rounded-full p-0.5 bg-gradient-to-tr from-[#B4860B] via-[#FDE68A] to-[#D4AF37] shrink-0 shadow-md">
+                <div className="w-full h-full rounded-full bg-white flex items-center justify-center overflow-hidden p-0.5">
+                  <img
+                    src={TAIBAH_ASSETS.logo}
+                    alt="شعار شبكة طيبة نت"
+                    referrerPolicy="no-referrer"
+                    className="w-full h-full object-contain"
+                  />
+                </div>
               </div>
               <div className="min-w-0">
                 <h2 className="text-sm font-extrabold text-white truncate">{profile.name}</h2>
@@ -135,7 +212,7 @@ export const SidebarDrawer: React.FC<SidebarDrawerProps> = ({
               type="button"
               onClick={onClose}
               aria-label="إغلاق القائمة"
-              className="w-9 h-9 rounded-full bg-white/15 text-white flex items-center justify-center hover:bg-white/25"
+              className="w-9 h-9 rounded-full bg-white/15 border border-[#D4AF37]/60 text-white flex items-center justify-center hover:bg-white/25 shrink-0"
             >
               <X className="w-5 h-5" />
             </button>
@@ -149,8 +226,8 @@ export const SidebarDrawer: React.FC<SidebarDrawerProps> = ({
           </div>
         </div>
 
-        {/* Scrollable Navigation Links */}
-        <div className="flex-1 overflow-y-auto taibah-scroll p-3 space-y-1">
+        {/* Scrollable Navigation Links with Beautified Colored Icon Badges */}
+        <div className="flex-1 overflow-y-auto taibah-scroll p-3 space-y-1.5">
           {navItems
             .filter((item) => item.visible)
             .map((item) => {
@@ -164,22 +241,26 @@ export const SidebarDrawer: React.FC<SidebarDrawerProps> = ({
                     onNavigate(item.route);
                     onClose();
                   }}
-                  className={`w-full min-h-[44px] rounded-xl px-3 py-2 flex items-center justify-between text-sm font-bold transition-colors ${
+                  className={`w-full min-h-[46px] rounded-xl px-2.5 py-1.5 flex items-center justify-between text-sm font-bold transition-all ${
                     active
-                      ? 'bg-[#1A365D] text-white border border-[#D4AF37]'
-                      : 'text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800'
+                      ? 'bg-[#1A365D] text-white border-2 border-[#D4AF37] shadow-md'
+                      : 'text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 border border-transparent'
                   }`}
                 >
                   <span className="flex items-center gap-2.5 min-w-0">
-                    <Icon
-                      className={`w-4 h-4 shrink-0 ${
-                        active ? 'text-[#FDE68A]' : 'text-[#1A365D] dark:text-[#D4AF37]'
+                    <span
+                      className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 shadow-sm border ${
+                        active
+                          ? 'bg-[#D4AF37] text-[#0F172A] border-[#FDE68A]'
+                          : `${item.iconBg} border-white/20`
                       }`}
-                    />
+                    >
+                      <Icon className="w-4 h-4" />
+                    </span>
                     <span className="truncate">{item.label}</span>
                   </span>
                   {item.badge !== undefined && (
-                    <span className="min-w-[20px] h-5 px-1.5 rounded-full bg-[#DC2626] text-white text-[10px] font-extrabold flex items-center justify-center tabular-nums">
+                    <span className="min-w-[20px] h-5 px-1.5 rounded-full bg-[#DC2626] text-white text-[10px] font-extrabold flex items-center justify-center tabular-nums shadow-sm">
                       {item.badge}
                     </span>
                   )}
@@ -187,19 +268,23 @@ export const SidebarDrawer: React.FC<SidebarDrawerProps> = ({
               );
             })}
 
-          {/* Biometric Activation + Update 11 App Card + Sign Out */}
-          <div className="pt-2.5 mt-2.5 border-t border-slate-200 dark:border-slate-800 space-y-2.5">
+          {/* Biometric Activation + Sign Out */}
+          <div className="pt-2.5 mt-2.5 border-t border-slate-200 dark:border-slate-800 space-y-2">
             <button
               type="button"
               onClick={handleEnrollBiometric}
-              className={`w-full min-h-[42px] rounded-xl border px-3 text-xs font-extrabold flex items-center justify-center gap-2 ${
+              className={`w-full min-h-[44px] rounded-xl border px-3 text-xs font-extrabold flex items-center justify-center gap-2 shadow-sm ${
                 biometricEnrolled
                   ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-300'
                   : 'border-[#D4AF37]/70 bg-amber-50 dark:bg-amber-950/30 text-[#1A365D] dark:text-[#FDE68A]'
               }`}
             >
-              <Fingerprint className="w-4 h-4" />
-              <span>{biometricEnrolled ? 'الدخول بالبصمة والوجه: مُفعّل ✅' : 'تفعيل الدخول بالبصمة / الوجه'}</span>
+              <span className="w-7 h-7 rounded-lg bg-gradient-to-br from-[#D4AF37] to-amber-600 text-[#0F172A] flex items-center justify-center shrink-0">
+                <Fingerprint className="w-4 h-4" />
+              </span>
+              <span>
+                {biometricEnrolled ? 'الدخول بالبصمة والوجه: مُفعّل ✅' : 'تفعيل الدخول بالبصمة / الوجه'}
+              </span>
             </button>
 
             <button
@@ -208,16 +293,18 @@ export const SidebarDrawer: React.FC<SidebarDrawerProps> = ({
                 onClose();
                 signOutUser();
               }}
-              className="w-full min-h-[42px] rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900/50 text-red-700 dark:text-red-400 text-xs font-extrabold flex items-center justify-center gap-2"
+              className="w-full min-h-[44px] rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900/50 text-red-700 dark:text-red-400 text-xs font-extrabold flex items-center justify-center gap-2 shadow-sm"
             >
-              <LogOut className="w-4 h-4" />
+              <span className="w-7 h-7 rounded-lg bg-red-600 text-white flex items-center justify-center shrink-0">
+                <LogOut className="w-4 h-4" />
+              </span>
               <span>تسجيل الخروج</span>
             </button>
           </div>
         </div>
 
-        {/* Official Developer Footer */}
-        <footer className="shrink-0 bg-[#0F172A] border-t border-[#D4AF37]/70 px-4 py-2.5 text-center">
+        {/* Official Developer Footer with Safe Area Bottom */}
+        <footer className="shrink-0 bg-[#0F172A] border-t border-[#D4AF37]/70 safe-bottom px-4 py-2 text-center">
           <p className="text-xs font-extrabold text-[#FDE68A]">
             {SUPER_ADMIN_CONFIG.developerCredit}
           </p>

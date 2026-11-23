@@ -166,7 +166,7 @@ export const TopupRequestsScreen: React.FC<TopupRequestsScreenProps> = ({ hideNu
         <img
           src={TAIBAH_ASSETS.logo}
           alt="شعار طيبة نت"
-          className="w-11 h-11 rounded-full object-cover border-2 border-[#D4AF37] shrink-0"
+          className="w-11 h-11 rounded-full object-contain bg-white p-0.5 border-2 border-[#D4AF37] shrink-0"
         />
       </div>
 

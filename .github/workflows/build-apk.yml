@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       build_type:
-        description: 'Build Type (release: V1+V2+V3 signed via Keystore secrets or auto keytool | debug: assembleDebug)'
+        description: 'Build Type (release: V1+V2+V3 signed via Keystore secrets or persistent cached Keystore | debug: assembleDebug)'
         required: true
         default: 'release'
         type: choice
@@ -47,11 +47,13 @@ jobs:
 
       - name: Initialize & Sync Capacitor Android Project with Native Plugins
         run: |
+          set -euo pipefail
           test -f capacitor.config.json
           npm install --no-save --no-audit --no-fund \
             @capacitor/core@7 \
             @capacitor/cli@7 \
             @capacitor/android@7 \
+            @capacitor/status-bar@7 \
             @capacitor/filesystem@7 \
             @capacitor/share@7 \
             @capacitor-community/contacts@7 \
@@ -63,15 +65,71 @@ jobs:
             npx cap add android
           fi
           npx cap sync android
+
+      - name: Generate Uncropped Padded Android Adaptive Icon & Splash Assets
+        run: |
+          set -euo pipefail
           mkdir -p resources
-          cp public/pwa-512x512.png resources/icon.png
-          cp public/pwa-512x512.png resources/splash.png
+          python3 - <<'PYEOF'
+          import os, shutil
+          try:
+              from PIL import Image
+              src = Image.open("public/pwa-512x512.png").convert("RGBA")
+
+              # Adaptive Icon Foreground (1024x1024 canvas, logo centered at 62% inside safe zone — NEVER cropped)
+              fg = Image.new("RGBA", (1024, 1024), (0, 0, 0, 0))
+              logo_fg = src.resize((634, 634), Image.LANCZOS)
+              fg.paste(logo_fg, ((1024 - 634) // 2, (1024 - 634) // 2), logo_fg)
+              fg.save("resources/icon-foreground.png")
+
+              # Adaptive Icon Background (1024x1024 Royal Dark Navy #0F172A)
+              bg = Image.new("RGBA", (1024, 1024), (15, 23, 42, 255))
+              bg.save("resources/icon-background.png")
+
+              # Legacy Launcher Icon (1024x1024 padded on #0F172A so circular/rounded-square launchers never clip edges)
+              legacy = Image.new("RGBA", (1024, 1024), (15, 23, 42, 255))
+              logo_leg = src.resize((780, 780), Image.LANCZOS)
+              legacy.paste(logo_leg, ((1024 - 780) // 2, (1024 - 780) // 2), logo_leg)
+              legacy.save("resources/icon.png")
+
+              # Splash Screen (2732x2732 centered uncropped logo on #0F172A)
+              splash = Image.new("RGBA", (2732, 2732), (15, 23, 42, 255))
+              logo_sp = src.resize((760, 760), Image.LANCZOS)
+              splash.paste(logo_sp, ((2732 - 760) // 2, (2732 - 760) // 2), logo_sp)
+              splash.save("resources/splash.png")
+              print("Generated padded Adaptive Icon & Splash assets successfully via Pillow.")
+          except Exception as e:
+              print("Pillow fallback triggered:", e)
+              shutil.copyfile("public/pwa-512x512.png", "resources/icon.png")
+              shutil.copyfile("public/pwa-512x512.png", "resources/splash.png")
+          PYEOF
           npx capacitor-assets generate --android --iconBackgroundColor '#0F172A' --splashBackgroundColor '#0F172A' || true
           mkdir -p android/app/src/main/res/drawable
           cp public/pwa-512x512.png android/app/src/main/res/drawable/taibah_logo.png || true
 
-      - name: Configure Android Permissions (Contacts, BiometricPrompt & Notifications)
+      - name: Configure Android 5.0+ (minSdk 21), Auto-Increment VersionCode & Native Permissions
         run: |
+          set -euo pipefail
+          # 1. Enforce Android 5.0 (API 21) minimum compatibility for wide device support
+          VARS_GRADLE="android/variables.gradle"
+          if [ -f "$VARS_GRADLE" ]; then
+            sed -i -E 's/minSdkVersion\s*=\s*[0-9]+/minSdkVersion = 21/' "$VARS_GRADLE"
+            echo "=== Verified android/variables.gradle ==="
+            cat "$VARS_GRADLE"
+          fi
+
+          # 2. Auto-increment versionCode & versionName while preserving applicationId "net.taibah.wireless"
+          APP_GRADLE="android/app/build.gradle"
+          VERSION_CODE=$((1000 + GITHUB_RUN_NUMBER))
+          VERSION_NAME="2.0.${GITHUB_RUN_NUMBER}"
+          sed -i -E "s/versionCode\s+[0-9]+/versionCode ${VERSION_CODE}/" "$APP_GRADLE"
+          sed -i -E "s/versionName\s+\"[^\"]+\"/versionName \"${VERSION_NAME}\"/" "$APP_GRADLE"
+          echo "=== Configured APK Version: versionCode=${VERSION_CODE}, versionName=${VERSION_NAME} ==="
+          grep -E "applicationId|versionCode|versionName" "$APP_GRADLE" || true
+          echo "APK_VERSION_CODE=${VERSION_CODE}" >> "$GITHUB_ENV"
+          echo "APK_VERSION_NAME=${VERSION_NAME}" >> "$GITHUB_ENV"
+
+          # 3. Configure Required Native Permissions (Contacts, BiometricPrompt & Notifications)
           MANIFEST="android/app/src/main/AndroidManifest.xml"
           for PERM in \
             "android.permission.READ_CONTACTS" \
@@ -81,6 +139,12 @@ jobs:
               sed -i "0,/<application/{s|<application|<uses-permission android:name=\"$PERM\" />\n    <application|}" "$MANIFEST"
             fi
           done
+
+      - name: Restore Persistent Fallback Release Keystore (Seamless In-Place Upgrades)
+        uses: actions/cache@v4
+        with:
+          path: .taibah-keystore
+          key: taibah-net-persistent-signing-keystore-v1
 
       - name: Build & Sign Installable Android APK (Debug / Release V1+V2+V3)
         working-directory: android
@@ -138,21 +202,36 @@ jobs:
               SIGN_KEY_PASS="$KEY_PASS"
               echo "SIGNING_STATUS=RELEASE_SIGNED_ORIGINAL_KEYSTORE" >> "$GITHUB_ENV"
             else
-              echo "Keystore secrets not configured; generating automatic RSA-2048 Release Keystore via keytool..."
-              SIGN_STORE_PASS=$(openssl rand -hex 16)
-              SIGN_KEY_PASS="$SIGN_STORE_PASS"
-              SIGN_KEY_ALIAS="taibah-net-release"
-              keytool -genkeypair -v \
-                -keystore release.keystore \
-                -storetype PKCS12 \
-                -alias "$SIGN_KEY_ALIAS" \
-                -keyalg RSA \
-                -keysize 2048 \
-                -validity 10000 \
-                -storepass "$SIGN_STORE_PASS" \
-                -keypass "$SIGN_KEY_PASS" \
-                -dname "CN=Taibah Net, OU=TAIBAH NET, O=Taibah Net Wireless, L=Yemen, C=YE"
-              echo "SIGNING_STATUS=RELEASE_SIGNED_AUTO_KEYTOOL_V1_V2_V3" >> "$GITHUB_ENV"
+              mkdir -p ../.taibah-keystore
+              CACHED_KS="../.taibah-keystore/release.keystore"
+              CACHED_META="../.taibah-keystore/meta.env"
+              if [ -s "$CACHED_KS" ] && [ -s "$CACHED_META" ]; then
+                echo "Reusing persistent cached RSA-2048 Release Keystore for seamless in-place updates..."
+                # shellcheck disable=SC1090
+                source "$CACHED_META"
+                cp -f "$CACHED_KS" release.keystore
+                echo "SIGNING_STATUS=RELEASE_SIGNED_PERSISTENT_KEYSTORE_V1_V2_V3" >> "$GITHUB_ENV"
+              else
+                echo "Initializing persistent RSA-2048 Release Keystore via keytool..."
+                SIGN_STORE_PASS=$(openssl rand -hex 16)
+                SIGN_KEY_PASS="$SIGN_STORE_PASS"
+                SIGN_KEY_ALIAS="taibah-net-release"
+                keytool -genkeypair -v \
+                  -keystore release.keystore \
+                  -storetype PKCS12 \
+                  -alias "$SIGN_KEY_ALIAS" \
+                  -keyalg RSA \
+                  -keysize 2048 \
+                  -validity 10000 \
+                  -storepass "$SIGN_STORE_PASS" \
+                  -keypass "$SIGN_KEY_PASS" \
+                  -dname "CN=Taibah Net, OU=TAIBAH NET, O=Taibah Net Wireless, L=Yemen, C=YE"
+                cp -f release.keystore "$CACHED_KS"
+                printf 'SIGN_STORE_PASS=%q\nSIGN_KEY_PASS=%q\nSIGN_KEY_ALIAS=%q\n' \
+                  "$SIGN_STORE_PASS" "$SIGN_KEY_PASS" "$SIGN_KEY_ALIAS" > "$CACHED_META"
+                chmod 600 "$CACHED_KS" "$CACHED_META"
+                echo "SIGNING_STATUS=RELEASE_SIGNED_PERSISTENT_KEYSTORE_INITIALIZED" >> "$GITHUB_ENV"
+              fi
             fi
 
             "$APKSIGNER" sign \
@@ -199,10 +278,12 @@ jobs:
           tag_name: latest
           name: كروت طيبة نت — TAIBAH NET (Android Release APK)
           body: |
-            الإصدار النهائي الجاهز للتثبيت المباشر من تطبيق **كروت طيبة نت – TAIBAH NET**.
+            الإصدار النهائي الجاهز للتثبيت والتحديث المباشر فوق النسخة السابقة من تطبيق **كروت طيبة نت – TAIBAH NET**.
             - **applicationId:** `net.taibah.wireless`
+            - **الإصدار:** `${{ env.APK_VERSION_NAME }}` (`versionCode: ${{ env.APK_VERSION_CODE }}`)
+            - **التوافق:** Android 5.0+ (`minSdkVersion = 21`) مع أيقونة Adaptive Icon متوازنة بدون قص
             - **حالة التوقيع:** `${{ env.SIGNING_STATUS }}`
-            - يدعم الدخول بالبصمة والوجه عبر **Android BiometricPrompt** والعمل أوفلاين (Offline-First)
+            - يدعم الدخول بالبصمة والوجه عبر **Android BiometricPrompt** والعمل أوفلاين بالكامل (Offline-First) دون تكرار بيع أي كرت
             - يدعم مشاركة الفواتير والكشوفات (PDF عربي + صور HD) وجلب جهات الاتصال مباشرة من الهاتف
             - مزامنة لحظية مع Firebase Firestore
           files: TaibahNet-Cards.apk

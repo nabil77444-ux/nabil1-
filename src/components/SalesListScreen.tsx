@@ -294,7 +294,7 @@ export const SalesListScreen: React.FC<SalesListScreenProps> = ({ hideNumbers, o
           <img
             src={TAIBAH_ASSETS.logo}
             alt="شعار شبكة طيبة نت"
-            className="w-full h-full rounded-full object-cover"
+            className="w-full h-full rounded-full object-contain bg-white p-0.5"
           />
         </div>
       </div>
@@ -512,7 +512,7 @@ export const SalesListScreen: React.FC<SalesListScreenProps> = ({ hideNumbers, o
                 <img
                   src={TAIBAH_ASSETS.logo}
                   alt="شعار طيبة نت"
-                  className="w-9 h-9 rounded-full object-cover border border-[#D4AF37]"
+                  className="w-9 h-9 rounded-full object-contain bg-white p-0.5 border border-[#D4AF37]"
                 />
                 <div>
                   <h3 className="text-sm font-extrabold text-white">

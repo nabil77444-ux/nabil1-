@@ -1,4 +1,10 @@
-import { SUPER_ADMIN_CONFIG, TAIBAH_ASSETS } from '../types/taibah';
+import {
+  DEFAULT_APP_SETTINGS,
+  formatDateTimeAr,
+  SUPER_ADMIN_CONFIG,
+  TAIBAH_ASSETS,
+  type AppSettingsDoc,
+} from '../types/taibah';
 import { normalizeDigits } from '../lib/firebase';
 
 export interface PrintableDocumentPayload {
@@ -13,6 +19,9 @@ export interface PrintableDocumentPayload {
   fileName: string;
   sharePhone?: string;
   shareText?: string;
+  pdfHeaderTitle?: string;
+  pdfHeaderSubtitle?: string;
+  pdfFooterText?: string;
 }
 
 export interface ExportShareResult {
@@ -24,6 +33,75 @@ export interface ExportShareResult {
   shareText?: string;
 }
 
+interface ShareBrandTemplates {
+  pdfHeaderTitle: string;
+  pdfHeaderSubtitle: string;
+  pdfFooterText: string;
+  smsMessageTemplate: string;
+  whatsappMessageTemplate: string;
+  directSaleMessageTemplate: string;
+}
+
+let activeBrandTemplates: ShareBrandTemplates = {
+  pdfHeaderTitle: DEFAULT_APP_SETTINGS.pdfHeaderTitle || 'كروت طيبة نت – TAIBAH NET',
+  pdfHeaderSubtitle:
+    DEFAULT_APP_SETTINGS.pdfHeaderSubtitle ||
+    'شبكة طيبة نت اللاسلكية — الإدارة المالية ونظام الكروت المعتمد',
+  pdfFooterText:
+    DEFAULT_APP_SETTINGS.pdfFooterText ||
+    `وثيقة معتمدة صادرة من منظومة كروت طيبة نت — ${SUPER_ADMIN_CONFIG.developerCredit}`,
+  smsMessageTemplate:
+    DEFAULT_APP_SETTINGS.smsMessageTemplate || DEFAULT_APP_SETTINGS.directSaleMessageTemplate,
+  whatsappMessageTemplate:
+    DEFAULT_APP_SETTINGS.whatsappMessageTemplate || DEFAULT_APP_SETTINGS.directSaleMessageTemplate,
+  directSaleMessageTemplate: DEFAULT_APP_SETTINGS.directSaleMessageTemplate,
+};
+
+export function setGlobalShareTemplates(settings: Partial<AppSettingsDoc>): void {
+  activeBrandTemplates = {
+    pdfHeaderTitle:
+      settings.pdfHeaderTitle?.trim() ||
+      DEFAULT_APP_SETTINGS.pdfHeaderTitle ||
+      'كروت طيبة نت – TAIBAH NET',
+    pdfHeaderSubtitle:
+      settings.pdfHeaderSubtitle?.trim() ||
+      DEFAULT_APP_SETTINGS.pdfHeaderSubtitle ||
+      'شبكة طيبة نت اللاسلكية — الإدارة المالية ونظام الكروت المعتمد',
+    pdfFooterText:
+      settings.pdfFooterText?.trim() ||
+      DEFAULT_APP_SETTINGS.pdfFooterText ||
+      `وثيقة معتمدة صادرة من منظومة كروت طيبة نت — ${SUPER_ADMIN_CONFIG.developerCredit}`,
+    smsMessageTemplate:
+      settings.smsMessageTemplate?.trim() ||
+      settings.directSaleMessageTemplate?.trim() ||
+      DEFAULT_APP_SETTINGS.smsMessageTemplate ||
+      DEFAULT_APP_SETTINGS.directSaleMessageTemplate,
+    whatsappMessageTemplate:
+      settings.whatsappMessageTemplate?.trim() ||
+      settings.directSaleMessageTemplate?.trim() ||
+      DEFAULT_APP_SETTINGS.whatsappMessageTemplate ||
+      DEFAULT_APP_SETTINGS.directSaleMessageTemplate,
+    directSaleMessageTemplate:
+      settings.directSaleMessageTemplate?.trim() || DEFAULT_APP_SETTINGS.directSaleMessageTemplate,
+  };
+}
+
+export function getGlobalShareTemplates(): ShareBrandTemplates {
+  return activeBrandTemplates;
+}
+
+export function applyMessageTemplate(
+  template: string,
+  vars: Record<string, string | number | undefined>
+): string {
+  let out = template || '';
+  for (const [key, val] of Object.entries(vars)) {
+    const replacement = val !== undefined && val !== null ? String(val) : '';
+    out = out.split(`{${key}}`).join(replacement);
+  }
+  return out;
+}
+
 interface CapacitorWindow extends Window {
   Capacitor?: {
     isNativePlatform?: () => boolean;
@@ -33,14 +111,6 @@ interface CapacitorWindow extends Window {
       };
       Share?: {
         share: (opts: { title?: string; text?: string; url?: string; files?: string[]; dialogTitle?: string }) => Promise<void>;
-      };
-      Contacts?: {
-        pickContact?: (opts?: { projection?: Record<string, boolean> }) => Promise<{
-          contact?: {
-            name?: { display?: string };
-            phones?: Array<{ number?: string }>;
-          };
-        }>;
       };
     };
   };
@@ -99,7 +169,7 @@ export function openWhatsAppShare(phone: string | undefined, message: string): v
 }
 
 /**
- * Open native SMS composer with prefilled message.
+ * Open native SMS composer with prefilled message (works 100% offline).
  */
 export function openSmsShare(phone: string | undefined, message: string): void {
   const digits = cleanYemeniPhone(phone || '');
@@ -124,19 +194,16 @@ function escapeHtml(text: string): string {
 }
 
 function buildRoyalDocumentHTML(payload: PrintableDocumentPayload, logoSrc: string): string {
-  const nowStr = new Intl.DateTimeFormat('ar-YE', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(new Date());
+  const nowStr = formatDateTimeAr(new Date());
+  const headerTitle = payload.pdfHeaderTitle?.trim() || activeBrandTemplates.pdfHeaderTitle;
+  const headerSubtitle = payload.pdfHeaderSubtitle?.trim() || activeBrandTemplates.pdfHeaderSubtitle;
+  const footerText = payload.pdfFooterText?.trim() || activeBrandTemplates.pdfFooterText;
 
   const metaHtml = payload.metaRows
     .map(
       (m) => `
-      <div style="background:#f8fafc;border:1px solid #cbd5e1;border-radius:10px;padding:8px 12px;display:flex;justify-content:space-between;align-items:center;gap:8px;">
-        <span style="color:#475569;font-size:12px;font-weight:700;">${escapeHtml(m.label)}</span>
+      <div style="background:linear-gradient(180deg,#ffffff 0%,#f8fafc 100%);border:1.5px solid #cbd5e1;border-right:4px solid #D4AF37;border-radius:10px;padding:9px 12px;display:flex;justify-content:space-between;align-items:center;gap:8px;">
+        <span style="color:#475569;font-size:11.5px;font-weight:700;">${escapeHtml(m.label)}</span>
         <span style="color:#0f172a;font-size:13px;font-weight:800;">${escapeHtml(m.value)}</span>
       </div>`
     )
@@ -145,13 +212,13 @@ function buildRoyalDocumentHTML(payload: PrintableDocumentPayload, logoSrc: stri
   const theadHtml = payload.tableHeaders
     .map(
       (h) =>
-        `<th style="padding:10px 8px;background:#1A365D;color:#FDE68A;font-size:12px;font-weight:800;text-align:right;border:1px solid #D4AF37;">${escapeHtml(h)}</th>`
+        `<th style="padding:10px 9px;background:linear-gradient(180deg,#1A365D 0%,#0F172A 100%);color:#FDE68A;font-size:12px;font-weight:800;text-align:right;border:1px solid #D4AF37;">${escapeHtml(h)}</th>`
     )
     .join('');
 
   const tbodyHtml =
     payload.tableRows.length === 0
-      ? `<tr><td colspan="${payload.tableHeaders.length}" style="padding:18px;text-align:center;color:#64748b;font-weight:700;">لا توجد سجلات</td></tr>`
+      ? `<tr><td colspan="${payload.tableHeaders.length}" style="padding:20px;text-align:center;color:#64748b;font-weight:700;">لا توجد سجلات</td></tr>`
       : payload.tableRows
           .map(
             (row, idx) => `
@@ -159,7 +226,7 @@ function buildRoyalDocumentHTML(payload: PrintableDocumentPayload, logoSrc: stri
           ${row
             .map(
               (cell) =>
-                `<td style="padding:8px;font-size:12px;font-weight:700;color:#0f172a;border:1px solid #cbd5e1;text-align:right;">${escapeHtml(cell)}</td>`
+                `<td style="padding:8px 9px;font-size:12px;font-weight:700;color:#0f172a;border:1px solid #cbd5e1;text-align:right;line-height:1.45;">${escapeHtml(cell)}</td>`
             )
             .join('')}
         </tr>`
@@ -169,13 +236,15 @@ function buildRoyalDocumentHTML(payload: PrintableDocumentPayload, logoSrc: stri
   const summaryHtml = (payload.summaryRows || [])
     .map(
       (s) => `
-      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 14px;border-radius:10px;background:${
-        s.highlight ? 'linear-gradient(135deg,#1A365D,#0F172A)' : '#f8fafc'
-      };border:${s.highlight ? '2px solid #D4AF37' : '1px solid #cbd5e1'};color:${
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-radius:12px;background:${
+        s.highlight
+          ? 'linear-gradient(135deg,#0F172A 0%,#1A365D 100%)'
+          : 'linear-gradient(180deg,#ffffff 0%,#f8fafc 100%)'
+      };border:${s.highlight ? '2px solid #D4AF37' : '1.5px solid #cbd5e1'};color:${
         s.highlight ? '#FDE68A' : '#0f172a'
-      };">
-        <span style="font-size:13px;font-weight:800;">${escapeHtml(s.label)}</span>
-        <span style="font-size:15px;font-weight:800;">${escapeHtml(s.value)}</span>
+      };box-shadow:${s.highlight ? '0 4px 10px rgba(15,23,42,0.18)' : 'none'};">
+        <span style="font-size:12.5px;font-weight:800;">${escapeHtml(s.label)}</span>
+        <span style="font-size:15px;font-weight:900;">${escapeHtml(s.value)}</span>
       </div>`
     )
     .join('');
@@ -183,15 +252,16 @@ function buildRoyalDocumentHTML(payload: PrintableDocumentPayload, logoSrc: stri
   const extraHtml =
     payload.extraLines && payload.extraLines.length > 0
       ? `
-      <div style="margin-top:14px;background:#f8fafc;border:1.5px dashed #D4AF37;border-radius:12px;padding:12px;">
-        <div style="font-size:13px;font-weight:800;color:#1A365D;margin-bottom:8px;">${escapeHtml(
-          payload.extraSectionTitle || 'أرقام الكروت'
-        )}</div>
-        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;">
+      <div style="margin-top:16px;background:#fffbeb;border:2px solid #D4AF37;border-radius:14px;padding:12px 14px;">
+        <div style="font-size:13px;font-weight:800;color:#1A365D;margin-bottom:9px;display:flex;justify-content:space-between;align-items:center;">
+          <span>${escapeHtml(payload.extraSectionTitle || 'أرقام الكروت')}</span>
+          <span style="font-size:11px;background:#1A365D;color:#FDE68A;padding:2px 10px;border-radius:999px;">العدد: ${payload.extraLines.length}</span>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:7px;">
           ${payload.extraLines
             .map(
               (line) =>
-                `<div style="background:#ffffff;border:1px solid #cbd5e1;border-radius:8px;padding:6px 8px;text-align:center;font-family:monospace;font-size:13px;font-weight:800;color:#0f172a;direction:ltr;">${escapeHtml(
+                `<div style="background:#ffffff;border:1.5px solid #cbd5e1;border-radius:9px;padding:7px 8px;text-align:center;font-family:monospace;font-size:13.5px;font-weight:800;color:#0f172a;direction:ltr;letter-spacing:0.6px;">${escapeHtml(
                   line
                 )}</div>`
             )
@@ -201,55 +271,59 @@ function buildRoyalDocumentHTML(payload: PrintableDocumentPayload, logoSrc: stri
       : '';
 
   return `
-    <div dir="rtl" style="width:780px;background:#ffffff;font-family:'Cairo',system-ui,sans-serif;color:#0f172a;border:3px solid #D4AF37;border-radius:18px;overflow:hidden;box-sizing:border-box;">
-      <div style="background:linear-gradient(135deg,#0F172A 0%,#1A365D 60%,#1E40AF 100%);padding:18px 22px;display:flex;align-items:center;justify-content:space-between;border-bottom:3px solid #D4AF37;">
-        <div style="display:flex;align-items:center;gap:14px;">
-          <img src="${logoSrc}" crossorigin="anonymous" style="width:64px;height:64px;border-radius:50%;object-fit:cover;border:3px solid #D4AF37;" />
+    <div dir="rtl" style="width:794px;background:#ffffff;font-family:'Cairo',system-ui,sans-serif;color:#0f172a;border:3px solid #D4AF37;border-radius:18px;overflow:hidden;box-sizing:border-box;">
+      <div style="background:linear-gradient(135deg,#0F172A 0%,#1A365D 55%,#1E3A8A 100%);padding:20px 24px;display:flex;align-items:center;justify-content:space-between;gap:14px;border-bottom:4px solid #D4AF37;">
+        <div style="display:flex;align-items:center;gap:14px;min-width:0;">
+          <div style="width:68px;height:68px;border-radius:50%;background:#ffffff;border:3px solid #D4AF37;padding:4px;display:flex;align-items:center;justify-content:center;flex-shrink:0;box-shadow:0 4px 12px rgba(0,0,0,0.28);">
+            <img src="${logoSrc}" crossorigin="anonymous" style="width:100%;height:100%;object-fit:contain;border-radius:50%;" />
+          </div>
           <div>
-            <div style="font-size:20px;font-weight:800;color:#ffffff;">كروت طيبة نت — TAIBAH NET</div>
-            <div style="font-size:12px;font-weight:700;color:#FDE68A;">شبكة طيبة نت اللاسلكية • ${SUPER_ADMIN_CONFIG.name} • ${SUPER_ADMIN_CONFIG.phone}</div>
+            <div style="font-size:21px;font-weight:900;color:#ffffff;line-height:1.2;">${escapeHtml(headerTitle)}</div>
+            <div style="font-size:12px;font-weight:700;color:#FDE68A;margin-top:3px;">${escapeHtml(headerSubtitle)}</div>
+            <div style="font-size:11px;font-weight:700;color:#cbd5e1;margin-top:2px;">الإدارة: ${SUPER_ADMIN_CONFIG.name} • هاتف: ${SUPER_ADMIN_CONFIG.phone}</div>
           </div>
         </div>
-        <div style="text-align:left;">
-          <div style="font-size:15px;font-weight:800;color:#FDE68A;">${escapeHtml(payload.title)}</div>
+        <div style="text-align:left;background:rgba(255,255,255,0.08);border:1.5px solid rgba(212,175,55,0.65);border-radius:12px;padding:9px 14px;flex-shrink:0;">
+          <div style="font-size:15px;font-weight:900;color:#FDE68A;">${escapeHtml(payload.title)}</div>
           ${
             payload.subtitle
               ? `<div style="font-size:11px;font-weight:700;color:#e2e8f0;margin-top:2px;">${escapeHtml(payload.subtitle)}</div>`
               : ''
           }
-          <div style="font-size:11px;font-weight:600;color:#cbd5e1;margin-top:3px;">${nowStr}</div>
+          <div style="font-size:11px;font-weight:700;color:#ffffff;margin-top:4px;direction:ltr;">${escapeHtml(nowStr)}</div>
         </div>
       </div>
 
-      <div style="padding:18px 22px;">
-        <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:14px;">
+      <div style="padding:20px 24px;background:#ffffff;">
+        <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:9px;margin-bottom:16px;">
           ${metaHtml}
         </div>
 
-        <table style="width:100%;border-collapse:collapse;border:1.5px solid #1A365D;">
-          <thead><tr>${theadHtml}</tr></thead>
-          <tbody>${tbodyHtml}</tbody>
-        </table>
+        <div style="border-radius:12px;overflow:hidden;border:1.5px solid #1A365D;">
+          <table style="width:100%;border-collapse:collapse;">
+            <thead><tr>${theadHtml}</tr></thead>
+            <tbody>${tbodyHtml}</tbody>
+          </table>
+        </div>
 
         ${extraHtml}
 
         ${
           summaryHtml
-            ? `<div style="margin-top:14px;display:grid;grid-template-columns:repeat(2,1fr);gap:8px;">${summaryHtml}</div>`
+            ? `<div style="margin-top:16px;display:grid;grid-template-columns:repeat(2,1fr);gap:9px;">${summaryHtml}</div>`
             : ''
         }
       </div>
 
-      <div style="background:#0F172A;color:#FDE68A;padding:10px 22px;display:flex;justify-content:space-between;align-items:center;font-size:12px;font-weight:800;border-top:2px solid #D4AF37;">
-        <span>${SUPER_ADMIN_CONFIG.developerCredit}</span>
-        <span>مستند معتمد إلكترونياً — شبكة طيبة نت اللاسلكية</span>
+      <div style="background:linear-gradient(90deg,#0F172A 0%,#1A365D 100%);color:#FDE68A;padding:11px 24px;display:flex;justify-content:space-between;align-items:center;font-size:11.5px;font-weight:800;border-top:3px solid #D4AF37;">
+        <span>${escapeHtml(footerText)}</span>
+        <span style="color:#e2e8f0;">${SUPER_ADMIN_CONFIG.developerCredit}</span>
       </div>
     </div>
   `;
 }
 
 async function renderRoyalCanvas(payload: PrintableDocumentPayload): Promise<HTMLCanvasElement> {
-  // Dynamic import so html2canvas NEVER slows down initial boot (Update 12)
   const [{ default: html2canvas }, logoSrc] = await Promise.all([
     import('html2canvas'),
     getOfficialLogoDataUrl(),
@@ -263,7 +337,6 @@ async function renderRoyalCanvas(payload: PrintableDocumentPayload): Promise<HTM
   container.innerHTML = buildRoyalDocumentHTML(payload, logoSrc);
   document.body.appendChild(container);
 
-  // Wait for fonts & logo image to settle
   try {
     if (document.fonts?.ready) {
       await document.fonts.ready;
@@ -287,7 +360,7 @@ async function renderRoyalCanvas(payload: PrintableDocumentPayload): Promise<HTM
   try {
     const target = container.firstElementChild as HTMLElement;
     const canvas = await html2canvas(target, {
-      scale: 3, // Crisp HD resolution (Update 13)
+      scale: 2.5,
       useCORS: true,
       allowTaint: false,
       backgroundColor: '#ffffff',
@@ -371,7 +444,6 @@ async function shareOrDownloadFile(
       return { fileName, mimeType: blob.type, blobUrl, sharedNatively: true, sharePhone, shareText };
     }
   } catch (err: unknown) {
-    // If user explicitly cancelled the native share sheet, don't force an unwanted extra download
     if (err instanceof Error && err.name === 'AbortError') {
       return { fileName, mimeType: blob.type, blobUrl, sharedNatively: true, sharePhone, shareText };
     }
@@ -383,7 +455,7 @@ async function shareOrDownloadFile(
 }
 
 /**
- * Generate and share/download a crisp HD PNG image (scale: 3) with official logo & RTL Arabic.
+ * Generate and share/download a crisp HD PNG image with official uncropped logo & RTL Arabic.
  */
 export async function exportAsHDImage(payload: PrintableDocumentPayload): Promise<ExportShareResult> {
   const canvas = await renderRoyalCanvas(payload);
@@ -395,7 +467,7 @@ export async function exportAsHDImage(payload: PrintableDocumentPayload): Promis
 }
 
 /**
- * Generate and share/download a crisp Arabic RTL multi-page A4 PDF with official logo.
+ * Generate and share/download a crisp Arabic RTL multi-page A4 PDF with official uncropped logo.
  */
 export async function exportAsArabicPDF(payload: PrintableDocumentPayload): Promise<ExportShareResult> {
   const [canvas, { jsPDF }] = await Promise.all([renderRoyalCanvas(payload), import('jspdf')]);
@@ -448,7 +520,7 @@ export async function printRoyalDocument(payload: PrintableDocumentPayload): Pro
   doc.write(
     `<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8" /><title>${escapeHtml(
       payload.title
-    )}</title><link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;700;800&display=swap" rel="stylesheet" /><style>body{margin:0;padding:12px;display:flex;justify-content:center;font-family:'Cairo',sans-serif;}@media print{body{padding:0;}}</style></head><body>${buildRoyalDocumentHTML(
+    )}</title><link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;700;800;900&display=swap" rel="stylesheet" /><style>body{margin:0;padding:12px;display:flex;justify-content:center;font-family:'Cairo',sans-serif;}@media print{body{padding:0;}}</style></head><body>${buildRoyalDocumentHTML(
       payload,
       logoSrc
     )}</body></html>`
@@ -463,7 +535,7 @@ export async function printRoyalDocument(payload: PrintableDocumentPayload): Pro
 }
 
 /**
- * Export structured data to Excel (.xlsx) with RTL sheet direction via dynamic import (Update 12).
+ * Export structured data to Excel (.xlsx) with RTL sheet direction via dynamic import.
  */
 export async function exportAsExcel(
   sheetName: string,
@@ -481,7 +553,7 @@ export async function exportAsExcel(
 }
 
 /**
- * Build shareable application text (clean, official — Update 16).
+ * Build shareable application text (clean, official).
  */
 export function buildAppShareText(description?: string): string {
   const lines = [

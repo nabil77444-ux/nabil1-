@@ -95,7 +95,7 @@ export const PackagesImportScreen: React.FC<PackagesImportScreenProps> = ({ hide
         }
         extractedText = parts.join('\n');
       } else if (ext === 'pdf') {
-        setParsingStatus('جاري استخراج أرقام الكروت من ملف PDF...');
+        setParsingStatus('جاري استخراج أرقام الكروت من ملف PDF بسرعة فائقة...');
         const buffer = await file.arrayBuffer();
         try {
           const pdfjsLib = await import('pdfjs-dist');
@@ -103,25 +103,42 @@ export const PackagesImportScreen: React.FC<PackagesImportScreenProps> = ({ hide
             'pdfjs-dist/build/pdf.worker.min.mjs',
             import.meta.url
           ).toString();
-          const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise;
-          const pagesText: string[] = new Array(pdf.numPages);
-          const BATCH_PAGES = 10;
-          for (let start = 1; start <= pdf.numPages; start += BATCH_PAGES) {
-            const end = Math.min(pdf.numPages, start + BATCH_PAGES - 1);
-            setParsingStatus(`جاري مسح الصفحات ${start} - ${end} من ${pdf.numPages}...`);
+          const loadingTask = pdfjsLib.getDocument({
+            data: new Uint8Array(buffer),
+            disableFontFace: true,
+            useSystemFonts: true,
+          });
+          const pdf = await loadingTask.promise;
+          const totalPages = pdf.numPages;
+          const allPageCodes: string[][] = new Array(totalPages);
+          const BATCH_PAGES = 28;
+          for (let start = 1; start <= totalPages; start += BATCH_PAGES) {
+            const end = Math.min(totalPages, start + BATCH_PAGES - 1);
+            setParsingStatus(`استخراج سريع للصفحات ${start} - ${end} من ${totalPages}...`);
             const batchPromises: Array<Promise<void>> = [];
             for (let pageNum = start; pageNum <= end; pageNum++) {
               batchPromises.push(
                 pdf.getPage(pageNum).then(async (page) => {
-                  const content = await page.getTextContent();
-                  const strings = content.items.map((item) => ('str' in item ? item.str : ''));
-                  pagesText[pageNum - 1] = strings.join(' ');
+                  try {
+                    const content = await page.getTextContent({ includeMarkedContent: false });
+                    let joined = '';
+                    for (let i = 0; i < content.items.length; i++) {
+                      const item = content.items[i];
+                      if ('str' in item && item.str) {
+                        joined += item.str + ' ';
+                      }
+                    }
+                    allPageCodes[pageNum - 1] = extractVoucherNumbers(joined);
+                  } finally {
+                    page.cleanup();
+                  }
                 })
               );
             }
             await Promise.all(batchPromises);
           }
-          extractedText = pagesText.join('\n');
+          await loadingTask.destroy();
+          extractedText = allPageCodes.flat().join('\n');
         } catch {
           // Clean fallback: decode raw PDF bytes text stream if worker blocked
           const decoder = new TextDecoder('latin1');
@@ -192,14 +209,14 @@ export const PackagesImportScreen: React.FC<PackagesImportScreenProps> = ({ hide
           <div className="min-w-0">
             <h2 className="text-base font-extrabold text-white truncate">الباقات الثماني واستيراد الكروت</h2>
             <p className="text-[11px] font-bold text-[#FDE68A] truncate">
-              اضغط على أي باقة لفتح محرك الاستيراد (4000+ كرت: PDF • Excel • CSV • TXT • OCR)
+              اضغط على أي باقة لفتح محرك الاستيراد السريع (PDF • Excel • CSV • TXT • OCR)
             </p>
           </div>
         </div>
         <img
           src={TAIBAH_ASSETS.logo}
           alt="شعار طيبة نت"
-          className="w-11 h-11 rounded-full object-cover border-2 border-[#D4AF37] shrink-0"
+          className="w-11 h-11 rounded-full object-contain bg-white p-0.5 border-2 border-[#D4AF37] shrink-0"
         />
       </div>
 
@@ -279,7 +296,7 @@ export const PackagesImportScreen: React.FC<PackagesImportScreenProps> = ({ hide
                 <img
                   src={TAIBAH_ASSETS.logo}
                   alt="طيبة نت"
-                  className="w-9 h-9 rounded-full object-cover border border-[#D4AF37]"
+                  className="w-9 h-9 rounded-full object-contain bg-white p-0.5 border border-[#D4AF37]"
                 />
                 <div>
                   <h3 className="text-sm font-extrabold text-white">

@@ -100,7 +100,7 @@
 .animate-marquee-rtl {
   display: inline-block;
   white-space: nowrap;
-  animation: taibah-marquee-rtl 22s linear infinite;
+  animation: taibah-marquee-rtl var(--marquee-duration, 22s) linear infinite;
 }
 
 .animate-marquee-rtl:hover {
@@ -112,6 +112,28 @@
     animation: none;
     transform: none;
   }
+}
+
+/* Safe Area Helpers (Android Status Bar, Camera Cutout, Gesture/Button Navigation Bar) */
+.safe-top {
+  padding-top: max(env(safe-area-inset-top, 0px), 0px);
+}
+
+.safe-top-padded {
+  padding-top: calc(env(safe-area-inset-top, 0px) + 0.5rem);
+}
+
+.safe-bottom {
+  padding-bottom: max(env(safe-area-inset-bottom, 0px), 0px);
+}
+
+.safe-bottom-padded {
+  padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 0.35rem);
+}
+
+.safe-x {
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
 }
 
 /* Subtle custom scrollbar for sub-screens and drawer */

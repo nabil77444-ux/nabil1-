@@ -7,11 +7,16 @@
     "cleartext": false
   },
   "plugins": {
+    "StatusBar": {
+      "overlaysWebView": false,
+      "style": "DARK",
+      "backgroundColor": "#0F172A"
+    },
     "SplashScreen": {
       "launchShowDuration": 1200,
       "launchAutoHide": true,
       "backgroundColor": "#0F172A",
-      "androidScaleType": "CENTER_CROP",
+      "androidScaleType": "CENTER_INSIDE",
       "showSpinner": false
     },
     "PushNotifications": {

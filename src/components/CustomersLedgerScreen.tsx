@@ -294,7 +294,7 @@ export const CustomersLedgerScreen: React.FC<CustomersLedgerScreenProps> = ({ hi
         <img
           src={TAIBAH_ASSETS.logo}
           alt="شعار طيبة نت"
-          className="w-11 h-11 rounded-full object-cover border-2 border-[#D4AF37] shrink-0"
+          className="w-11 h-11 rounded-full object-contain bg-white p-0.5 border-2 border-[#D4AF37] shrink-0"
         />
       </div>
 
@@ -480,7 +480,7 @@ export const CustomersLedgerScreen: React.FC<CustomersLedgerScreenProps> = ({ hi
                 <img
                   src={TAIBAH_ASSETS.logo}
                   alt="طيبة نت"
-                  className="w-9 h-9 rounded-full object-cover border border-[#D4AF37] shrink-0"
+                  className="w-9 h-9 rounded-full object-contain bg-white p-0.5 border border-[#D4AF37] shrink-0"
                 />
                 <div className="min-w-0">
                   <h3 className="text-sm font-extrabold text-white truncate">{selectedCustomer.name}</h3>

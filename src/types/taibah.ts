@@ -225,12 +225,50 @@ export interface AuditLogDoc {
   createdAt?: Timestamp;
 }
 
+export interface HeroSlideConfig {
+  id: string;
+  image: string;
+  title: string;
+  subtitle: string;
+}
+
+export const DEFAULT_HERO_SLIDES: HeroSlideConfig[] = [
+  {
+    id: 'slide_1',
+    image: TAIBAH_ASSETS.slideMikrotik,
+    title: 'شبكة طيبة نت اللاسلكية',
+    subtitle: 'تغطية فائقة السرعة • استقرار دائم 24/7',
+  },
+  {
+    id: 'slide_2',
+    image: TAIBAH_ASSETS.slideCards,
+    title: 'كروت طيبة نت الأصلية',
+    subtitle: '8 باقات حصرية متوفرة لدى جميع الوكلاء ونقاط البيع',
+  },
+  {
+    id: 'slide_3',
+    image: TAIBAH_ASSETS.slideNetwork,
+    title: 'منظومة وكلاء ومبيعات فورية',
+    subtitle: 'تغذية لحظية للوكلاء والعملاء ومزامنة سحابية آمنة',
+  },
+];
+
 export interface AppSettingsDoc {
   newsTicker: string;
+  newsTickerEnabled?: boolean;
+  newsTickerSpeed?: number;
+  sliderEnabled?: boolean;
+  sliderSpeed?: number;
+  sliderSlides?: HeroSlideConfig[];
   lowStockThreshold: number;
   agentDiscountPercent: number;
   clientDiscountPercent: number;
   directSaleMessageTemplate: string;
+  smsMessageTemplate?: string;
+  whatsappMessageTemplate?: string;
+  pdfHeaderTitle?: string;
+  pdfHeaderSubtitle?: string;
+  pdfFooterText?: string;
   appDescription?: string;
   apkDownloadUrl?: string;
   updatedAt?: Timestamp;
@@ -239,11 +277,23 @@ export interface AppSettingsDoc {
 export const DEFAULT_APP_SETTINGS: Omit<AppSettingsDoc, 'updatedAt'> = {
   newsTicker:
     'أهلاً بكم في تطبيق كروت طيبة نت — شبكة طيبة نت اللاسلكية (TAIBAH NET) • بيع فوري وآمن للوكلاء والعملاء والمستهلكين مع مزامنة سحابية لحظية',
+  newsTickerEnabled: true,
+  newsTickerSpeed: 22,
+  sliderEnabled: true,
+  sliderSpeed: 5,
+  sliderSlides: DEFAULT_HERO_SLIDES,
   lowStockThreshold: 20,
   agentDiscountPercent: 70,
   clientDiscountPercent: 80,
   directSaleMessageTemplate:
     'شبكة طيبة نت اللاسلكية (TAIBAH NET)\nالباقة: {package}\nرقم الكرت: {card}\nنتمنى لكم تصفحاً سريعاً وممتعاً.\nطيبة نت 772466998',
+  smsMessageTemplate:
+    'كروت طيبة نت (TAIBAH NET)\nالباقة: {package}\nالكرت: {card}\nطيبة نت 772466998',
+  whatsappMessageTemplate:
+    '👑 *شبكة طيبة نت اللاسلكية (TAIBAH NET)*\n📦 الباقة: *{package}*\n🎫 رقم الكرت: `{card}`\n✨ نتمنى لكم تصفحاً سريعاً وممتعاً.\n📞 طيبة نت 772466998',
+  pdfHeaderTitle: 'كروت طيبة نت – TAIBAH NET',
+  pdfHeaderSubtitle: 'شبكة طيبة نت اللاسلكية — الإدارة المالية ونظام الكروت المعتمد',
+  pdfFooterText: 'وثيقة معتمدة صادرة من منظومة كروت طيبة نت — طيبة نت 772466998',
   appDescription:
     'تطبيق كروت طيبة نت الرسمي لإدارة وبيع كروت شبكة طيبة نت اللاسلكية (الميكروويف والواي فاي) — بيع مباشر للمستهلك، جملة للوكلاء ونقاط البيع، فواتير محاسبية وتقارير فورية.',
   apkDownloadUrl: '',
@@ -494,21 +544,37 @@ export function formatCount(value: number, hideNumbers = false): string {
   return new Intl.NumberFormat('ar-YE').format(value);
 }
 
+function resolveDateObject(ts?: Timestamp | Date | number): Date | null {
+  if (!ts) return null;
+  if (ts instanceof Date) return Number.isNaN(ts.getTime()) ? null : ts;
+  if (typeof ts === 'number') {
+    const d = new Date(ts);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  if (typeof ts.toDate === 'function') {
+    const d = ts.toDate();
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  return null;
+}
+
+export function formatDateDDMMYYYY(ts?: Timestamp | Date | number): string {
+  const date = resolveDateObject(ts) ?? new Date();
+  const dd = String(date.getDate()).padStart(2, '0');
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const yyyy = date.getFullYear();
+  return `${dd}/${mm}/${yyyy}`;
+}
+
 export function formatDateTimeAr(ts?: Timestamp | Date | number): string {
-  if (!ts) return 'الآن';
-  const date =
-    ts instanceof Date
-      ? ts
-      : typeof ts === 'number'
-        ? new Date(ts)
-        : typeof ts.toDate === 'function'
-          ? ts.toDate()
-          : new Date();
-  return new Intl.DateTimeFormat('ar-YE', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(date);
+  const date = resolveDateObject(ts);
+  if (!date) return 'الآن';
+  const dd = String(date.getDate()).padStart(2, '0');
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const yyyy = date.getFullYear();
+  const hours24 = date.getHours();
+  const period = hours24 >= 12 ? 'م' : 'ص';
+  const hours12 = String(hours24 % 12 || 12).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  return `${dd}/${mm}/${yyyy} - ${hours12}:${minutes} ${period}`;
 }

@@ -359,14 +359,14 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ isDark, onToggleTheme })
     return (
       <div
         dir="rtl"
-        className="min-h-[100dvh] flex items-center justify-center bg-gradient-to-b from-[#0F172A] via-[#1A365D] to-[#0F172A] p-4"
+        className="min-h-[100dvh] flex items-center justify-center bg-gradient-to-b from-[#0F172A] via-[#1A365D] to-[#0F172A] p-4 safe-top safe-bottom"
       >
         <div className="w-full max-w-sm rounded-3xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] p-6 shadow-2xl text-center">
           <img
             src={TAIBAH_ASSETS.logo}
             alt="شعار شبكة طيبة نت"
             referrerPolicy="no-referrer"
-            className="w-20 h-20 rounded-full mx-auto object-cover gold-ring-3d"
+            className="w-20 h-20 rounded-full mx-auto object-contain bg-white p-1 gold-ring-3d"
           />
           <div className="mt-4 inline-flex items-center justify-center w-11 h-11 rounded-2xl bg-blue-100 dark:bg-blue-900/40 text-[#1A365D] dark:text-[#FDE68A]">
             <RefreshCw className="w-5 h-5 animate-spin" />
@@ -395,14 +395,14 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ isDark, onToggleTheme })
     return (
       <div
         dir="rtl"
-        className="min-h-[100dvh] flex items-center justify-center bg-gradient-to-b from-[#0F172A] via-[#1A365D] to-[#0F172A] p-4"
+        className="min-h-[100dvh] flex items-center justify-center bg-gradient-to-b from-[#0F172A] via-[#1A365D] to-[#0F172A] p-4 safe-top safe-bottom"
       >
         <div className="w-full max-w-md rounded-3xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] p-6 shadow-2xl text-center">
           <img
             src={TAIBAH_ASSETS.logo}
             alt="شعار شبكة طيبة نت"
             referrerPolicy="no-referrer"
-            className="w-20 h-20 rounded-full mx-auto object-cover gold-ring-3d"
+            className="w-20 h-20 rounded-full mx-auto object-contain bg-white p-1 gold-ring-3d"
           />
           <div className="mt-4 inline-flex items-center justify-center w-12 h-12 rounded-2xl bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400">
             <MailCheck className="w-6 h-6" />
@@ -458,14 +458,14 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ isDark, onToggleTheme })
     return (
       <div
         dir="rtl"
-        className="min-h-[100dvh] flex items-center justify-center bg-gradient-to-b from-[#0F172A] via-[#1A365D] to-[#0F172A] p-4"
+        className="min-h-[100dvh] flex items-center justify-center bg-gradient-to-b from-[#0F172A] via-[#1A365D] to-[#0F172A] p-4 safe-top safe-bottom"
       >
         <div className="w-full max-w-md rounded-3xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] p-6 shadow-2xl text-center">
           <img
             src={TAIBAH_ASSETS.logo}
             alt="شعار شبكة طيبة نت"
             referrerPolicy="no-referrer"
-            className="w-20 h-20 rounded-full mx-auto object-cover gold-ring-3d"
+            className="w-20 h-20 rounded-full mx-auto object-contain bg-white p-1 gold-ring-3d"
           />
           <div
             className={`mt-4 inline-flex items-center justify-center w-12 h-12 rounded-2xl ${
@@ -505,14 +505,14 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ isDark, onToggleTheme })
     return (
       <div
         dir="rtl"
-        className="min-h-[100dvh] flex items-center justify-center bg-gradient-to-b from-[#0F172A] via-[#1A365D] to-[#0F172A] p-4"
+        className="min-h-[100dvh] flex items-center justify-center bg-gradient-to-b from-[#0F172A] via-[#1A365D] to-[#0F172A] p-4 safe-top safe-bottom"
       >
         <div className="w-full max-w-md rounded-3xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] p-6 shadow-2xl text-center">
           <img
             src={TAIBAH_ASSETS.logo}
             alt="شعار شبكة طيبة نت"
             referrerPolicy="no-referrer"
-            className="w-20 h-20 rounded-full mx-auto object-cover gold-ring-3d"
+            className="w-20 h-20 rounded-full mx-auto object-contain bg-white p-1 gold-ring-3d"
           />
           <h2 className="mt-4 text-lg font-extrabold text-slate-900 dark:text-white">
             تعذر تحميل ملف الحساب
@@ -549,14 +549,14 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ isDark, onToggleTheme })
   return (
     <div
       dir="rtl"
-      className="min-h-[100dvh] w-full flex flex-col items-center justify-center bg-gradient-to-br from-slate-100 via-blue-50 to-slate-200 dark:from-[#0B1220] dark:via-[#0F172A] dark:to-[#1A365D] p-4 relative overflow-y-auto"
+      className="min-h-[100dvh] w-full flex flex-col items-center justify-center bg-gradient-to-br from-slate-100 via-blue-50 to-slate-200 dark:from-[#0B1220] dark:via-[#0F172A] dark:to-[#1A365D] p-4 safe-top safe-bottom relative overflow-y-auto"
     >
       {/* Theme Toggle floating corner */}
       <button
         type="button"
         onClick={onToggleTheme}
         aria-label={isDark ? 'التبديل للوضع النهاري' : 'التبديل للوضع الليلي'}
-        className="fixed top-4 left-4 z-20 w-11 h-11 rounded-full bg-white dark:bg-slate-800 border-2 border-[#D4AF37] text-[#1A365D] dark:text-[#FDE68A] shadow-lg flex items-center justify-center active:scale-95 transition-transform"
+        className="fixed top-[max(1rem,env(safe-area-inset-top))] left-4 z-20 w-11 h-11 rounded-full bg-white dark:bg-slate-800 border-2 border-[#D4AF37] text-[#1A365D] dark:text-[#FDE68A] shadow-lg flex items-center justify-center active:scale-95 transition-transform"
       >
         {isDark ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
       </button>
@@ -570,7 +570,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ isDark, onToggleTheme })
                 src={TAIBAH_ASSETS.logo}
                 alt="الشعار الرسمي لشبكة طيبة نت"
                 referrerPolicy="no-referrer"
-                className="w-full h-full rounded-full object-cover"
+                className="w-full h-full rounded-full object-contain bg-white p-1"
               />
             </div>
             <h1 className="mt-3 text-xl font-extrabold text-white tracking-tight">
