@@ -38,7 +38,6 @@ import {
   formatPackageBalanceFull,
   formatYER,
   resolveDirectSaleTemplate,
-  SUPER_ADMIN_CONFIG,
   TAIBAH_ASSETS,
   type PackageDoc,
   type SaleDoc,

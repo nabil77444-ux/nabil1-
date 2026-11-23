@@ -7,6 +7,7 @@ import {
   type User as FirebaseUser,
 } from 'firebase/auth';
 import {
+  clearIndexedDbPersistence,
   collection,
   deleteDoc,
   doc,
@@ -20,6 +21,7 @@ import {
   runTransaction,
   serverTimestamp,
   setDoc,
+  terminate,
   updateDoc,
   where,
   writeBatch,
@@ -226,7 +228,8 @@ interface FirebaseContextValue {
   exportCloudBackup: () => Promise<void>;
   resetAppData: (
     scope: 'sales_only' | 'full_reset',
-    adminPassword: string
+    adminPassword: string,
+    onProgress?: (stage: string) => void
   ) => Promise<{ ok: boolean; error?: string; deletedCount: number }>;
 }
 
@@ -3036,12 +3039,13 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   ]);
 
   // =========================================================================
-  // SUPER ADMIN ONLY: SECURE APP DATA RESET (Password Re-Auth + Chunked Batch)
+  // SUPER ADMIN ONLY: COMPLETE CLOUD + LOCAL APP DATA RESET (500-doc writeBatch)
   // =========================================================================
   const resetAppData = useCallback(
     async (
       scope: 'sales_only' | 'full_reset',
-      adminPassword: string
+      adminPassword: string,
+      onProgress?: (stage: string) => void
     ): Promise<{ ok: boolean; error?: string; deletedCount: number }> => {
       const activeUser = auth.currentUser || firebaseUser;
       if (!activeUser || !profile || profile.role !== 'super_admin' || !activeUser.email) {
@@ -3070,9 +3074,11 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       }
 
       // Mandatory Firebase Auth Re-Authentication with Super Admin's real password
+      onProgress?.('جاري التحقق من كلمة مرور المدير العام...');
       try {
         const credential = EmailAuthProvider.credential(activeUser.email, cleanPass);
         await reauthenticateWithCredential(activeUser, credential);
+        await activeUser.getIdToken(true);
       } catch (err) {
         const code = (err as { code?: string })?.code || '';
         if (code === 'auth/too-many-requests') {
@@ -3089,13 +3095,17 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         };
       }
 
-      // Helper to safely delete an entire Firestore collection in batches of <= 400 docs
-      const deleteCollectionInBatches = async (colName: string): Promise<number> => {
+      let currentStepPath = `resetAppData/${scope}`;
+
+      // Exact 500-document writeBatch deletion loop (Firestore maximum batch size)
+      const BATCH_LIMIT = 500;
+      const deleteCollectionInBatches = async (colName: string, arLabel: string): Promise<number> => {
+        currentStepPath = colName;
         let removed = 0;
         let safetyLoops = 0;
-        while (safetyLoops < 200) {
+        while (safetyLoops < 400) {
           safetyLoops++;
-          const snap = await getDocs(query(collection(db, colName), limit(400)));
+          const snap = await getDocs(query(collection(db, colName), limit(BATCH_LIMIT)));
           if (snap.empty) break;
           const batch = writeBatch(db);
           for (const d of snap.docs) {
@@ -3103,28 +3113,58 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           }
           await batch.commit();
           removed += snap.docs.length;
-          if (snap.docs.length < 400) break;
+          onProgress?.(`جاري حذف ${arLabel}... (${removed})`);
+          if (snap.docs.length < BATCH_LIMIT) break;
         }
         return removed;
       };
 
+      // Helper to produce an exact 12-field package payload matching isValidPackageDoc in firestore.rules
+      const buildValidPackagePayload = (
+        basePkg: (typeof EXCLUSIVE_PACKAGES)[number],
+        existingData?: Partial<PackageDoc>,
+        zeroAllCounters = true
+      ) => ({
+        code: String(existingData?.code || basePkg.code).slice(0, 32),
+        price:
+          typeof existingData?.price === 'number' && existingData.price > 0 && existingData.price <= 100000
+            ? existingData.price
+            : basePkg.price,
+        dataLabel: String(existingData?.dataLabel || basePkg.dataLabel).slice(0, 40),
+        hoursLabel: String(existingData?.hoursLabel || basePkg.hoursLabel).slice(0, 40),
+        validityLabel: String(existingData?.validityLabel || basePkg.validityLabel).slice(0, 40),
+        colorTheme: String(existingData?.colorTheme || basePkg.colorTheme).slice(0, 32),
+        availableCount: zeroAllCounters ? 0 : Math.max(0, Number(existingData?.availableCount ?? 0)),
+        soldCount: 0,
+        uploadedCount: zeroAllCounters ? 0 : Math.max(0, Number(existingData?.uploadedCount ?? 0)),
+        injectedCount: zeroAllCounters ? 0 : Math.max(0, Number(existingData?.injectedCount ?? 0)),
+        sortOrder:
+          typeof existingData?.sortOrder === 'number' && existingData.sortOrder >= 1 && existingData.sortOrder <= 20
+            ? existingData.sortOrder
+            : basePkg.sortOrder,
+        updatedAt: serverTimestamp(),
+      });
+
       let totalDeleted = 0;
       try {
         if (scope === 'sales_only') {
-          totalDeleted += await deleteCollectionInBatches('sales');
+          onProgress?.('جاري حذف فواتير وسجل المبيعات...');
+          totalDeleted += await deleteCollectionInBatches('sales', 'فواتير المبيعات');
 
-          // Reset soldCount on all 8 packages while preserving available/uploaded stock
-          const pkgSnap = await getDocs(collection(db, 'packages'));
-          if (!pkgSnap.empty) {
-            const pkgBatch = writeBatch(db);
-            for (const pDoc of pkgSnap.docs) {
-              pkgBatch.update(pDoc.ref, {
-                soldCount: 0,
-                updatedAt: serverTimestamp(),
-              });
-            }
-            await pkgBatch.commit();
+          // Reset soldCount on all 8 packages while preserving available/uploaded/injected stock
+          onProgress?.('جاري تصفير عدادات المباع في الباقات...');
+          currentStepPath = 'packages';
+          const pkgSnap = await getDocs(query(collection(db, 'packages'), where('price', '>', 0)));
+          const existingPkgMap = new Map(pkgSnap.docs.map((d) => [d.id, d.data() as Partial<PackageDoc>]));
+          const pkgBatch = writeBatch(db);
+          for (const basePkg of EXCLUSIVE_PACKAGES) {
+            const existingData = existingPkgMap.get(basePkg.id);
+            pkgBatch.set(
+              doc(db, 'packages', basePkg.id),
+              buildValidPackagePayload(basePkg, existingData, false)
+            );
           }
+          await pkgBatch.commit();
 
           clearOfflineSalesQueueOnly();
           writeCachedJson(`${CACHE_SALES_PREFIX}${activeUser.uid}`, []);
@@ -3139,84 +3179,164 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           return { ok: true, deletedCount: totalDeleted };
         }
 
-        // FULL RESET: Deletes operational collections while strictly preserving super_admin, admins, settings/global & immutable auditLogs
-        const targetCollections = [
-          'sales',
-          'customers',
-          'ledgerEntries',
-          'topupRequests',
-          'notifications',
-          'cards',
-          'registrationRequests',
-          'passwordResetRequests',
+        // =====================================================================
+        // FULL APP DATA RESET: Real 500-doc writeBatch wipe across ALL Firestore
+        // operational collections, keeping ONLY Super Admin & 8 base packages (0)
+        // =====================================================================
+        const targetCollections: Array<{ name: string; label: string }> = [
+          { name: 'cards', label: 'جميع الكروت (المتاحة والمباعة والمحجوزة)' },
+          { name: 'sales', label: 'فواتير البيع المباشر والجملة والورقية' },
+          { name: 'ledgerEntries', label: 'قيود الدفتر المحاسبي' },
+          { name: 'customers', label: 'حسابات العملاء' },
+          { name: 'topupRequests', label: 'طلبات التغذية' },
+          { name: 'notifications', label: 'الإشعارات' },
+          { name: 'registrationRequests', label: 'طلبات الانضمام' },
+          { name: 'passwordResetRequests', label: 'طلبات استعادة كلمة المرور' },
+          { name: 'auditLogs', label: 'سجل العمليات الرقابي (Audit Log)' },
         ];
-        for (const colName of targetCollections) {
-          totalDeleted += await deleteCollectionInBatches(colName);
+
+        for (const col of targetCollections) {
+          onProgress?.(`جاري حذف ${col.label}...`);
+          totalDeleted += await deleteCollectionInBatches(col.name, col.label);
         }
 
-        // Reset all 8 packages stock counters to 0 (keeping the 8 official packages intact)
-        const pkgSnap = await getDocs(collection(db, 'packages'));
-        if (!pkgSnap.empty) {
-          const pkgBatch = writeBatch(db);
-          for (const pDoc of pkgSnap.docs) {
-            pkgBatch.update(pDoc.ref, {
-              availableCount: 0,
-              soldCount: 0,
-              uploadedCount: 0,
-              injectedCount: 0,
-              updatedAt: serverTimestamp(),
-            });
-          }
-          await pkgBatch.commit();
-        }
-
-        // Reset balances of non-admin users to 0 (preserving user accounts & super_admin intact)
+        // Delete ALL non-admin user accounts (agents & clients) in 500-doc batches,
+        // while STRICTLY preserving the Super Admin account and resetting their balance to 0
+        onProgress?.('جاري حذف حسابات الوكلاء والعملاء وتصفير الأرصدة...');
+        currentStepPath = 'users';
         const usersSnap = await getDocs(collection(db, 'users'));
-        const nonAdminDocs = usersSnap.docs.filter((u) => {
-          const role = (u.data() as Partial<UserProfile>)?.role;
-          return role !== 'super_admin' && u.id !== activeUser.uid;
+        const nonAdminUsers = usersSnap.docs.filter((u) => {
+          const data = u.data() as Partial<UserProfile>;
+          return u.id !== activeUser.uid && data.role !== 'super_admin';
         });
-        for (let i = 0; i < nonAdminDocs.length; i += 400) {
-          const chunk = nonAdminDocs.slice(i, i + 400);
+        for (let i = 0; i < nonAdminUsers.length; i += BATCH_LIMIT) {
+          const chunk = nonAdminUsers.slice(i, i + BATCH_LIMIT);
           const uBatch = writeBatch(db);
           for (const uDoc of chunk) {
-            uBatch.update(uDoc.ref, {
-              balance: 0,
-              updatedAt: serverTimestamp(),
-            });
+            uBatch.delete(uDoc.ref);
           }
           await uBatch.commit();
+          totalDeleted += chunk.length;
+        }
+        // Keep Super Admin user document intact with balance = 0
+        await updateDoc(doc(db, 'users', activeUser.uid), {
+          balance: 0,
+          updatedAt: serverTimestamp(),
+        }).catch(() => {});
+
+        // Preserve ONLY the 8 official base packages with exact 0 counts (ready for fresh import)
+        onProgress?.('جاري تصفير هيكل الباقات الثماني الأساسية إلى الصفر (0)...');
+        currentStepPath = 'packages';
+        const pkgSnap = await getDocs(query(collection(db, 'packages'), where('price', '>', 0)));
+        const existingPkgMap = new Map(pkgSnap.docs.map((d) => [d.id, d.data() as Partial<PackageDoc>]));
+        const officialIds = new Set(EXCLUSIVE_PACKAGES.map((p) => p.id));
+        const pkgBatch = writeBatch(db);
+        for (const basePkg of EXCLUSIVE_PACKAGES) {
+          const existingData = existingPkgMap.get(basePkg.id);
+          pkgBatch.set(
+            doc(db, 'packages', basePkg.id),
+            buildValidPackagePayload(basePkg, existingData, true)
+          );
+        }
+        // Remove any non-official stray package docs if any exist
+        for (const pDoc of pkgSnap.docs) {
+          if (!officialIds.has(pDoc.id)) {
+            pkgBatch.delete(pDoc.ref);
+            totalDeleted++;
+          }
+        }
+        await pkgBatch.commit();
+
+        // =====================================================================
+        // CLEAR ALL LOCAL APP CACHES (localStorage + Firestore IndexedDB ONLY)
+        // while strictly preserving Firebase Auth session & biometric vault!
+        // =====================================================================
+        onProgress?.('جاري تنظيف التخزين المحلي والكاش مع الإبقاء على جلسة المدير...');
+        clearAllLocalOfflineCardCaches();
+        try {
+          const preservePrefixes = ['firebase:', 'taibah_theme', 'taibah_bio'];
+          const keysToDelete: string[] = [];
+          for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            if (!k) continue;
+            const shouldPreserve = preservePrefixes.some((prefix) => k.startsWith(prefix));
+            if (!shouldPreserve) {
+              keysToDelete.push(k);
+            }
+          }
+          for (const k of keysToDelete) {
+            localStorage.removeItem(k);
+          }
+        } catch {
+          // Ignore storage errors
         }
 
-        // Clear all local offline caches & in-memory operational state
-        clearAllLocalOfflineCardCaches();
-        writeCachedJson(CACHE_PACKAGES_KEY, null);
-        writeCachedJson(`${CACHE_SALES_PREFIX}${activeUser.uid}`, []);
-        writeCachedJson(`${CACHE_CUSTOMERS_PREFIX}${activeUser.uid}`, []);
+        // Reset in-memory React states immediately
         setSales([]);
         setCustomers([]);
         setLedgerEntries([]);
         setTopupRequests([]);
         setNotifications([]);
+        setAuditLogs([]);
+        setManagedUsers([]);
         setPendingRegistrations([]);
         setPendingPasswordResets([]);
         setPendingOfflineSales([]);
         setPersonalCardCounts({});
         setPersonalSoldCounts({});
-        setOfflinePoolVersion((v) => v + 1);
-        setSyncNonce((n) => n + 1);
 
-        await writeAuditLog(
-          'تصفير شامل لبيانات التطبيق',
-          `تم تنفيذ تصفير شامل لبيانات التطبيق بواسطة المدير العام (حذف ${totalDeleted} سجل وتصفير أرصدة الباقات والحسابات)`
+        // Wipe Firestore IndexedDB persistence cleanly without touching Firebase Auth's firebaseLocalStorageDb
+        try {
+          await terminate(db);
+          await clearIndexedDbPersistence(db);
+        } catch {
+          // Ignore if running in memoryLocalCache mode
+        }
+        try {
+          const idb = window.indexedDB as IDBFactory & {
+            databases?: () => Promise<Array<{ name?: string }>>;
+          };
+          if (typeof idb?.databases === 'function') {
+            const dbs = await idb.databases();
+            await Promise.all(
+              dbs
+                .filter(
+                  (entry) =>
+                    !!entry.name &&
+                    entry.name.toLowerCase().includes('firestore') &&
+                    !entry.name.toLowerCase().includes('firebaselocalstorage')
+                )
+                .map(
+                  (entry) =>
+                    new Promise<void>((resolve) => {
+                      const req = window.indexedDB.deleteDatabase(entry.name!);
+                      req.onsuccess = () => resolve();
+                      req.onerror = () => resolve();
+                      req.onblocked = () => resolve();
+                    })
+                )
+            );
+          }
+        } catch {
+          // Ignore IndexedDB enumeration restrictions
+        }
+
+        onProgress?.('تم التصفير بالكامل — جاري إعادة تحميل التطبيق...');
+        notifySuccess(
+          `تم تصفير بيانات التطبيق بالكامل بنجاح (حذف ${totalDeleted} سجل) — جاري إعادة التشغيل ✅`
         );
-        notifySuccess(`تم التصفير الشامل لبيانات التطبيق بنجاح (حذف ${totalDeleted} سجل) ✅`);
+
+        // Automatically reload the app clean with 0 balances while Super Admin remains signed in
+        window.setTimeout(() => {
+          window.location.reload();
+        }, 700);
+
         return { ok: true, deletedCount: totalDeleted };
       } catch (err) {
-        handleFirestoreError(err, OperationType.DELETE, `resetAppData/${scope}`);
+        handleFirestoreError(err, OperationType.DELETE, currentStepPath);
         const msg =
           err instanceof Error && err.message
-            ? `تعذر إكمال التصفير: ${err.message}`
+            ? `تعذر إكمال التصفير (${currentStepPath}): ${err.message}`
             : 'تعذر إكمال عملية التصفير، يرجى التحقق من الاتصال والمحاولة مجدداً.';
         notifyError('فشل تصفير البيانات', msg);
         return { ok: false, error: msg, deletedCount: totalDeleted };

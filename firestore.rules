@@ -337,7 +337,7 @@ service cloud.firestore {
             incoming().diff(existing()).affectedKeys().hasOnly(['balance', 'status', 'updatedAt'])
           )
         );
-      allow delete: if isValidId(uid) && isSuperAdmin();
+      allow delete: if isValidId(uid) && isSuperAdmin() && uid != request.auth.uid;
     }
 
     // =========================================================================
@@ -394,7 +394,7 @@ service cloud.firestore {
     // =========================================================================
     match /packages/{packageId} {
       allow get: if isValidId(packageId) && isSignedIn();
-      allow list: if isSignedIn() && resource.data.price > 0;
+      allow list: if isSuperAdmin() || (isSignedIn() && resource.data.price > 0);
       allow create: if isValidId(packageId) && isValidPackageDoc(incoming()) && isSuperAdmin() && incoming().updatedAt == request.time;
       allow update: if isValidId(packageId) && isValidPackageDoc(incoming()) && incoming().updatedAt == request.time && (
         isSuperAdmin() ||
@@ -567,7 +567,7 @@ service cloud.firestore {
     }
 
     // =========================================================================
-    // 12. Immutable Audit Logs
+    // 12. Audit Logs (Super Admin Delete Allowed Only for Full App Reset)
     // =========================================================================
     match /auditLogs/{logId} {
       allow get: if isValidId(logId) && isSuperAdmin();
@@ -576,7 +576,7 @@ service cloud.firestore {
         incoming().actorId == request.auth.uid &&
         incoming().createdAt == request.time;
       allow update: if false;
-      allow delete: if false;
+      allow delete: if isValidId(logId) && isSuperAdmin();
     }
 
     // =========================================================================

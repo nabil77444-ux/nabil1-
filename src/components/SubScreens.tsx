@@ -277,8 +277,8 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
   const [resetScope, setResetScope] = useState<'sales_only' | 'full_reset' | null>(null);
   const [resetPassword, setResetPassword] = useState('');
   const [resetConfirmPhrase, setResetConfirmPhrase] = useState('');
-  const [resetAckChecked, setResetAckChecked] = useState(false);
   const [resettingData, setResettingData] = useState(false);
+  const [resetProgressText, setResetProgressText] = useState('');
   const [resetError, setResetError] = useState('');
 
   useEffect(() => {
@@ -1121,19 +1121,19 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
             </form>
           )}
 
-          {/* Super Admin Exclusive: App Data Reset Box (STRICTLY HIDDEN & BLOCKED FOR AGENTS & CLIENTS) */}
+          {/* Super Admin Exclusive: Complete App Data Reset Box (STRICTLY HIDDEN & BLOCKED FOR AGENTS & CLIENTS) */}
           {isAdmin && (
-            <div className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#DC2626]/80 p-3.5 shadow-md space-y-3">
+            <div className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#DC2626]/85 p-3.5 shadow-md space-y-3">
               <div className="flex items-start gap-2.5">
                 <span className="w-7 h-7 rounded-lg bg-[#DC2626] text-white flex items-center justify-center shrink-0 shadow-sm mt-0.5">
                   <AlertTriangle className="w-4 h-4" />
                 </span>
                 <div className="min-w-0 flex-1">
                   <h2 className="text-sm font-extrabold text-[#DC2626] dark:text-red-400">
-                    تصفير التطبيق وحذف البيانات
+                    تصفير بيانات التطبيق بالكامل
                   </h2>
                   <p className="text-[11px] font-bold text-slate-600 dark:text-slate-300 mt-0.5 leading-relaxed">
-                    خيارات خاصة بالمدير العام فقط لإعادة تهيئة البيانات عند الحاجة (مع الاحتفاظ بحساب المدير الأساسي وإعدادات الشبكة وسجل التدقيق الرقابي).
+                    ميزة حصرية للمدير العام فقط لإعادة التطبيق نظيفاً بأرصدة صفرية (0) سحابياً ومحلياً، مع الاحتفاظ بحساب المدير العام وهيكل الباقات الثماني الأساسية فقط.
                   </p>
                 </div>
               </div>
@@ -1142,76 +1142,78 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                 <button
                   type="button"
                   onClick={() => {
-                    setResetScope('sales_only');
+                    setResetScope('full_reset');
                     setResetPassword('');
                     setResetConfirmPhrase('');
-                    setResetAckChecked(false);
+                    setResetProgressText('');
                     setResetError('');
                   }}
-                  className="min-h-[46px] rounded-xl border-2 border-amber-500/90 bg-amber-50 dark:bg-amber-950/30 hover:bg-amber-100 dark:hover:bg-amber-950/50 px-3 py-2 text-right transition-colors active:scale-[0.99]"
+                  className="min-h-[48px] rounded-xl border-2 border-[#DC2626] bg-red-50 dark:bg-red-950/35 hover:bg-red-100 dark:hover:bg-red-950/55 px-3 py-2 text-right transition-colors active:scale-[0.99]"
                 >
-                  <div className="flex items-center gap-1.5 text-xs font-extrabold text-amber-900 dark:text-amber-200">
-                    <RotateCcw className="w-3.5 h-3.5 shrink-0" />
-                    <span>تصفير المبيعات والتقارير فقط</span>
+                  <div className="flex items-center gap-1.5 text-xs font-extrabold text-[#DC2626] dark:text-red-300">
+                    <Trash2 className="w-3.5 h-3.5 shrink-0" />
+                    <span>تصفير بيانات التطبيق بالكامل</span>
                   </div>
-                  <p className="text-[10.5px] font-bold text-amber-800/90 dark:text-amber-300/90 mt-0.5">
-                    حذف فواتير المبيعات وتصفير عداد المباع مع بقاء الكروت والعملاء.
+                  <p className="text-[10.5px] font-bold text-red-700/90 dark:text-red-300/90 mt-0.5">
+                    حذف جميع الكروت، المبيعات، الوكلاء، العملاء، الدفتر، التغذية، الإشعارات، وسجل العمليات، ومسح الكاش وإعادة التشغيل.
                   </p>
                 </button>
 
                 <button
                   type="button"
                   onClick={() => {
-                    setResetScope('full_reset');
+                    setResetScope('sales_only');
                     setResetPassword('');
                     setResetConfirmPhrase('');
-                    setResetAckChecked(false);
+                    setResetProgressText('');
                     setResetError('');
                   }}
-                  className="min-h-[46px] rounded-xl border-2 border-[#DC2626] bg-red-50 dark:bg-red-950/35 hover:bg-red-100 dark:hover:bg-red-950/55 px-3 py-2 text-right transition-colors active:scale-[0.99]"
+                  className="min-h-[48px] rounded-xl border-2 border-amber-500/90 bg-amber-50 dark:bg-amber-950/30 hover:bg-amber-100 dark:hover:bg-amber-950/50 px-3 py-2 text-right transition-colors active:scale-[0.99]"
                 >
-                  <div className="flex items-center gap-1.5 text-xs font-extrabold text-[#DC2626] dark:text-red-300">
-                    <Trash2 className="w-3.5 h-3.5 shrink-0" />
-                    <span>تصفير شامل لبيانات التطبيق</span>
+                  <div className="flex items-center gap-1.5 text-xs font-extrabold text-amber-900 dark:text-amber-200">
+                    <RotateCcw className="w-3.5 h-3.5 shrink-0" />
+                    <span>تصفير المبيعات والتقارير فقط</span>
                   </div>
-                  <p className="text-[10.5px] font-bold text-red-700/90 dark:text-red-300/90 mt-0.5">
-                    حذف المبيعات، العملاء، الدفتر، الكروت، التغذية، والإشعارات وتصفير الأرصدة.
+                  <p className="text-[10.5px] font-bold text-amber-800/90 dark:text-amber-300/90 mt-0.5">
+                    حذف فواتير المبيعات وتصفير عداد المباع مع بقاء الكروت والوكلاء والعملاء.
                   </p>
                 </button>
               </div>
             </div>
           )}
 
-          {/* Super Admin Double-Confirmation Security Modal for Data Reset */}
+          {/* Super Admin Strict Security Confirmation Modal (Password + Word «تصفير») */}
           {isAdmin && resetScope && (
             <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/75 p-4 safe-top safe-bottom">
               <form
                 onSubmit={async (e) => {
                   e.preventDefault();
                   if (!isAdmin || resettingData) return;
-                  if (resetConfirmPhrase.trim() !== 'تأكيد التصفير') {
-                    setResetError('يرجى كتابة عبارة «تأكيد التصفير» بدقة في الحقل المخصص.');
-                    return;
-                  }
-                  if (!resetAckChecked) {
-                    setResetError('يرجى تفعيل مربع الإقرار النهائي قبل المتابعة.');
-                    return;
-                  }
                   if (resetPassword.trim().length < 6) {
                     setResetError('يرجى إدخال كلمة مرور المدير العام الصحيحة.');
                     return;
                   }
+                  if (resetConfirmPhrase.trim() !== 'تصفير') {
+                    setResetError('يرجى كتابة كلمة «تصفير» بدقة في حقل التأكيد النهائي.');
+                    return;
+                  }
                   setResetError('');
+                  setResetProgressText('جاري بدء عملية التصفير...');
                   setResettingData(true);
                   try {
-                    const res = await resetAppData(resetScope, resetPassword);
+                    const res = await resetAppData(resetScope, resetPassword, (stage) => {
+                      setResetProgressText(stage);
+                    });
                     if (res.ok) {
-                      setResetScope(null);
-                      setResetPassword('');
-                      setResetConfirmPhrase('');
-                      setResetAckChecked(false);
+                      if (resetScope !== 'full_reset') {
+                        setResetScope(null);
+                        setResetPassword('');
+                        setResetConfirmPhrase('');
+                        setResetProgressText('');
+                      }
                     } else {
                       setResetError(res.error || 'تعذر تنفيذ عملية التصفير.');
+                      setResetProgressText('');
                     }
                   } finally {
                     setResettingData(false);
@@ -1223,9 +1225,9 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                   <div className="flex items-center gap-2 text-[#DC2626] dark:text-red-400">
                     <AlertTriangle className="w-5 h-5 shrink-0" />
                     <h3 className="text-sm font-extrabold">
-                      {resetScope === 'sales_only'
-                        ? 'تأكيد تصفير المبيعات والتقارير فقط'
-                        : 'تأكيد التصفير الشامل لبيانات التطبيق'}
+                      {resetScope === 'full_reset'
+                        ? 'تأكيد تصفير بيانات التطبيق بالكامل'
+                        : 'تأكيد تصفير المبيعات والتقارير فقط'}
                     </h3>
                   </div>
                   <button
@@ -1239,9 +1241,9 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                 </div>
 
                 <div className="rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-300 dark:border-red-900 p-2.5 text-[11.5px] font-bold text-red-800 dark:text-red-200 leading-relaxed">
-                  {resetScope === 'sales_only'
-                    ? 'تحذير: سيتم حذف جميع فواتير المبيعات والتقارير وتصفير عداد الكروت المباعة بشكل نهائي ولا يمكن التراجع عن ذلك. سيبقى رصيد الكروت المتاحة وحسابات العملاء كما هو.'
-                    : 'تحذير نهائي: سيتم حذف جميع المبيعات والعملاء وقيود الدفتر والكروت وطلبات التغذية والانضمام والإشعارات وتصفير أرصدة الباقات والحسابات نهائياً. سيبقى حساب المدير العام وإعدادات الشبكة فقط.'}
+                  {resetScope === 'full_reset'
+                    ? 'تحذير أمني نهائي: سيتم حذف جميع الكروت، والمبيعات، وحسابات العملاء والوكلاء، والدفتر المحاسبي، وطلبات التغذية، والإشعارات، وسجل العمليات (Audit Log) نهائياً من السحابة والتخزين المحلي، مع الاحتفاظ بحساب المدير العام وهيكل الباقات الثماني الأساسية فقط (برصيد 0) ثم إعادة تحميل التطبيق تلقائياً.'
+                    : 'تحذير: سيتم حذف جميع فواتير المبيعات والتقارير وتصفير عداد الكروت المباعة نهائياً، مع الإبقاء على الكروت المتاحة وحسابات الوكلاء والعملاء.'}
                 </div>
 
                 <div>
@@ -1262,7 +1264,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
 
                 <div>
                   <label className="block text-xs font-extrabold mb-1 text-slate-800 dark:text-slate-200">
-                    2. اكتب عبارة التأكيد: <span className="text-[#DC2626] dark:text-red-400">تأكيد التصفير</span>
+                    2. اكتب كلمة <span className="text-[#DC2626] dark:text-red-400">«تصفير»</span> للتأكيد النهائي
                   </label>
                   <input
                     type="text"
@@ -1270,23 +1272,17 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                     disabled={resettingData}
                     value={resetConfirmPhrase}
                     onChange={(e) => setResetConfirmPhrase(e.target.value)}
-                    placeholder="اكتب: تأكيد التصفير"
+                    placeholder="اكتب هنا: تصفير"
                     className="w-full min-h-[42px] rounded-xl border-2 border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold text-slate-900 dark:text-white focus:border-[#DC2626] focus:outline-none"
                   />
                 </div>
 
-                <label className="flex items-start gap-2 rounded-xl bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 p-2.5 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    disabled={resettingData}
-                    checked={resetAckChecked}
-                    onChange={(e) => setResetAckChecked(e.target.checked)}
-                    className="w-4 h-4 mt-0.5 accent-[#DC2626] shrink-0"
-                  />
-                  <span className="text-[11px] font-extrabold text-slate-700 dark:text-slate-200 leading-snug">
-                    أُقرّ بأن هذه العملية نهائية ولا يمكن التراجع عنها بعد التنفيذ، وأتحمل مسؤولية حذف البيانات المحددة.
-                  </span>
-                </label>
+                {resettingData && resetProgressText && (
+                  <div className="flex items-center gap-2 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-400/80 px-3 py-2 text-xs font-extrabold text-amber-900 dark:text-amber-200">
+                    <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                    <span>{resetProgressText}</span>
+                  </div>
+                )}
 
                 {resetError && (
                   <p className="text-xs font-extrabold text-[#DC2626] dark:text-red-400 bg-red-50 dark:bg-red-950/50 border border-red-300 dark:border-red-900 rounded-xl px-3 py-2">
@@ -1307,8 +1303,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                     type="submit"
                     disabled={
                       resettingData ||
-                      !resetAckChecked ||
-                      resetConfirmPhrase.trim() !== 'تأكيد التصفير' ||
+                      resetConfirmPhrase.trim() !== 'تصفير' ||
                       resetPassword.trim().length < 6
                     }
                     className="min-h-[42px] rounded-xl bg-[#DC2626] hover:bg-red-700 disabled:opacity-45 text-white text-xs font-extrabold flex items-center justify-center gap-1.5 shadow-md"
@@ -1321,7 +1316,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                     ) : (
                       <>
                         <Trash2 className="w-4 h-4" />
-                        <span>تنفيذ التصفير الآن</span>
+                        <span>تأكيد التصفير النهائي</span>
                       </>
                     )}
                   </button>
