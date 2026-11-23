@@ -141,7 +141,12 @@ interface FirebaseContextValue {
   processSaleReturn: (sale: SaleDoc, packageId: string, returnQty: number) => Promise<boolean>;
   updateSaleRecord: (
     saleId: string,
-    updates: Partial<Pick<SaleDoc, 'buyerName' | 'buyerPhone' | 'paidAmount' | 'remainingAmount' | 'paymentMethod' | 'notes' | 'status'>>
+    updates: Partial<
+      Pick<
+        SaleDoc,
+        'buyerName' | 'buyerPhone' | 'paidAmount' | 'remainingAmount' | 'realizedProfit' | 'paymentMethod' | 'notes' | 'status'
+      >
+    >
   ) => Promise<void>;
   deleteSaleRecord: (saleId: string) => Promise<void>;
   // Customers & General Ledger
@@ -635,50 +640,91 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       )
     );
 
-    // 3. Pending Registration Requests (Real-time badge on Home & instant queue)
+    // 3. Pending Registration Requests (Real-time badge on Home & instant queue — single-field query avoids composite index errors)
     if (isAdmin || isAgent) {
       const regQuery = isAdmin
         ? query(collection(db, 'registrationRequests'), where('status', '==', 'pending'), limit(40))
         : query(
             collection(db, 'registrationRequests'),
             where('parentAgentId', '==', activeUser.uid),
-            where('status', '==', 'pending'),
             limit(40)
           );
       unsubscribers.push(
         onSnapshot(
           regQuery,
           (snap) => {
-            setPendingRegistrations(
-              snap.docs.map((d) => ({
+            const list = snap.docs
+              .map((d) => ({
                 id: d.id,
                 ...(d.data() as Omit<RegistrationRequest, 'id'>),
               }))
-            );
+              .filter((r) => r.status === 'pending');
+            setPendingRegistrations(list);
           },
           (err) => handleFirestoreError(err, OperationType.LIST, 'registrationRequests')
         )
       );
     }
 
-    // 4. Lightweight Topup Requests (limit 40 for real-time Home badge + instant execution)
-    const topupQuery = isAdmin
-      ? query(collection(db, 'topupRequests'), limit(50))
-      : isAgent
-        ? query(collection(db, 'topupRequests'), where('targetId', '==', activeUser.uid), limit(50))
+    // 4. Lightweight Topup Requests (Admin: all; Agent: incoming from clients + own outgoing to Admin; Client: own)
+    if (isAgent) {
+      let incomingList: TopupRequest[] = [];
+      let outgoingList: TopupRequest[] = [];
+      const publishMergedTopups = () => {
+        const merged = new Map<string, TopupRequest>();
+        for (const item of incomingList) merged.set(item.id, item);
+        for (const item of outgoingList) merged.set(item.id, item);
+        setTopupRequests(
+          Array.from(merged.values()).sort(
+            (a, b) => (b.createdAt?.toMillis?.() ?? 0) - (a.createdAt?.toMillis?.() ?? 0)
+          )
+        );
+      };
+
+      unsubscribers.push(
+        onSnapshot(
+          query(collection(db, 'topupRequests'), where('targetId', '==', activeUser.uid), limit(50)),
+          (snap) => {
+            incomingList = snap.docs.map((d) => ({
+              id: d.id,
+              ...(d.data() as Omit<TopupRequest, 'id'>),
+            }));
+            publishMergedTopups();
+          },
+          (err) => handleFirestoreError(err, OperationType.LIST, 'topupRequests')
+        )
+      );
+
+      unsubscribers.push(
+        onSnapshot(
+          query(collection(db, 'topupRequests'), where('requesterId', '==', activeUser.uid), limit(50)),
+          (snap) => {
+            outgoingList = snap.docs.map((d) => ({
+              id: d.id,
+              ...(d.data() as Omit<TopupRequest, 'id'>),
+            }));
+            publishMergedTopups();
+          },
+          (err) => handleFirestoreError(err, OperationType.LIST, 'topupRequests')
+        )
+      );
+    } else {
+      const topupQuery = isAdmin
+        ? query(collection(db, 'topupRequests'), limit(50))
         : query(collection(db, 'topupRequests'), where('requesterId', '==', activeUser.uid), limit(50));
-    unsubscribers.push(
-      onSnapshot(
-        topupQuery,
-        (snap) => {
-          const list = snap.docs
-            .map((d) => ({ id: d.id, ...(d.data() as Omit<TopupRequest, 'id'>) }))
-            .sort((a, b) => (b.createdAt?.toMillis?.() ?? 0) - (a.createdAt?.toMillis?.() ?? 0));
-          setTopupRequests(list);
-        },
-        (err) => handleFirestoreError(err, OperationType.LIST, 'topupRequests')
-      )
-    );
+      unsubscribers.push(
+        onSnapshot(
+          topupQuery,
+          (snap) => {
+            const list = snap.docs
+              .map((d) => ({ id: d.id, ...(d.data() as Omit<TopupRequest, 'id'>) }))
+              .sort((a, b) => (b.createdAt?.toMillis?.() ?? 0) - (a.createdAt?.toMillis?.() ?? 0));
+            setTopupRequests(list);
+          },
+          (err) => handleFirestoreError(err, OperationType.LIST, 'topupRequests')
+        )
+      );
+    }
 
     // 5. Pending Password Resets (Admin badge only)
     if (isAdmin) {
@@ -1590,7 +1636,12 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const updateSaleRecord = useCallback(
     async (
       saleId: string,
-      updates: Partial<Pick<SaleDoc, 'buyerName' | 'buyerPhone' | 'paidAmount' | 'remainingAmount' | 'paymentMethod' | 'notes' | 'status'>>
+      updates: Partial<
+        Pick<
+          SaleDoc,
+          'buyerName' | 'buyerPhone' | 'paidAmount' | 'remainingAmount' | 'realizedProfit' | 'paymentMethod' | 'notes' | 'status'
+        >
+      >
     ) => {
       try {
         await updateDoc(doc(db, 'sales', saleId), {

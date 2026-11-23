@@ -187,11 +187,11 @@ export const SalesListScreen: React.FC<SalesListScreenProps> = ({ hideNumbers, o
       if (dateFilter === 'yesterday' && (ts < startOfYesterday || ts >= startOfToday)) return false;
       if (dateFilter === 'range') {
         if (fromDate) {
-          const fromMs = new Date(fromDate).setHours(0, 0, 0, 0);
+          const fromMs = new Date(`${fromDate}T00:00:00`).getTime();
           if (ts < fromMs) return false;
         }
         if (toDate) {
-          const toMs = new Date(toDate).setHours(23, 59, 59, 999);
+          const toMs = new Date(`${toDate}T23:59:59.999`).getTime();
           if (ts > toMs) return false;
         }
       }
@@ -234,11 +234,17 @@ export const SalesListScreen: React.FC<SalesListScreenProps> = ({ hideNumbers, o
     try {
       const paid = Math.max(0, Math.min(editingSale.totalAmount, Number(editPaidAmount) || 0));
       const remaining = Math.max(0, editingSale.totalAmount - paid);
+      const expectedProfit = Number(editingSale.expectedProfit) || 0;
+      const realizedProfit =
+        editingSale.totalAmount > 0
+          ? Math.round((expectedProfit * paid) / editingSale.totalAmount)
+          : 0;
       await updateSaleRecord(editingSale.id, {
         buyerName: editBuyerName.trim() || editingSale.buyerName,
         buyerPhone: editBuyerPhone.trim(),
         paidAmount: paid,
         remainingAmount: remaining,
+        realizedProfit,
         paymentMethod: remaining === 0 ? 'cash' : paid === 0 ? 'credit' : 'partial',
         status: remaining === 0 && editingSale.deliveredCards >= editingSale.totalCards ? 'completed' : 'partial',
         notes: editNotes.trim(),

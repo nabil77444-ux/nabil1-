@@ -47,6 +47,7 @@ jobs:
 
       - name: Initialize & Sync Capacitor Android Project with Native Plugins
         run: |
+          test -f capacitor.config.json
           npm install --no-save --no-audit --no-fund \
             @capacitor/core@7 \
             @capacitor/cli@7 \
@@ -57,7 +58,7 @@ jobs:
             @capacitor/push-notifications@7 \
             @capacitor/haptics@7 \
             @capgo/capacitor-native-biometric@7 \
-            @capacitor/assets
+            @capacitor/assets@3
           if [ ! -d "android" ]; then
             npx cap add android
           fi

@@ -92,9 +92,11 @@ export const SidebarDrawer: React.FC<SidebarDrawerProps> = ({
     if (result.success) {
       setBiometricEnrolled(true);
       notifySuccess(
-        result.mode === 'webauthn'
-          ? 'تم تفعيل البصمة / الوجه بنجاح ✅'
-          : 'تم تفعيل الدخول السريع والآمن لهذا الجهاز بنجاح ✅'
+        result.mode === 'android_biometric'
+          ? 'تم تفعيل بصمة الإصبع والوجه عبر Android BiometricPrompt بنجاح ✅'
+          : result.mode === 'webauthn'
+            ? 'تم تفعيل البصمة / الوجه بنجاح ✅'
+            : 'تم تفعيل الدخول السريع والآمن لهذا الجهاز بنجاح ✅'
       );
     }
   };

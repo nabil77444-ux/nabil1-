@@ -102,8 +102,8 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
 
     const inDateRange = (ms?: number) => {
       if (!ms) return true;
-      if (fromDate && ms < new Date(fromDate).setHours(0, 0, 0, 0)) return false;
-      if (toDate && ms > new Date(toDate).setHours(23, 59, 59, 999)) return false;
+      if (fromDate && ms < new Date(`${fromDate}T00:00:00`).getTime()) return false;
+      if (toDate && ms > new Date(`${toDate}T23:59:59.999`).getTime()) return false;
       return true;
     };
     const matchSearch = (fields: string[]) => {

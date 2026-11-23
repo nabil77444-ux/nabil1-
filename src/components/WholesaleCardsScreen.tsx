@@ -227,7 +227,9 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
         setCart({});
         setNotes('');
         if (autoPrint) {
-          setTimeout(() => printRoyalDocument(buildWholesalePrintable(sale)), 250);
+          setTimeout(() => {
+            void printRoyalDocument(buildWholesalePrintable(sale));
+          }, 250);
         }
       }
     } finally {
