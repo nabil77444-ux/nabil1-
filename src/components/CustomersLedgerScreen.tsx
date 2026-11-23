@@ -3,6 +3,7 @@ import {
   ArrowDownLeft,
   ArrowUpRight,
   BookOpen,
+  Copy,
   Edit3,
   FileDown,
   ImageDown,
@@ -33,10 +34,11 @@ import {
   formatCount,
   formatDateTimeAr,
   formatYER,
-  SUPER_ADMIN_CONFIG,
   TAIBAH_ASSETS,
   type CustomerAccount,
+  type LedgerEntry,
 } from '../types/taibah';
+import { formatNumEn } from '../utils/salesBreakdown';
 
 interface CustomersLedgerScreenProps {
   hideNumbers: boolean;
@@ -80,6 +82,11 @@ export const CustomersLedgerScreen: React.FC<CustomersLedgerScreenProps> = ({ hi
   const [entryAmount, setEntryAmount] = useState('');
   const [entryDesc, setEntryDesc] = useState('');
   const [deleteTarget, setDeleteTarget] = useState<CustomerAccount | null>(null);
+  const [recentNotification, setRecentNotification] = useState<{
+    customerName: string;
+    phone?: string;
+    message: string;
+  } | null>(null);
 
   const selectedCustomer = useMemo(
     () => customers.find((c) => c.id === selectedCustomerId) || null,
@@ -160,27 +167,95 @@ export const CustomersLedgerScreen: React.FC<CustomersLedgerScreenProps> = ({ hi
     setShowAddModal(true);
   };
 
+  const buildCustomerNotificationMessage = (params: {
+    customerName: string;
+    direction: 'debit' | 'credit';
+    amount: number;
+    description: string;
+    currentBalance: number;
+  }): string => {
+    const dirWord = params.direction === 'debit' ? 'عليك' : 'لك';
+    const amtText = formatNumEn(Math.abs(Math.round(params.amount)));
+    const roundedBal = Math.round(params.currentBalance);
+    const balanceText =
+      roundedBal < 0
+        ? `${formatNumEn(Math.abs(roundedBal))} ر.ي (لك)`
+        : `${formatNumEn(roundedBal)} ر.ي`;
+    return [
+      `الأخ / ${params.customerName}`,
+      `تم إضافة ${amtText} ر.ي ${dirWord}`,
+      `البيان: ${params.description}`,
+      `الرصيد الحالي: ${balanceText}`,
+    ].join('\n');
+  };
+
+  const buildEntryNotificationMessage = (c: CustomerAccount, entry: LedgerEntry): string => {
+    const direction: 'debit' | 'credit' = entry.entryType === 'debit' ? 'debit' : 'credit';
+    return buildCustomerNotificationMessage({
+      customerName: c.name,
+      direction,
+      amount: entry.amount,
+      description:
+        entry.description ||
+        (entry.entryType === 'debit'
+          ? 'رصيد'
+          : entry.entryType === 'credit'
+            ? 'تسليم نقدي'
+            : 'خصم'),
+      currentBalance: c.balance,
+    });
+  };
+
+  const copyNotificationText = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      notifySuccess('تم نسخ رسالة الإشعار بنجاح ✅');
+    } catch {
+      notifyError('تعذر نسخ الرسالة');
+    }
+  };
+
   const handleSaveCustomer = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!formName.trim()) return;
     setBusy(true);
     try {
+      const cleanName = formName.trim();
+      const cleanPhone = formPhone.trim();
+      const initDebit = Number(formInitialDebit) || 0;
+      const initCredit = Number(formInitialCredit) || 0;
       if (editingCustomer) {
         await updateCustomerAccount(editingCustomer.id, {
-          name: formName.trim(),
-          phone: formPhone.trim(),
+          name: cleanName,
+          phone: cleanPhone,
           category: formCategory,
           notes: formNotes.trim(),
         });
       } else {
-        await createCustomerAccount({
-          name: formName.trim(),
-          phone: formPhone.trim(),
+        const created = await createCustomerAccount({
+          name: cleanName,
+          phone: cleanPhone,
           category: formCategory,
           notes: formNotes.trim(),
-          initialDebit: Number(formInitialDebit) || 0,
-          initialCredit: Number(formInitialCredit) || 0,
+          initialDebit: initDebit,
+          initialCredit: initCredit,
         });
+        if (created && (initDebit > 0 || initCredit > 0)) {
+          const isDebit = initDebit >= initCredit;
+          const opAmount = isDebit ? initDebit : initCredit;
+          const balance = initDebit - initCredit;
+          setRecentNotification({
+            customerName: cleanName,
+            phone: cleanPhone,
+            message: buildCustomerNotificationMessage({
+              customerName: cleanName,
+              direction: isDebit ? 'debit' : 'credit',
+              amount: opAmount,
+              description: formNotes.trim() || (isDebit ? 'رصيد' : 'تسليم نقدي'),
+              currentBalance: balance,
+            }),
+          });
+        }
       }
       setShowAddModal(false);
     } finally {
@@ -195,15 +270,31 @@ export const CustomersLedgerScreen: React.FC<CustomersLedgerScreenProps> = ({ hi
     if (!amt || amt <= 0) return;
     setBusy(true);
     try {
+      const resolvedDesc =
+        entryDesc.trim() ||
+        (entryType === 'debit' ? 'رصيد' : entryType === 'credit' ? 'تسليم نقدي' : 'خصم');
       const ok = await addLedgerEntry({
         customerId: selectedCustomer.id,
         entryType,
         amount: amt,
-        description:
-          entryDesc.trim() ||
-          (entryType === 'debit' ? 'قيد مدين (عليه)' : entryType === 'credit' ? 'سند قبض / سداد (له)' : 'قيد تسوية وتصحيح'),
+        description: resolvedDesc,
       });
       if (ok) {
+        const nextBalance =
+          entryType === 'debit'
+            ? (Number(selectedCustomer.balance) || 0) + amt
+            : (Number(selectedCustomer.balance) || 0) - amt;
+        setRecentNotification({
+          customerName: selectedCustomer.name,
+          phone: selectedCustomer.phone,
+          message: buildCustomerNotificationMessage({
+            customerName: selectedCustomer.name,
+            direction: entryType === 'debit' ? 'debit' : 'credit',
+            amount: amt,
+            description: resolvedDesc,
+            currentBalance: nextBalance,
+          }),
+        });
         setEntryAmount('');
         setEntryDesc('');
       }
@@ -213,32 +304,18 @@ export const CustomersLedgerScreen: React.FC<CustomersLedgerScreenProps> = ({ hi
   };
 
   const buildStatementShareText = (c: CustomerAccount): string => {
-    const statusText =
-      c.balance > 0
-        ? `عليه: ${c.balance} ر.ي`
-        : c.balance < 0
-          ? `له: ${Math.abs(c.balance)} ر.ي`
-          : 'الحساب متوازن (0 ر.ي)';
-    const lines = [
-      `📶 شبكة طيبة نت اللاسلكية (TAIBAH NET)`,
-      `📒 كشف حساب تفصيلي`,
-      `👤 الحساب: ${c.name}${c.phone ? ` (${c.phone})` : ''}`,
-      `🏷 التصنيف: ${c.category || 'عميل شبكة'}`,
-      `────────────────────`,
-      `📈 إجمالي عليه (مدين): ${c.totalDebit} ر.ي`,
-      `📉 إجمالي له (دائن/مسدد): ${c.totalCredit} ر.ي`,
-      `💰 الصافي الحالي: ${statusText}`,
-      `────────────────────`,
-    ];
-    if (customerEntries.length > 0) {
-      lines.push(`آخر القيود (${Math.min(10, customerEntries.length)}):`);
-      for (const e of customerEntries.slice(0, 10)) {
-        const lbl = e.entryType === 'debit' ? 'عليه +' : e.entryType === 'credit' ? 'له -' : 'تصحيح';
-        lines.push(`• ${lbl} ${e.amount} ر.ي — ${e.description} (${formatDateTimeAr(e.createdAt)})`);
-      }
+    const latestEntry = customerEntries[0];
+    if (latestEntry) {
+      return buildEntryNotificationMessage(c, latestEntry);
     }
-    lines.push(`📞 ${SUPER_ADMIN_CONFIG.developerCredit}`);
-    return lines.join('\n');
+    const isDebit = c.balance >= 0;
+    return buildCustomerNotificationMessage({
+      customerName: c.name,
+      direction: isDebit ? 'debit' : 'credit',
+      amount: Math.abs(c.balance),
+      description: c.notes?.trim() || (isDebit ? 'رصيد' : 'تسليم نقدي'),
+      currentBalance: c.balance,
+    });
   };
 
   const buildStatementPrintable = (c: CustomerAccount): PrintableDocumentPayload => {
@@ -605,7 +682,7 @@ export const CustomersLedgerScreen: React.FC<CustomersLedgerScreenProps> = ({ hi
               </form>
 
               {/* Export & Share Statement Buttons */}
-              <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
+              <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5">
                 <button
                   type="button"
                   onClick={() => openWhatsAppShare(selectedCustomer.phone, buildStatementShareText(selectedCustomer))}
@@ -619,6 +696,13 @@ export const CustomersLedgerScreen: React.FC<CustomersLedgerScreenProps> = ({ hi
                   className="min-h-[38px] rounded-xl bg-blue-600 text-white text-[11px] font-extrabold flex items-center justify-center gap-1"
                 >
                   <MessageSquare className="w-3.5 h-3.5" /> SMS
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void copyNotificationText(buildStatementShareText(selectedCustomer))}
+                  className="min-h-[38px] rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-900 dark:text-white border border-slate-300 dark:border-slate-700 text-[11px] font-extrabold flex items-center justify-center gap-1"
+                >
+                  <Copy className="w-3.5 h-3.5" /> نسخ
                 </button>
                 <button
                   type="button"
@@ -653,7 +737,7 @@ export const CustomersLedgerScreen: React.FC<CustomersLedgerScreenProps> = ({ hi
                 <button
                   type="button"
                   onClick={() => void printRoyalDocument(buildStatementPrintable(selectedCustomer))}
-                  className="col-span-2 sm:col-span-1 min-h-[38px] rounded-xl bg-[#1A365D] text-white text-[11px] font-extrabold flex items-center justify-center gap-1"
+                  className="min-h-[38px] rounded-xl bg-[#1A365D] text-white text-[11px] font-extrabold flex items-center justify-center gap-1"
                 >
                   <Printer className="w-3.5 h-3.5 text-[#FDE68A]" /> طباعة
                 </button>
@@ -680,9 +764,9 @@ export const CustomersLedgerScreen: React.FC<CustomersLedgerScreenProps> = ({ hi
                           {formatDateTimeAr(entry.createdAt)}
                         </div>
                       </div>
-                      <div className="flex items-center gap-2 shrink-0">
+                      <div className="flex items-center gap-1 shrink-0">
                         <span
-                          className={`text-xs font-extrabold tabular-nums ${
+                          className={`text-xs font-extrabold tabular-nums ml-1 ${
                             entry.entryType === 'debit'
                               ? 'text-red-600 dark:text-red-400'
                               : 'text-emerald-600 dark:text-emerald-400'
@@ -690,6 +774,45 @@ export const CustomersLedgerScreen: React.FC<CustomersLedgerScreenProps> = ({ hi
                         >
                           {entry.entryType === 'debit' ? '+' : '-'} {formatYER(entry.amount, hideNumbers)}
                         </span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            openWhatsAppShare(
+                              selectedCustomer.phone,
+                              buildEntryNotificationMessage(selectedCustomer, entry)
+                            )
+                          }
+                          className="p-1.5 rounded-lg text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-950/40"
+                          aria-label="إرسال إشعار واتساب"
+                          title="إرسال إشعار واتساب"
+                        >
+                          <Send className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            openSmsShare(
+                              selectedCustomer.phone,
+                              buildEntryNotificationMessage(selectedCustomer, entry)
+                            )
+                          }
+                          className="p-1.5 rounded-lg text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-950/40"
+                          aria-label="إرسال إشعار SMS"
+                          title="إرسال إشعار SMS"
+                        >
+                          <MessageSquare className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void copyNotificationText(buildEntryNotificationMessage(selectedCustomer, entry))
+                          }
+                          className="p-1.5 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+                          aria-label="نسخ الإشعار"
+                          title="نسخ الإشعار"
+                        >
+                          <Copy className="w-3.5 h-3.5" />
+                        </button>
                         <button
                           type="button"
                           onClick={() => deleteLedgerEntry(entry)}
@@ -849,6 +972,67 @@ export const CustomersLedgerScreen: React.FC<CustomersLedgerScreenProps> = ({ hi
               >
                 تأكيد الحذف
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* INSTANT CUSTOMER OPERATION NOTIFICATION SHARE MODAL (WhatsApp / SMS / Copy) */}
+      {recentNotification && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4 safe-top safe-bottom">
+          <div className="w-full max-w-sm rounded-3xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] shadow-2xl overflow-hidden">
+            <div className="royal-header-3d px-4 py-3 flex items-center justify-between">
+              <div className="min-w-0">
+                <h3 className="text-sm font-extrabold text-white truncate">إشعار العميل جاهز للإرسال ✅</h3>
+                <p className="text-[11px] font-bold text-[#FDE68A] truncate">
+                  {recentNotification.customerName}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setRecentNotification(null)}
+                aria-label="إغلاق"
+                className="w-8 h-8 rounded-full bg-white/15 text-white flex items-center justify-center shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 space-y-3">
+              <div className="rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 p-3 text-xs font-extrabold whitespace-pre-wrap leading-relaxed text-slate-900 dark:text-white">
+                {recentNotification.message}
+              </div>
+              <div className="grid grid-cols-3 gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    openWhatsAppShare(recentNotification.phone, recentNotification.message);
+                    notifySuccess('تم فتح واتساب لإرسال الإشعار');
+                  }}
+                  className="min-h-[42px] rounded-xl bg-emerald-600 text-white text-xs font-extrabold flex items-center justify-center gap-1"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  واتساب
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    openSmsShare(recentNotification.phone, recentNotification.message);
+                    notifySuccess('تم فتح SMS لإرسال الإشعار');
+                  }}
+                  className="min-h-[42px] rounded-xl bg-blue-600 text-white text-xs font-extrabold flex items-center justify-center gap-1"
+                >
+                  <MessageSquare className="w-3.5 h-3.5" />
+                  SMS
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void copyNotificationText(recentNotification.message)}
+                  className="min-h-[42px] rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-900 dark:text-white border border-slate-300 dark:border-slate-700 text-xs font-extrabold flex items-center justify-center gap-1"
+                >
+                  <Copy className="w-3.5 h-3.5" />
+                  نسخ
+                </button>
+              </div>
             </div>
           </div>
         </div>

@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { Capacitor } from '@capacitor/core';
-import { Contacts } from '@capacitor-community/contacts';
+import { Contacts, type ContactPayload } from '@capacitor-community/contacts';
 import { Contact, Phone, Search, User, UserPlus, X } from 'lucide-react';
 import { useFirebase } from '../contexts/FirebaseContext';
 import { useFeedback } from '../lib/feedback';
@@ -19,13 +19,68 @@ interface ContactPickerButtonProps {
   unauthenticated?: boolean;
 }
 
+function formatTechnicalError(err: unknown): string {
+  if (err instanceof Error && err.message) return err.message;
+  if (typeof err === 'string' && err.trim()) return err.trim();
+  try {
+    const serialized = JSON.stringify(err);
+    if (serialized && serialized !== '{}') return serialized;
+  } catch {
+    // Fallback to String(err)
+  }
+  return String(err || 'خطأ غير معروف في قراءة جهات الاتصال');
+}
+
+function extractNameFromPayload(entry?: ContactPayload): string {
+  if (!entry?.name) return '';
+  return (
+    entry.name.display ||
+    [entry.name.given, entry.name.middle, entry.name.family].filter(Boolean).join(' ') ||
+    ''
+  ).trim();
+}
+
+function mapNativeContactsList(rawContacts: ContactPayload[]): PickedContact[] {
+  const mapped: PickedContact[] = [];
+  const seen = new Set<string>();
+
+  for (const entry of rawContacts) {
+    const displayName = extractNameFromPayload(entry);
+    const cleanedPhones = (entry.phones || [])
+      .map((p) => cleanYemeniPhone(p?.number || ''))
+      .filter((num) => num.length > 0);
+
+    if (!displayName && cleanedPhones.length === 0) continue;
+
+    if (cleanedPhones.length === 0) {
+      const key = `${displayName.toLowerCase()}_`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        mapped.push({ name: displayName, phone: '' });
+      }
+    } else {
+      for (const phone of cleanedPhones) {
+        const key = `${displayName.toLowerCase()}_${phone}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          mapped.push({ name: displayName || phone, phone });
+        }
+      }
+    }
+  }
+
+  mapped.sort((a, b) => a.name.localeCompare(b.name, 'ar'));
+  return mapped;
+}
+
 /**
- * Direct Official Android Phonebook Contact Picker (`@capacitor-community/contacts`):
- * - On Native Android APK: Immediately requests `READ_CONTACTS` via `Contacts.requestPermissions()`
- *   and opens the official Android system Contacts Picker directly via
- *   `Contacts.pickContact({ projection: { name: true, phones: true } })` — ZERO broken intermediate modal!
- * - Auto-extracts `result.contact.name.display` and the first cleaned phone number into the screen inputs.
- * - On Mobile Web / PWA: Uses `navigator.contacts.select` if supported, otherwise opens a clean app directory picker.
+ * Dual-Mode Official Android Phonebook Contact Picker (`@capacitor-community/contacts`):
+ * 1. Checks `perm.contacts === 'granted'`, requesting once via `Contacts.requestPermissions()` if needed.
+ * 2. Primary: Opens Android's official system picker via `Contacts.pickContact({ projection: { name: true, phones: true } })`.
+ * 3. Automatic Instant Fallback: If `pickContact` fails on any Android OEM, NEVER shows a generic permission error —
+ *    immediately calls `Contacts.getContacts({ projection: { name: true, phones: true } })` and opens a fast
+ *    searchable list of all real phonebook contacts.
+ * 4. If both fail, displays the exact real technical error (`err.message || JSON.stringify(err)`).
  */
 export const ContactPickerButton: React.FC<ContactPickerButtonProps> = ({
   onSelect,
@@ -34,9 +89,14 @@ export const ContactPickerButton: React.FC<ContactPickerButtonProps> = ({
   unauthenticated = false,
 }) => {
   const { customers, managedUsers, createCustomerAccount } = useFirebase();
-  const { notifySuccess, notifyWarning, notifyInfo } = useFeedback();
+  const { notifySuccess, notifyWarning, notifyError, notifyInfo } = useFeedback();
 
-  // Web-only fallback modal (NEVER shown on Native Android!)
+  // Native fallback real phonebook list modal (opens ONLY if pickContact fails and getContacts succeeds)
+  const [nativeListOpen, setNativeListOpen] = useState(false);
+  const [nativePhoneContacts, setNativePhoneContacts] = useState<PickedContact[]>([]);
+  const [nativeSearch, setNativeSearch] = useState('');
+
+  // Desktop browser directory fallback modal (web only)
   const [webModalOpen, setWebModalOpen] = useState(false);
   const [search, setSearch] = useState('');
   const [showQuickCreate, setShowQuickCreate] = useState(false);
@@ -45,6 +105,20 @@ export const ContactPickerButton: React.FC<ContactPickerButtonProps> = ({
   const [savingQuick, setSavingQuick] = useState(false);
 
   const isNative = Capacitor.isNativePlatform();
+
+  const filteredNativeContacts = useMemo(() => {
+    const q = nativeSearch.trim().toLowerCase();
+    const qDigits = cleanYemeniPhone(nativeSearch);
+    const matches = nativePhoneContacts.filter((c) => {
+      if (!q) return true;
+      return (
+        c.name.toLowerCase().includes(q) ||
+        c.phone.includes(q) ||
+        (qDigits.length > 0 && c.phone.includes(qDigits))
+      );
+    });
+    return matches.slice(0, 250);
+  }, [nativePhoneContacts, nativeSearch]);
 
   const appDirectoryContacts = useMemo(() => {
     if (unauthenticated) return [];
@@ -85,66 +159,78 @@ export const ContactPickerButton: React.FC<ContactPickerButtonProps> = ({
   }, [customers, managedUsers, search, unauthenticated]);
 
   const pickFromNativeAndroidPhonebook = async (): Promise<void> => {
+    // Step 1: Check `perm.contacts === 'granted'` and request once if not granted
     try {
-      // Step 1: Check & request official Android READ_CONTACTS permission
       let perm = await Contacts.checkPermissions();
-      if (perm?.contacts !== 'granted') {
+      if (perm.contacts !== 'granted') {
         perm = await Contacts.requestPermissions();
       }
-      if (perm?.contacts !== 'granted') {
+      if (perm.contacts !== 'granted') {
         notifyWarning(
-          'صلاحية جهات الاتصال مطلوبة',
-          'يرجى السماح بصلاحية قراءة جهات الاتصال (READ_CONTACTS) لاختيار الاسم من سجل الهاتف.'
+          'لم يتم منح صلاحية جهات الاتصال',
+          `حالة الصلاحية: ${perm.contacts || 'denied'}`
         );
         return;
       }
+    } catch (permErr) {
+      notifyError('تعذر التحقق من صلاحية جهات الاتصال', formatTechnicalError(permErr));
+      return;
+    }
 
-      // Step 2: Open official Android system Contacts Picker directly
-      const result = await Contacts.pickContact({
+    // Step 2 (Primary): Official Android Contacts Picker
+    let pickError: unknown = null;
+    try {
+      const res = await Contacts.pickContact({
         projection: {
           name: true,
           phones: true,
         },
       });
 
-      const entry = result?.contact;
-      if (!entry) return;
+      const entry = res?.contact;
+      if (entry) {
+        const displayName = extractNameFromPayload(entry);
+        const rawFirstPhone =
+          entry.phones?.find((p) => p?.number && p.number.trim().length > 0)?.number || '';
+        const cleanedPhone = cleanYemeniPhone(rawFirstPhone);
 
-      // Step 3: Extract display name and first cleaned phone number
-      const displayName = (
-        entry.name?.display ||
-        [entry.name?.given, entry.name?.family].filter(Boolean).join(' ') ||
-        ''
-      ).trim();
-
-      const rawFirstPhone =
-        entry.phones?.find((p) => p?.number && p.number.trim().length > 0)?.number || '';
-      const cleanedPhone = cleanYemeniPhone(rawFirstPhone);
-
-      if (!displayName && !cleanedPhone) {
-        notifyWarning('جهة الاتصال لا تحتوي على اسم أو رقم هاتف');
-        return;
+        if (displayName || cleanedPhone) {
+          onSelect({
+            name: displayName || cleanedPhone,
+            phone: cleanedPhone,
+          });
+          notifySuccess(`تم جلب ${displayName || cleanedPhone} من سجل الهاتف ✅`);
+          return;
+        }
       }
-
-      onSelect({
-        name: displayName || cleanedPhone,
-        phone: cleanedPhone,
-      });
-      notifySuccess(`تم جلب ${displayName || cleanedPhone} من سجل الهاتف ✅`);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err || '');
-      if (/cancel|abort|dismiss|back/i.test(message)) {
+      const msg = formatTechnicalError(err);
+      if (/cancel|abort|dismiss|back/i.test(msg)) {
         return;
       }
-      notifyWarning(
-        'تعذر فتح سجل جهات اتصال الهاتف',
-        'تأكد من منح التطبيق صلاحية جهات الاتصال من إعدادات الهاتف.'
-      );
+      pickError = err;
+    }
+
+    // Step 3 (Automatic Instant Fallback): Load full real phonebook via `Contacts.getContacts`
+    try {
+      const result = await Contacts.getContacts({
+        projection: {
+          name: true,
+          phones: true,
+        },
+      });
+      const contactsList = mapNativeContactsList(result?.contacts || []);
+      setNativePhoneContacts(contactsList);
+      setNativeSearch('');
+      setNativeListOpen(true);
+    } catch (getErr) {
+      const realErrorMsg = formatTechnicalError(getErr || pickError);
+      notifyError('تعذر فتح سجل جهات اتصال الهاتف', realErrorMsg);
     }
   };
 
   const handleClick = async () => {
-    // 1. Native Android APK — Open Android's official Contacts Picker IMMEDIATELY (no intermediate modal!)
+    // 1. Native Android APK — Dual-Mode Official Phonebook (pickContact -> getContacts fallback)
     if (isNative) {
       await pickFromNativeAndroidPhonebook();
       return;
@@ -230,7 +316,85 @@ export const ContactPickerButton: React.FC<ContactPickerButtonProps> = ({
         <Contact className="w-4 h-4 sm:w-5 sm:h-5" />
       </button>
 
-      {/* Desktop Browser Directory Fallback (never displayed on Android APK) */}
+      {/* Native Android Fallback Real Phonebook Search Modal (`Contacts.getContacts`) */}
+      {isNative && nativeListOpen && (
+        <div
+          dir="rtl"
+          className="fixed inset-0 z-[85] flex items-center justify-center bg-black/65 p-3 safe-top safe-bottom overflow-y-auto"
+        >
+          <div className="w-full max-w-md rounded-3xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] shadow-2xl overflow-hidden my-auto max-h-[86dvh] flex flex-col">
+            <div className="royal-header-3d px-4 py-3 flex items-center justify-between gap-2 shrink-0">
+              <div className="flex items-center gap-2 text-white min-w-0">
+                <Phone className="w-5 h-5 text-[#FDE68A] shrink-0" />
+                <h3 className="text-sm font-extrabold truncate">
+                  سجل أسماء الهاتف ({nativePhoneContacts.length})
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setNativeListOpen(false)}
+                aria-label="إغلاق"
+                className="w-8 h-8 rounded-full bg-white/15 border border-white/25 text-white flex items-center justify-center shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-3.5 space-y-2.5 flex-1 min-h-0 flex flex-col overflow-hidden">
+              <div className="relative shrink-0">
+                <Search className="w-4 h-4 text-slate-500 absolute right-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  autoFocus
+                  value={nativeSearch}
+                  onChange={(e) => setNativeSearch(e.target.value)}
+                  placeholder="ابحث بالاسم أو رقم الهاتف..."
+                  className="w-full min-h-[42px] rounded-xl border-2 border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 pr-9 pl-3 text-xs font-bold text-slate-900 dark:text-white focus:border-[#D4AF37] focus:outline-none"
+                />
+              </div>
+
+              <div className="space-y-1.5 flex-1 overflow-y-auto taibah-scroll">
+                {filteredNativeContacts.length === 0 ? (
+                  <p className="text-center text-xs font-bold text-slate-500 py-6">
+                    {nativePhoneContacts.length === 0
+                      ? 'لا توجد أسماء محفوظة في سجل الهاتف.'
+                      : 'لا توجد نتائج مطابقة للبحث.'}
+                  </p>
+                ) : (
+                  filteredNativeContacts.map((c, idx) => (
+                    <button
+                      key={`${c.phone}_${c.name}_${idx}`}
+                      type="button"
+                      onClick={() => {
+                        onSelect({ name: c.name, phone: c.phone });
+                        setNativeListOpen(false);
+                        notifySuccess(`تم جلب ${c.name || c.phone} من سجل الهاتف ✅`);
+                      }}
+                      className="w-full rounded-xl border-2 border-slate-200 dark:border-slate-700 hover:border-[#D4AF37] bg-slate-50 dark:bg-slate-800 p-2.5 flex items-center justify-between gap-2 text-right active:scale-[0.99] transition-transform"
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <span className="w-8 h-8 rounded-full bg-[#1A365D] text-[#FDE68A] border border-[#D4AF37] flex items-center justify-center shrink-0">
+                          <User className="w-4 h-4" />
+                        </span>
+                        <div className="min-w-0">
+                          <div className="text-xs font-extrabold text-slate-900 dark:text-white truncate">
+                            {c.name}
+                          </div>
+                          <div className="text-[11px] font-bold text-slate-600 dark:text-slate-300 tabular-nums">
+                            {c.phone || 'بدون رقم'}
+                          </div>
+                        </div>
+                      </div>
+                    </button>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Desktop Browser Directory Fallback (web only) */}
       {!isNative && webModalOpen && (
         <div
           dir="rtl"

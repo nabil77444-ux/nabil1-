@@ -42,6 +42,7 @@ import {
   EXCLUSIVE_PACKAGES,
   formatCount,
   formatDateTimeAr,
+  resolveDirectSaleTemplate,
   SUPER_ADMIN_CONFIG,
   TAIBAH_ASSETS,
   type AppRoute,
@@ -243,12 +244,14 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
   const [lowStockThreshold, setLowStockThreshold] = useState(String(appSettings.lowStockThreshold));
   const [agentDiscount, setAgentDiscount] = useState(String(appSettings.agentDiscountPercent));
   const [clientDiscount, setClientDiscount] = useState(String(appSettings.clientDiscountPercent));
-  const [msgTemplate, setMsgTemplate] = useState(appSettings.directSaleMessageTemplate);
+  const [msgTemplate, setMsgTemplate] = useState(
+    resolveDirectSaleTemplate(appSettings.directSaleMessageTemplate)
+  );
   const [smsTemplate, setSmsTemplate] = useState(
-    appSettings.smsMessageTemplate || DEFAULT_APP_SETTINGS.smsMessageTemplate || ''
+    resolveDirectSaleTemplate(appSettings.smsMessageTemplate)
   );
   const [whatsappTemplate, setWhatsappTemplate] = useState(
-    appSettings.whatsappMessageTemplate || DEFAULT_APP_SETTINGS.whatsappMessageTemplate || ''
+    resolveDirectSaleTemplate(appSettings.whatsappMessageTemplate)
   );
   const [pdfHeaderTitle, setPdfHeaderTitle] = useState(
     appSettings.pdfHeaderTitle || DEFAULT_APP_SETTINGS.pdfHeaderTitle || ''
@@ -281,11 +284,9 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
     setLowStockThreshold(String(appSettings.lowStockThreshold));
     setAgentDiscount(String(appSettings.agentDiscountPercent));
     setClientDiscount(String(appSettings.clientDiscountPercent));
-    setMsgTemplate(appSettings.directSaleMessageTemplate);
-    setSmsTemplate(appSettings.smsMessageTemplate || DEFAULT_APP_SETTINGS.smsMessageTemplate || '');
-    setWhatsappTemplate(
-      appSettings.whatsappMessageTemplate || DEFAULT_APP_SETTINGS.whatsappMessageTemplate || ''
-    );
+    setMsgTemplate(resolveDirectSaleTemplate(appSettings.directSaleMessageTemplate));
+    setSmsTemplate(resolveDirectSaleTemplate(appSettings.smsMessageTemplate));
+    setWhatsappTemplate(resolveDirectSaleTemplate(appSettings.whatsappMessageTemplate));
     setPdfHeaderTitle(appSettings.pdfHeaderTitle || DEFAULT_APP_SETTINGS.pdfHeaderTitle || '');
     setPdfHeaderSubtitle(
       appSettings.pdfHeaderSubtitle || DEFAULT_APP_SETTINGS.pdfHeaderSubtitle || ''

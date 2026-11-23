@@ -35,7 +35,9 @@ import {
   EXCLUSIVE_PACKAGES,
   formatCount,
   formatDateTimeAr,
+  formatPackageBalanceFull,
   formatYER,
+  resolveDirectSaleTemplate,
   SUPER_ADMIN_CONFIG,
   TAIBAH_ASSETS,
   type PackageDoc,
@@ -83,7 +85,9 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
   const [completedSale, setCompletedSale] = useState<SaleDoc | null>(null);
   const [exportPreview, setExportPreview] = useState<ExportShareResult | null>(null);
   const [showTemplateModal, setShowTemplateModal] = useState(false);
-  const [templateText, setTemplateText] = useState(appSettings.directSaleMessageTemplate);
+  const [templateText, setTemplateText] = useState(
+    resolveDirectSaleTemplate(appSettings.directSaleMessageTemplate)
+  );
   const [showReturnsModal, setShowReturnsModal] = useState(false);
   const [editingPkg, setEditingPkg] = useState<PackageDoc | null>(null);
   const [editPkgData, setEditPkgData] = useState('');
@@ -221,49 +225,86 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
     const items = sale.items || [];
     const formattedDate = formatDateTimeAr(sale.createdAt);
     const invoiceNum = sale.invoiceNumber || sale.id.slice(-6);
-    const breakdown = buildSingleSaleBreakdown(sale, appSettings);
+    const rawTpl =
+      channel === 'sms'
+        ? appSettings.smsMessageTemplate || appSettings.directSaleMessageTemplate
+        : channel === 'whatsapp'
+          ? appSettings.whatsappMessageTemplate || appSettings.directSaleMessageTemplate
+          : appSettings.directSaleMessageTemplate || appSettings.whatsappMessageTemplate;
+    const tpl = resolveDirectSaleTemplate(rawTpl);
+
+    const resolveItemMeta = (item: (typeof items)[number]) => {
+      const pkgMeta =
+        displayPackages.find((p) => p.id === item.packageId) ||
+        EXCLUSIVE_PACKAGES.find((p) => p.id === item.packageId);
+      const dataSize = pkgMeta?.dataLabel || item.packageLabel;
+      const unitPrice = item.unitPrice || item.price;
+      return {
+        packageName: dataSize,
+        priceLabel: `${formatNumEn(unitPrice)} ريال`,
+        balanceLabel: formatPackageBalanceFull(dataSize),
+      };
+    };
+
     if (items.length === 1 && items[0].cardNumbers.length === 1) {
-      const tpl =
-        channel === 'sms'
-          ? appSettings.smsMessageTemplate || appSettings.directSaleMessageTemplate || ''
-          : channel === 'whatsapp'
-            ? appSettings.whatsappMessageTemplate || appSettings.directSaleMessageTemplate || ''
-            : appSettings.directSaleMessageTemplate || appSettings.whatsappMessageTemplate || '';
-      const baseMsg = applyMessageTemplate(tpl, {
-        package: items[0].packageLabel,
+      const meta = resolveItemMeta(items[0]);
+      return applyMessageTemplate(tpl, {
+        package: meta.packageName,
+        price: meta.priceLabel,
         card: items[0].cardNumbers[0],
+        balance: meta.balanceLabel,
         buyer: sale.buyerName,
-        total: `${formatNumEn(sale.totalAmount)} ر.ي`,
+        total: `${formatNumEn(sale.totalAmount)} ريال`,
         invoice: invoiceNum,
         date: formattedDate,
       });
-      const formulaLine = breakdown[0]?.fullLineText;
-      return formulaLine ? `${baseMsg}\n📊 ${formulaLine}` : baseMsg;
     }
-    const lines = [
-      `📶 شبكة طيبة نت اللاسلكية (TAIBAH NET)`,
-      `🧾 فاتورة بيع مباشر #${invoiceNum}`,
-      `📅 التاريخ: ${formattedDate}`,
-      `👤 المشتري: ${sale.buyerName} (${getBuyerRoleArabicLabel(sale.buyerRole, sale.saleType)})`,
-      `🏷 التسعير: ${getBuyerPriceTierLabel(sale.buyerRole, sale.saleType, sale.discountRate)}`,
-      `────────────────────`,
-      `📊 تفصيل الفئات المباعة:`,
-    ];
-    for (const b of breakdown) {
-      lines.push(`🔹 ${b.fullLineText}`);
-    }
+
+    // Multiple cards in direct sale — render using the exact clean card message style
+    const blocks: string[] = [];
     for (const item of items) {
-      if (item.cardNumbers.length > 0) {
-        lines.push(`🔑 أرقام كروت ${item.packageLabel}:`);
-        item.cardNumbers.forEach((num, idx) => {
-          lines.push(`   ${idx + 1}. ${num}`);
-        });
+      const meta = resolveItemMeta(item);
+      if (item.cardNumbers.length === 1) {
+        blocks.push(
+          applyMessageTemplate(tpl, {
+            package: meta.packageName,
+            price: meta.priceLabel,
+            card: item.cardNumbers[0],
+            balance: meta.balanceLabel,
+            buyer: sale.buyerName,
+            total: `${formatNumEn(sale.totalAmount)} ريال`,
+            invoice: invoiceNum,
+            date: formattedDate,
+          })
+        );
+      } else if (item.cardNumbers.length > 1) {
+        blocks.push(
+          [
+            '*شبكة طيبة نت اللاسلكية*',
+            '-------------------------',
+            `الباقة: ${meta.packageName}`,
+            `السعر: ${meta.priceLabel} (العدد: ${formatNumEn(item.cardNumbers.length)})`,
+            `الرصيد: ${meta.balanceLabel}`,
+            'رموز الدخول:',
+            ...item.cardNumbers.map((num, idx) => `${idx + 1}. ${num}`),
+            '-------------------------',
+            'نتمنى لكم تصفحاً ممتعاً!',
+          ].join('\n')
+        );
       }
     }
-    lines.push(`────────────────────`);
-    lines.push(`💰 الإجمالي: ${formatNumEn(sale.totalAmount)} ر.ي (${formatNumEn(sale.totalCards)} كرت)`);
-    lines.push(`📞 ${SUPER_ADMIN_CONFIG.developerCredit}`);
-    return lines.join('\n');
+
+    if (blocks.length > 0) {
+      return blocks.join('\n\n');
+    }
+
+    return [
+      '*شبكة طيبة نت اللاسلكية*',
+      '-------------------------',
+      `الإجمالي: ${formatNumEn(sale.totalAmount)} ريال (${formatNumEn(sale.totalCards)} كرت)`,
+      '-------------------------',
+      'نتمنى لكم تصفحاً ممتعاً!',
+    ].join('\n');
   };
 
   const buildDirectPrintable = (sale: SaleDoc): PrintableDocumentPayload => {
@@ -349,7 +390,7 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
             <button
               type="button"
               onClick={() => {
-                setTemplateText(appSettings.directSaleMessageTemplate);
+                setTemplateText(resolveDirectSaleTemplate(appSettings.directSaleMessageTemplate));
                 setShowTemplateModal(true);
               }}
               className="min-h-[38px] rounded-xl bg-white/15 hover:bg-white/25 border border-[#D4AF37]/70 text-white text-xs font-extrabold flex items-center justify-center gap-1.5"
@@ -594,7 +635,7 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
               </button>
             </div>
             <p className="text-[11px] font-bold text-slate-500">
-              استخدم المتغيرات {'{package}'} لاسم الباقة و {'{card}'} لرقم الكرت.
+              المتغيرات المتاحة: {'{package}'} للباقة، {'{price}'} للسعر، {'{card}'} لرمز الدخول، و {'{balance}'} للرصيد.
             </p>
             <textarea
               rows={5}

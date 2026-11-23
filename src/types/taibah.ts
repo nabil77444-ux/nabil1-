@@ -274,6 +274,32 @@ export interface AppSettingsDoc {
   updatedAt?: Timestamp;
 }
 
+export const DEFAULT_DIRECT_SALE_TEMPLATE =
+  '*شبكة طيبة نت اللاسلكية*\n-------------------------\nالباقة: {package}\nالسعر: {price}\nرمز الدخول: {card}\nالرصيد: {balance}\n-------------------------\nنتمنى لكم تصفحاً ممتعاً!';
+
+const LEGACY_DIRECT_SALE_DEFAULTS = new Set<string>([
+  'شبكة طيبة نت اللاسلكية (TAIBAH NET)\nالباقة: {package}\nرقم الكرت: {card}\nنتمنى لكم تصفحاً سريعاً وممتعاً.\nطيبة نت 772466998',
+  'كروت طيبة نت (TAIBAH NET)\nالباقة: {package}\nالكرت: {card}\nطيبة نت 772466998',
+  '👑 *شبكة طيبة نت اللاسلكية (TAIBAH NET)*\n📦 الباقة: *{package}*\n🎫 رقم الكرت: `{card}`\n✨ نتمنى لكم تصفحاً سريعاً وممتعاً.\n📞 طيبة نت 772466998',
+]);
+
+export function resolveDirectSaleTemplate(template?: string): string {
+  const trimmed = (template || '').trim();
+  if (!trimmed || LEGACY_DIRECT_SALE_DEFAULTS.has(trimmed)) {
+    return DEFAULT_DIRECT_SALE_TEMPLATE;
+  }
+  return trimmed;
+}
+
+export function formatPackageBalanceFull(dataLabel: string): string {
+  const clean = (dataLabel || '').trim();
+  if (!clean) return '';
+  if (/ميجابايت|جيجابايت/.test(clean)) return clean;
+  if (/ميجا/.test(clean)) return clean.replace(/ميجا/g, 'ميجابايت');
+  if (/جيجا/.test(clean)) return clean.replace(/جيجا/g, 'جيجابايت');
+  return clean;
+}
+
 export const DEFAULT_APP_SETTINGS: Omit<AppSettingsDoc, 'updatedAt'> = {
   newsTicker:
     'أهلاً بكم في تطبيق كروت طيبة نت — شبكة طيبة نت اللاسلكية (TAIBAH NET) • بيع فوري وآمن للوكلاء والعملاء والمستهلكين مع مزامنة سحابية لحظية',
@@ -285,12 +311,9 @@ export const DEFAULT_APP_SETTINGS: Omit<AppSettingsDoc, 'updatedAt'> = {
   lowStockThreshold: 20,
   agentDiscountPercent: 70,
   clientDiscountPercent: 80,
-  directSaleMessageTemplate:
-    'شبكة طيبة نت اللاسلكية (TAIBAH NET)\nالباقة: {package}\nرقم الكرت: {card}\nنتمنى لكم تصفحاً سريعاً وممتعاً.\nطيبة نت 772466998',
-  smsMessageTemplate:
-    'كروت طيبة نت (TAIBAH NET)\nالباقة: {package}\nالكرت: {card}\nطيبة نت 772466998',
-  whatsappMessageTemplate:
-    '👑 *شبكة طيبة نت اللاسلكية (TAIBAH NET)*\n📦 الباقة: *{package}*\n🎫 رقم الكرت: `{card}`\n✨ نتمنى لكم تصفحاً سريعاً وممتعاً.\n📞 طيبة نت 772466998',
+  directSaleMessageTemplate: DEFAULT_DIRECT_SALE_TEMPLATE,
+  smsMessageTemplate: DEFAULT_DIRECT_SALE_TEMPLATE,
+  whatsappMessageTemplate: DEFAULT_DIRECT_SALE_TEMPLATE,
   pdfHeaderTitle: 'كروت طيبة نت – TAIBAH NET',
   pdfHeaderSubtitle: 'شبكة طيبة نت اللاسلكية — الإدارة المالية ونظام الكروت المعتمد',
   pdfFooterText: 'وثيقة معتمدة صادرة من منظومة كروت طيبة نت — طيبة نت 772466998',
