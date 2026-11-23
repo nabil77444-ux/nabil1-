@@ -129,7 +129,7 @@ jobs:
           PYEOF
           npx capacitor-assets generate --android --iconBackgroundColor '#061124' --splashBackgroundColor '#061124' || true
 
-          # Guarantee crisp circular ic_launcher & ic_launcher_round across ALL Android mipmap densities (Android 5.1 - 15)
+          # Guarantee crisp circular ic_launcher & ic_launcher_round across ALL Android mipmap densities (Android 6.0 - 15)
           python3 - <<'PYEOF'
           import os
           try:
@@ -162,21 +162,21 @@ jobs:
           mkdir -p android/app/src/main/res/drawable
           cp resources/icon.png android/app/src/main/res/drawable/taibah_logo.png || cp public/pwa-512x512.png android/app/src/main/res/drawable/taibah_logo.png || true
 
-      - name: Configure Android 5.1+ (minSdk 22), Auto-Increment VersionCode & Native Permissions
+      - name: Configure Android 6.0+ (minSdk 23), Auto-Increment VersionCode & Native Permissions
         run: |
           set -euo pipefail
-          # 1. Enforce Android 5.1+ (API 22) minimum compatibility for Capacitor & org.apache.cordova
+          # 1. Enforce Android 6.0+ (API 23) minimum compatibility for @capacitor/filesystem (ionfilesystem-android:1.1.1) & Biometric Keystore
           VARS_GRADLE="android/variables.gradle"
           if [ -f "$VARS_GRADLE" ]; then
-            sed -i -E 's/minSdkVersion\s*=\s*[0-9]+/minSdkVersion = 22/' "$VARS_GRADLE"
+            sed -i -E 's/minSdkVersion\s*=\s*[0-9]+/minSdkVersion = 23/' "$VARS_GRADLE"
             echo "=== Verified android/variables.gradle ==="
             cat "$VARS_GRADLE"
           fi
 
-          # 2. Ensure numeric minSdkVersion in android/app/build.gradle (if hardcoded) is also 22,
+          # 2. Ensure numeric minSdkVersion in android/app/build.gradle (if hardcoded) is also 23,
           #    and auto-increment versionCode & versionName while preserving applicationId "net.taibah.wireless"
           APP_GRADLE="android/app/build.gradle"
-          sed -i -E 's/(minSdk(Version)?[[:space:]]*=?[[:space:]]*)[0-9]+/\122/' "$APP_GRADLE"
+          sed -i -E 's/(minSdk(Version)?[[:space:]]*=?[[:space:]]*)[0-9]+/\123/' "$APP_GRADLE"
           VERSION_CODE=$((1000 + GITHUB_RUN_NUMBER))
           VERSION_NAME="2.0.${GITHUB_RUN_NUMBER}"
           sed -i -E "s/versionCode\s+[0-9]+/versionCode ${VERSION_CODE}/" "$APP_GRADLE"
@@ -338,7 +338,7 @@ jobs:
             الإصدار النهائي الجاهز للتثبيت والتحديث المباشر فوق النسخة السابقة من تطبيق **كروت طيبة نت – TAIBAH NET**.
             - **applicationId:** `net.taibah.wireless`
             - **الإصدار:** `${{ env.APK_VERSION_NAME }}` (`versionCode: ${{ env.APK_VERSION_CODE }}`)
-            - **التوافق:** Android 5.1+ (`minSdkVersion = 22`) مع أيقونة Adaptive Icon متوازنة بدون قص
+            - **التوافق:** Android 6.0+ (`minSdkVersion = 23`) مع أيقونة Adaptive Icon دائرية متوازنة بدون قص
             - **حالة التوقيع:** `${{ env.SIGNING_STATUS }}`
             - يدعم الدخول بالبصمة والوجه عبر **Android BiometricPrompt** والعمل أوفلاين بالكامل (Offline-First) دون تكرار بيع أي كرت
             - يدعم مشاركة الفواتير والكشوفات (PDF عربي + صور HD) وجلب جهات الاتصال مباشرة من الهاتف
