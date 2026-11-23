@@ -370,7 +370,7 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
   };
 
   return (
-    <div className="space-y-3.5 pb-[140px] safe-bottom">
+    <div className="space-y-3.5 safe-bottom">
       {/* Compact Royal Header Banner */}
       <div className="royal-header-3d rounded-3xl border-2 border-[#D4AF37] p-3.5 shadow-lg flex items-center justify-between gap-3">
         <div className="flex items-center gap-2.5 min-w-0">
@@ -589,49 +589,9 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
         })}
       </div>
 
-      {/* Pending Partial Delivery Batches Section */}
-      {isElectronic && pendingDeliverySales.length > 0 && (
-        <div className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-orange-400 p-3.5 space-y-2.5">
-          <h3 className="text-xs font-extrabold text-orange-700 dark:text-orange-400 flex items-center gap-1.5">
-            <Truck className="w-4 h-4" />
-            فواتير الجملة بانتظار استكمال الدفعات ({pendingDeliverySales.length})
-          </h3>
-          {pendingDeliverySales.map((s) => (
-            <div
-              key={s.id}
-              className="rounded-xl bg-slate-50 dark:bg-slate-800 p-2.5 flex items-center justify-between gap-2"
-            >
-              <div className="min-w-0">
-                <div className="text-xs font-extrabold truncate">
-                  {s.buyerName} ({s.invoiceNumber})
-                </div>
-                <div className="text-[11px] font-bold text-slate-500 tabular-nums">
-                  مُسلّم {s.deliveredCards} من أصل {s.totalCards} كرت
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={async () => {
-                  const pendingItem = (s.items || []).find(
-                    (i) => i.quantity - i.delivered - (i.returned || 0) > 0
-                  );
-                  if (pendingItem) {
-                    const rem = pendingItem.quantity - pendingItem.delivered - (pendingItem.returned || 0);
-                    await deliverPartialCards(s, pendingItem.packageId, rem);
-                  }
-                }}
-                className="min-h-[34px] px-3 rounded-lg bg-emerald-600 text-white text-[11px] font-extrabold shrink-0"
-              >
-                تسليم المتبقي
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* FLOATING BOTTOM MULTI-PACKAGE CONFIRMATION BAR (Lifted above Android Navigation Bar) */}
+      {/* NORMAL-FLOW BATCH SUMMARY CARD (Directly below the 8th package / 3000 YER card — never fixed/sticky) */}
       {selectedItems.length > 0 && (
-        <div className="fixed bottom-[calc(env(safe-area-inset-bottom,0px)+48px)] inset-x-3 z-40 max-w-2xl mx-auto">
+        <div className="w-full !mt-[16px] !mb-[28px]">
           <div className="rounded-2xl royal-header-3d border-2 border-[#D4AF37] p-3 shadow-2xl flex flex-wrap items-center justify-between gap-2">
             <div className="min-w-0">
               <div className="text-xs font-extrabold text-[#FDE68A] tabular-nums">
@@ -674,6 +634,46 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Pending Partial Delivery Batches Section */}
+      {isElectronic && pendingDeliverySales.length > 0 && (
+        <div className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-orange-400 p-3.5 space-y-2.5">
+          <h3 className="text-xs font-extrabold text-orange-700 dark:text-orange-400 flex items-center gap-1.5">
+            <Truck className="w-4 h-4" />
+            فواتير الجملة بانتظار استكمال الدفعات ({pendingDeliverySales.length})
+          </h3>
+          {pendingDeliverySales.map((s) => (
+            <div
+              key={s.id}
+              className="rounded-xl bg-slate-50 dark:bg-slate-800 p-2.5 flex items-center justify-between gap-2"
+            >
+              <div className="min-w-0">
+                <div className="text-xs font-extrabold truncate">
+                  {s.buyerName} ({s.invoiceNumber})
+                </div>
+                <div className="text-[11px] font-bold text-slate-500 tabular-nums">
+                  مُسلّم {s.deliveredCards} من أصل {s.totalCards} كرت
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={async () => {
+                  const pendingItem = (s.items || []).find(
+                    (i) => i.quantity - i.delivered - (i.returned || 0) > 0
+                  );
+                  if (pendingItem) {
+                    const rem = pendingItem.quantity - pendingItem.delivered - (pendingItem.returned || 0);
+                    await deliverPartialCards(s, pendingItem.packageId, rem);
+                  }
+                }}
+                className="min-h-[34px] px-3 rounded-lg bg-emerald-600 text-white text-[11px] font-extrabold shrink-0"
+              >
+                تسليم المتبقي
+              </button>
+            </div>
+          ))}
         </div>
       )}
 
