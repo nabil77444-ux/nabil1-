@@ -5,6 +5,8 @@ import {
   Check,
   Edit3,
   KeyRound,
+  Loader2,
+  RotateCcw,
   ShieldCheck,
   Trash2,
   UserCheck,
@@ -44,6 +46,7 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
     transferClientsToAgent,
     deleteManagedUser,
     resolvePasswordReset,
+    restoreDeletedAgentsAndClients,
   } = useFirebase();
 
   const isAdmin = profile?.role === 'super_admin';
@@ -56,6 +59,13 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
   const [rejectTarget, setRejectTarget] = useState<RegistrationRequest | null>(null);
   const [rejectReason, setRejectReason] = useState('');
   const [busy, setBusy] = useState(false);
+  const [restoringAccounts, setRestoringAccounts] = useState(false);
+  const [restoreProgress, setRestoreProgress] = useState('');
+  const [restoreResult, setRestoreResult] = useState<{
+    ok: boolean;
+    summary: string;
+    sourcesSummary?: string;
+  } | null>(null);
 
   // Add User Form
   const [addName, setAddName] = useState('');
@@ -154,6 +164,26 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
       setShowTransferModal(false);
     } finally {
       setBusy(false);
+    }
+  };
+
+  const handleRestoreDeletedAccounts = async () => {
+    if (!isAdmin || restoringAccounts) return;
+    setRestoringAccounts(true);
+    setRestoreResult(null);
+    setRestoreProgress('جاري فحص النسخ الاحتياطية السحابية والمحلية وسجل العمليات...');
+    try {
+      const res = await restoreDeletedAgentsAndClients((stage) => {
+        setRestoreProgress(stage);
+      });
+      setRestoreResult({
+        ok: res.ok,
+        summary: res.summary,
+        sourcesSummary: res.sourcesSummary,
+      });
+    } finally {
+      setRestoringAccounts(false);
+      setRestoreProgress('');
     }
   };
 
@@ -267,6 +297,59 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
           </button>
         )}
       </div>
+
+      {/* Super Admin Exclusive: Recover Deleted Agents & Clients Tool */}
+      {isAdmin && (
+        <div className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-emerald-600/80 p-3 shadow-sm space-y-2">
+          <button
+            type="button"
+            disabled={restoringAccounts}
+            onClick={() => void handleRestoreDeletedAccounts()}
+            className="w-full min-h-[44px] rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white text-xs font-extrabold flex items-center justify-center gap-2 px-3 shadow transition-colors"
+          >
+            {restoringAccounts ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                <span>جاري البحث والاسترجاع...</span>
+              </>
+            ) : (
+              <>
+                <RotateCcw className="w-4 h-4 shrink-0" />
+                <span>استرجاع الوكلاء والعملاء المحذوفين</span>
+              </>
+            )}
+          </button>
+          {restoringAccounts && restoreProgress && (
+            <p className="text-[11px] font-bold text-emerald-700 dark:text-emerald-300 text-center">
+              {restoreProgress}
+            </p>
+          )}
+          {restoreResult && (
+            <div
+              className={`rounded-xl px-3 py-2 text-[11px] font-bold flex items-start justify-between gap-2 border ${
+                restoreResult.ok
+                  ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-300 dark:border-emerald-800 text-emerald-800 dark:text-emerald-200'
+                  : 'bg-red-50 dark:bg-red-950/40 border-red-300 dark:border-red-800 text-red-800 dark:text-red-200'
+              }`}
+            >
+              <div className="space-y-0.5 leading-relaxed">
+                <p>{restoreResult.summary}</p>
+                {restoreResult.sourcesSummary && (
+                  <p className="text-[10px] opacity-85">المصادر: {restoreResult.sourcesSummary}</p>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => setRestoreResult(null)}
+                className="p-0.5 opacity-70 hover:opacity-100 shrink-0"
+                aria-label="إغلاق"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* SECTION A: LIVE JOIN REQUESTS QUEUE (Update 10 — Instant Approve as Client / Agent / Reject) */}
       {(activeTab === 'joins' || pendingRegistrations.length > 0) && (

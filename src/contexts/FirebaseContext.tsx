@@ -22,6 +22,7 @@ import {
   serverTimestamp,
   setDoc,
   terminate,
+  type Timestamp,
   updateDoc,
   where,
   writeBatch,
@@ -31,7 +32,9 @@ import {
   db,
   generateSafeDocId,
   handleFirestoreError,
+  isFirestoreOfflineError,
   isSuperAdminEmail,
+  normalizeDigits,
   OperationType,
   requestFCMToken,
   testFirestoreConnection,
@@ -223,9 +226,19 @@ interface FirebaseContextValue {
   transferClientsToAgent: (clientUids: string[], targetAgentId: string) => Promise<void>;
   deleteManagedUser: (user: UserProfile) => Promise<void>;
   resolvePasswordReset: (req: PasswordResetRequest, status: 'approved' | 'rejected') => Promise<void>;
-  // Push, Backup & Super Admin Reset
+  // Push, Backup, Account Recovery & Super Admin Reset
   enablePushNotifications: () => Promise<boolean>;
   exportCloudBackup: () => Promise<void>;
+  restoreDeletedAgentsAndClients: (
+    onProgress?: (stage: string) => void
+  ) => Promise<{
+    ok: boolean;
+    restoredCount: number;
+    updatedClientsMirrorCount: number;
+    totalFound: number;
+    sourcesSummary: string;
+    summary: string;
+  }>;
   resetAppData: (
     scope: 'sales_only' | 'full_reset',
     adminPassword: string,
@@ -236,10 +249,14 @@ interface FirebaseContextValue {
 const FirebaseContext = createContext<FirebaseContextValue | null>(null);
 
 const CACHE_PROFILE_KEY = 'taibah_cached_profile_v1';
+const CACHE_PROFILE_UID_PREFIX = 'taibah_cached_profile_uid_v1_';
+const CACHE_PROFILE_EMAIL_PREFIX = 'taibah_cached_profile_email_v1_';
 const CACHE_PACKAGES_KEY = 'taibah_cached_packages_v1';
 const CACHE_SETTINGS_KEY = 'taibah_cached_settings_v1';
 const CACHE_SALES_PREFIX = 'taibah_cached_sales_v1_';
 const CACHE_CUSTOMERS_PREFIX = 'taibah_cached_customers_v1_';
+const CACHE_AUTO_BACKUP_KEY = 'taibah_auto_backup_v1';
+const CACHE_USERS_LIST_KEY = 'taibah_cached_users_v1';
 
 function readCachedJson<T>(key: string, fallback: T): T {
   try {
@@ -263,6 +280,208 @@ function writeCachedJson(key: string, value: unknown): void {
   }
 }
 
+function serializeProfileForCache(p: UserProfile): Omit<UserProfile, 'createdAt' | 'updatedAt'> {
+  return {
+    uid: p.uid,
+    name: p.name,
+    phone: p.phone,
+    email: p.email,
+    role: p.role,
+    status: p.status,
+    parentAgentId: p.parentAgentId,
+    discountRate: p.discountRate,
+    balance: p.balance,
+    fcmTokens: Array.isArray(p.fcmTokens) ? p.fcmTokens.slice(0, 5) : [],
+    ...(p.rejectionReason ? { rejectionReason: p.rejectionReason } : {}),
+  };
+}
+
+function persistProfileToLocalCache(p: UserProfile): void {
+  const payload = serializeProfileForCache(p);
+  writeCachedJson(CACHE_PROFILE_KEY, payload);
+  if (p.uid) {
+    writeCachedJson(`${CACHE_PROFILE_UID_PREFIX}${p.uid}`, payload);
+  }
+  if (p.email) {
+    writeCachedJson(`${CACHE_PROFILE_EMAIL_PREFIX}${p.email.trim().toLowerCase()}`, payload);
+  }
+}
+
+function readProfileFromLocalCache(user: FirebaseUser): UserProfile | null {
+  const emailLower = (user.email || '').trim().toLowerCase();
+  const byUid = readCachedJson<UserProfile | null>(`${CACHE_PROFILE_UID_PREFIX}${user.uid}`, null);
+  if (byUid && byUid.uid === user.uid) return byUid;
+  const primary = readCachedJson<UserProfile | null>(CACHE_PROFILE_KEY, null);
+  if (
+    primary &&
+    (primary.uid === user.uid ||
+      (emailLower.length > 0 && primary.email?.trim().toLowerCase() === emailLower))
+  ) {
+    return { ...primary, uid: user.uid };
+  }
+  if (emailLower) {
+    const byEmail = readCachedJson<UserProfile | null>(`${CACHE_PROFILE_EMAIL_PREFIX}${emailLower}`, null);
+    if (byEmail) return { ...byEmail, uid: user.uid };
+  }
+  return null;
+}
+
+function buildSuperAdminProfile(user: FirebaseUser): UserProfile {
+  return {
+    uid: user.uid,
+    name: SUPER_ADMIN_CONFIG.name,
+    phone: SUPER_ADMIN_CONFIG.phone,
+    email: (user.email || SUPER_ADMIN_CONFIG.email).trim().toLowerCase(),
+    role: 'super_admin',
+    status: 'active',
+    parentAgentId: '',
+    discountRate: 100,
+    balance: 0,
+    fcmTokens: [],
+  };
+}
+
+function extractNormalizedPhoneFromAuthUser(user: FirebaseUser): string {
+  const rawPhone = user.phoneNumber || '';
+  if (rawPhone) {
+    const digits = normalizeDigits(rawPhone).replace(/[^\d]/g, '').replace(/^00967|^967/, '');
+    if (digits.length >= 7) return digits;
+  }
+  const email = (user.email || '').trim().toLowerCase();
+  if (email.includes('@')) {
+    const localPart = email.split('@')[0] || '';
+    const digits = normalizeDigits(localPart).replace(/[^\d]/g, '').replace(/^00967|^967/, '');
+    if (digits.length >= 7) return digits;
+  }
+  return '';
+}
+
+function normalizePhoneDigits(raw: unknown): string {
+  if (typeof raw !== 'string') return '';
+  const digits = normalizeDigits(raw).replace(/[^\d]/g, '').replace(/^00967|^967/, '');
+  return digits.length >= 7 && digits.length <= 15 ? digits : '';
+}
+
+function serializePlainAccountForBackup(raw: Record<string, unknown>, fallbackId: string): Record<string, unknown> {
+  const phone = normalizePhoneDigits(raw.phone) || (typeof raw.phone === 'string' ? raw.phone.trim().slice(0, 20) : '');
+  const email = typeof raw.email === 'string' ? raw.email.trim().toLowerCase().slice(0, 120) : '';
+  const role =
+    raw.role === 'super_admin' || raw.role === 'agent' || raw.role === 'client' ? raw.role : 'client';
+  const status =
+    raw.status === 'active' ||
+    raw.status === 'pending' ||
+    raw.status === 'rejected' ||
+    raw.status === 'suspended'
+      ? raw.status
+      : 'active';
+  return {
+    uid: typeof raw.uid === 'string' && raw.uid.trim() ? raw.uid.trim().slice(0, 128) : fallbackId,
+    name: typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim().slice(0, 100) : phone || 'مستخدم طيبة نت',
+    phone,
+    email,
+    role,
+    status,
+    parentAgentId: typeof raw.parentAgentId === 'string' ? raw.parentAgentId.slice(0, 128) : '',
+    discountRate:
+      typeof raw.discountRate === 'number'
+        ? raw.discountRate
+        : role === 'agent'
+        ? 70
+        : role === 'super_admin'
+        ? 100
+        : 80,
+    balance: typeof raw.balance === 'number' ? raw.balance : 0,
+  };
+}
+
+function findCachedAccountInBackups(user: FirebaseUser): Partial<UserProfile> | null {
+  const uid = user.uid;
+  const emailLower = (user.email || '').trim().toLowerCase();
+  const phoneDigits = extractNormalizedPhoneFromAuthUser(user);
+
+  const candidates: Array<Record<string, unknown>> = [];
+  const cachedList = readCachedJson<Array<Record<string, unknown>>>(CACHE_USERS_LIST_KEY, []);
+  if (Array.isArray(cachedList)) candidates.push(...cachedList);
+  const autoBackup = readCachedJson<{ users?: Array<Record<string, unknown>>; clients?: Array<Record<string, unknown>> } | null>(
+    CACHE_AUTO_BACKUP_KEY,
+    null
+  );
+  if (autoBackup?.users && Array.isArray(autoBackup.users)) candidates.push(...autoBackup.users);
+  if (autoBackup?.clients && Array.isArray(autoBackup.clients)) candidates.push(...autoBackup.clients);
+
+  for (const item of candidates) {
+    if (!item || typeof item !== 'object') continue;
+    const itemUid = typeof item.uid === 'string' ? item.uid.trim() : '';
+    const itemEmail = typeof item.email === 'string' ? item.email.trim().toLowerCase() : '';
+    const itemPhone = normalizePhoneDigits(item.phone);
+    if (
+      (itemUid && itemUid === uid) ||
+      (emailLower && itemEmail && itemEmail === emailLower) ||
+      (phoneDigits && itemPhone && itemPhone === phoneDigits)
+    ) {
+      return {
+        uid,
+        name: typeof item.name === 'string' ? item.name.trim() : undefined,
+        phone: itemPhone || phoneDigits || undefined,
+        email: itemEmail || emailLower || undefined,
+        role:
+          item.role === 'agent' || item.role === 'client' || item.role === 'super_admin'
+            ? item.role
+            : 'client',
+        status:
+          item.status === 'active' ||
+          item.status === 'pending' ||
+          item.status === 'rejected' ||
+          item.status === 'suspended'
+            ? item.status
+            : 'active',
+        parentAgentId: typeof item.parentAgentId === 'string' ? item.parentAgentId : '',
+        discountRate: typeof item.discountRate === 'number' ? item.discountRate : undefined,
+        balance: typeof item.balance === 'number' ? item.balance : 0,
+      };
+    }
+  }
+  return null;
+}
+
+function buildAutoRecoveredProfile(
+  user: FirebaseUser,
+  defaultClientDiscount: number,
+  cachedHint?: Partial<UserProfile> | null
+): UserProfile {
+  const uid = user.uid;
+  const emailLower = (user.email || '').trim().toLowerCase();
+  const phoneDigits = extractNormalizedPhoneFromAuthUser(user);
+  const resolvedPhone = (
+    normalizePhoneDigits(cachedHint?.phone) ||
+    phoneDigits ||
+    '770000000'
+  ).slice(0, 20);
+  const resolvedEmail = (
+    emailLower ||
+    (cachedHint?.email && cachedHint.email.includes('@') ? cachedHint.email.trim().toLowerCase() : '') ||
+    `${resolvedPhone}@taibah.net`
+  ).slice(0, 120);
+  const rawName =
+    (cachedHint?.name && cachedHint.name.trim().length >= 2 ? cachedHint.name.trim() : '') ||
+    (user.displayName && user.displayName.trim().length >= 2 ? user.displayName.trim() : '') ||
+    (phoneDigits ? `حساب ${phoneDigits}` : 'مستخدم طيبة نت');
+  const safeClientDiscount = Math.max(80, Math.min(100, Number(defaultClientDiscount) || 80));
+
+  return {
+    uid,
+    name: rawName.slice(0, 100),
+    phone: resolvedPhone,
+    email: resolvedEmail,
+    role: 'client',
+    status: 'active',
+    parentAgentId: '',
+    discountRate: safeClientDiscount,
+    balance: 0,
+    fcmTokens: [],
+  };
+}
+
 export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const isOnline = useOnlineStatus();
   const { notifySuccess, notifyError, notifyWarning, notifyInfo } = useFeedback();
@@ -280,6 +499,9 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [adminDocApproved, setAdminDocApproved] = useState(false);
   const [adminApprovalChecking, setAdminApprovalChecking] = useState(false);
   const bootstrappingUidRef = useRef<string | null>(null);
+  const pendingBootstrapRef = useRef<boolean>(false);
+  const pendingProfileLookupRef = useRef<boolean>(false);
+  const profileLookupRunningRef = useRef<string | null>(null);
   const inFlightOpsRef = useRef<Set<string>>(new Set());
 
   // Update 12: Active route & pagination limits for lazy on-demand Firestore subscriptions
@@ -328,19 +550,10 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setGlobalShareTemplates(appSettings);
   }, [appSettings]);
 
-  // Silent background connectivity probe + public settings/global listener (non-blocking)
-  useEffect(() => {
-    let active = true;
-    const probeTimer = window.setTimeout(() => {
-      if (typeof navigator !== 'undefined' && !navigator.onLine) {
-        if (active) setFirestoreConnected(false);
-        return;
-      }
-      testFirestoreConnection().then((ok) => {
-        if (active) setFirestoreConnected(ok);
-      });
-    }, 200);
+  const userUid = firebaseUser?.uid || null;
 
+  // 1. Mount public settings/global listener ONCE (never tear down/resubscribe on online blips)
+  useEffect(() => {
     const unsubSettings = onSnapshot(
       doc(db, 'settings', 'global'),
       (snap) => {
@@ -379,13 +592,30 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     );
 
     return () => {
+      unsubSettings();
+    };
+  }, []);
+
+  // 2. Non-blocking startup connectivity probe
+  useEffect(() => {
+    let active = true;
+    const probeTimer = window.setTimeout(() => {
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        if (active) setFirestoreConnected(false);
+        return;
+      }
+      testFirestoreConnection().then((ok) => {
+        if (active) setFirestoreConnected(ok);
+      });
+    }, 300);
+
+    return () => {
       active = false;
       window.clearTimeout(probeTimer);
-      unsubSettings();
     };
   }, [isOnline]);
 
-  // Auth listener with instant local cache hydration
+  // Auth listener with instant Offline-First local cache hydration & Super Admin instant entry
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (user) => {
       setFirebaseUser(user);
@@ -393,6 +623,9 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       setAuthReady(true);
       if (!user) {
         bootstrappingUidRef.current = null;
+        pendingBootstrapRef.current = false;
+        pendingProfileLookupRef.current = false;
+        profileLookupRunningRef.current = null;
         setAdminDocApproved(false);
         setAdminApprovalChecking(false);
         writeCachedJson(CACHE_PROFILE_KEY, null);
@@ -411,9 +644,21 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         setAuditLogs([]);
         setManagedUsers([]);
       } else {
-        const cached = readCachedJson<UserProfile | null>(CACHE_PROFILE_KEY, null);
-        if (cached && cached.uid === user.uid) {
+        const cached = readProfileFromLocalCache(user);
+        if (cached) {
           setProfile(cached);
+          if (cached.role === 'super_admin' && cached.status === 'active') {
+            setAdminDocApproved(true);
+          }
+          setProfileLoading(false);
+        } else if (isSuperAdminEmail(user.email)) {
+          // Automatic Super Admin instant profile recovery (never blocked even offline or post-reset)
+          const adminProfile = buildSuperAdminProfile(user);
+          setProfile(adminProfile);
+          persistProfileToLocalCache(adminProfile);
+          if (user.emailVerified) {
+            setAdminDocApproved(true);
+          }
           setProfileLoading(false);
         } else {
           setProfileLoading(true);
@@ -472,6 +717,10 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const currentUser = auth.currentUser || user;
     if (!isSuperAdminEmail(currentUser.email)) return false;
     if (!currentUser.emailVerified && !adminDocApproved) return false;
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      pendingBootstrapRef.current = true;
+      return false;
+    }
     if (bootstrappingUidRef.current === currentUser.uid) return true;
     bootstrappingUidRef.current = currentUser.uid;
 
@@ -574,68 +823,559 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         })(),
       ]);
 
+      pendingBootstrapRef.current = false;
+      setFirestoreConnected(true);
       return true;
     } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, 'bootstrap_super_admin');
       bootstrappingUidRef.current = null;
+      if (isFirestoreOfflineError(err)) {
+        pendingBootstrapRef.current = true;
+        setFirestoreConnected(false);
+        console.warn(
+          'Super Admin bootstrap deferred while Firestore is offline — will retry automatically upon reconnection.'
+        );
+        return false;
+      }
+      handleFirestoreError(err, OperationType.WRITE, 'bootstrap_super_admin');
       return false;
     }
   }, [adminDocApproved]);
 
-  // Listen to current user profile in real time IMMEDIATELY (never blocked behind bootstrap round-trips)
+  // Smart Multi-Strategy Account Profile Lookup (UID -> Email -> Phone across `users` & `clients`)
+  // + Automatic UID linking (`setDoc` with `merge: true`) + Offline-First local cache fallback
+  const resolveAndLinkUserProfile = useCallback(
+    async (user: FirebaseUser): Promise<UserProfile | null> => {
+      const uid = user.uid;
+      const emailLower = (user.email || '').trim().toLowerCase();
+      const emailRaw = (user.email || '').trim();
+      const phoneDigits = extractNormalizedPhoneFromAuthUser(user);
+
+      // 1. Super Admin automatic profile recovery (nabil77444@gmail.com)
+      if (isSuperAdminEmail(user.email)) {
+        const adminProfile = buildSuperAdminProfile(user);
+        setProfile((prev) =>
+          prev && prev.uid === uid && prev.role === 'super_admin' && prev.status === 'active'
+            ? prev
+            : adminProfile
+        );
+        persistProfileToLocalCache(adminProfile);
+        setProfileLoading(false);
+        if (user.emailVerified || adminDocApproved) {
+          void bootstrapSuperAdminIfNeeded(user);
+        }
+        return adminProfile;
+      }
+
+      if (profileLookupRunningRef.current === uid) {
+        return readProfileFromLocalCache(user);
+      }
+
+      // 2. Offline-First: if offline, keep local cache open and schedule retry on reconnect
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        pendingProfileLookupRef.current = true;
+        const cached = readProfileFromLocalCache(user);
+        if (cached) {
+          setProfile(cached);
+          setProfileLoading(false);
+        }
+        return cached;
+      }
+
+      profileLookupRunningRef.current = uid;
+      try {
+        let matchedCol: 'users' | 'clients' | null = null;
+        let matchedDocId: string | null = null;
+        let matchedData: Record<string, unknown> | null = null;
+        let hitOfflineError = false;
+
+        const safeGetDoc = async (col: 'users' | 'clients', docId: string) => {
+          try {
+            const snap = await getDoc(doc(db, col, docId));
+            if (snap.exists()) {
+              return { id: snap.id, data: snap.data() as Record<string, unknown> };
+            }
+          } catch (err) {
+            if (isFirestoreOfflineError(err)) hitOfflineError = true;
+          }
+          return null;
+        };
+
+        const safeQueryOne = async (col: 'users' | 'clients', field: 'email' | 'phone', val: string) => {
+          if (!val) return null;
+          try {
+            const snap = await getDocs(query(collection(db, col), where(field, '==', val), limit(1)));
+            if (!snap.empty) {
+              const d = snap.docs[0];
+              return { id: d.id, data: d.data() as Record<string, unknown> };
+            }
+          } catch (err) {
+            if (isFirestoreOfflineError(err)) hitOfflineError = true;
+          }
+          return null;
+        };
+
+        // Strategy A: Lookup by UID (`users/{uid}` then `clients/{uid}`)
+        const byUidUsers = await safeGetDoc('users', uid);
+        if (byUidUsers) {
+          matchedCol = 'users';
+          matchedDocId = byUidUsers.id;
+          matchedData = byUidUsers.data;
+        } else {
+          const byUidClients = await safeGetDoc('clients', uid);
+          if (byUidClients) {
+            matchedCol = 'clients';
+            matchedDocId = byUidClients.id;
+            matchedData = byUidClients.data;
+          }
+        }
+
+        // Strategy B: Lookup by Email (`users` then `clients`)
+        if (!matchedData && emailLower) {
+          const byEmailUsers =
+            (await safeQueryOne('users', 'email', emailLower)) ||
+            (emailRaw && emailRaw !== emailLower ? await safeQueryOne('users', 'email', emailRaw) : null);
+          if (byEmailUsers) {
+            matchedCol = 'users';
+            matchedDocId = byEmailUsers.id;
+            matchedData = byEmailUsers.data;
+          } else {
+            const byEmailClients =
+              (await safeQueryOne('clients', 'email', emailLower)) ||
+              (emailRaw && emailRaw !== emailLower ? await safeQueryOne('clients', 'email', emailRaw) : null);
+            if (byEmailClients) {
+              matchedCol = 'clients';
+              matchedDocId = byEmailClients.id;
+              matchedData = byEmailClients.data;
+            }
+          }
+        }
+
+        // Strategy C: Lookup by Phone extracted from phoneNumber or email local part before '@' (`users` then `clients`)
+        if (!matchedData && phoneDigits.length >= 7) {
+          const byPhoneUsers = await safeQueryOne('users', 'phone', phoneDigits);
+          if (byPhoneUsers) {
+            matchedCol = 'users';
+            matchedDocId = byPhoneUsers.id;
+            matchedData = byPhoneUsers.data;
+          } else {
+            const byPhoneClients = await safeQueryOne('clients', 'phone', phoneDigits);
+            if (byPhoneClients) {
+              matchedCol = 'clients';
+              matchedDocId = byPhoneClients.id;
+              matchedData = byPhoneClients.data;
+            }
+          }
+        }
+
+        // Strategy D: If not found in `users` or `clients`, check if user has a pending/rejected registration request,
+        // otherwise IMMEDIATELY self-recover & auto-create an active profile so «تعذر تحميل ملف الحساب» NEVER appears!
+        if (!matchedData || !matchedCol || !matchedDocId) {
+          let pendingRegData: Record<string, unknown> | null = null;
+          if (!hitOfflineError) {
+            try {
+              const regSnap = await getDocs(
+                query(collection(db, 'registrationRequests'), where('applicantUid', '==', uid), limit(1))
+              );
+              if (!regSnap.empty) {
+                pendingRegData = regSnap.docs[0].data() as Record<string, unknown>;
+              }
+            } catch (err) {
+              if (isFirestoreOfflineError(err)) hitOfflineError = true;
+            }
+          }
+
+          if (pendingRegData && (pendingRegData.status === 'pending' || pendingRegData.status === 'rejected')) {
+            const regRole = pendingRegData.requestedRole === 'agent' ? 'agent' : 'client';
+            const regPhone =
+              normalizePhoneDigits(pendingRegData.phone) || phoneDigits || '770000000';
+            const regProfile: UserProfile = {
+              uid,
+              name:
+                typeof pendingRegData.name === 'string' && pendingRegData.name.trim().length >= 2
+                  ? pendingRegData.name.trim().slice(0, 100)
+                  : `حساب ${regPhone}`,
+              phone: regPhone.slice(0, 20),
+              email: (
+                (typeof pendingRegData.email === 'string' && pendingRegData.email.trim()) ||
+                emailLower ||
+                `${regPhone}@taibah.net`
+              )
+                .toLowerCase()
+                .slice(0, 120),
+              role: regRole,
+              status: pendingRegData.status === 'rejected' ? 'rejected' : 'pending',
+              parentAgentId:
+                typeof pendingRegData.parentAgentId === 'string'
+                  ? pendingRegData.parentAgentId.slice(0, 128)
+                  : '',
+              discountRate: 100,
+              balance: 0,
+              fcmTokens: [],
+              ...(typeof pendingRegData.rejectionReason === 'string' && pendingRegData.rejectionReason
+                ? { rejectionReason: pendingRegData.rejectionReason }
+                : {}),
+            };
+            setProfile(regProfile);
+            persistProfileToLocalCache(regProfile);
+            setProfileLoading(false);
+            return regProfile;
+          }
+
+          const cachedFallback = readProfileFromLocalCache(user) || findCachedAccountInBackups(user);
+          if (hitOfflineError) {
+            pendingProfileLookupRef.current = true;
+            setFirestoreConnected(false);
+            const offlineReady =
+              cachedFallback && cachedFallback.name && cachedFallback.role
+                ? {
+                    uid,
+                    name: cachedFallback.name,
+                    phone: cachedFallback.phone || phoneDigits || '770000000',
+                    email: cachedFallback.email || emailLower || `${phoneDigits || '770000000'}@taibah.net`,
+                    role: cachedFallback.role,
+                    status: cachedFallback.status || 'active',
+                    parentAgentId: cachedFallback.parentAgentId || '',
+                    discountRate:
+                      cachedFallback.discountRate ??
+                      (cachedFallback.role === 'agent'
+                        ? appSettings.agentDiscountPercent
+                        : appSettings.clientDiscountPercent),
+                    balance: cachedFallback.balance ?? 0,
+                    fcmTokens: [],
+                  }
+                : buildAutoRecoveredProfile(user, appSettings.clientDiscountPercent, cachedFallback);
+            setProfile(offlineReady);
+            persistProfileToLocalCache(offlineReady);
+            setProfileLoading(false);
+            return offlineReady;
+          }
+
+          // Instant Self-Recovery for any authenticated account whose Firestore doc was previously deleted/missing
+          const selfRecovered = buildAutoRecoveredProfile(
+            user,
+            appSettings.clientDiscountPercent,
+            cachedFallback
+          );
+          pendingProfileLookupRef.current = false;
+          setFirestoreConnected(true);
+          setProfile(selfRecovered);
+          persistProfileToLocalCache(selfRecovered);
+          setProfileLoading(false);
+
+          // Persist self-recovered profile cleanly into BOTH `users/{uid}` and `clients/{uid}`
+          const userWritePayload = {
+            uid: selfRecovered.uid,
+            name: selfRecovered.name,
+            phone: selfRecovered.phone,
+            email: selfRecovered.email,
+            role: 'client' as const,
+            status: 'active' as const,
+            parentAgentId: '',
+            discountRate: selfRecovered.discountRate,
+            balance: 0,
+            fcmTokens: [],
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          };
+          const clientWritePayload = {
+            uid: selfRecovered.uid,
+            name: selfRecovered.name,
+            phone: selfRecovered.phone,
+            email: selfRecovered.email,
+            role: 'client' as const,
+            status: 'active' as const,
+            parentAgentId: '',
+            discountRate: selfRecovered.discountRate,
+            balance: 0,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          };
+          await setDoc(doc(db, 'users', uid), userWritePayload, { merge: true }).catch((err) => {
+            if (isFirestoreOfflineError(err)) {
+              pendingProfileLookupRef.current = true;
+            }
+          });
+          await setDoc(doc(db, 'clients', uid), clientWritePayload, { merge: true }).catch(() => {
+            // Non-blocking mirror write
+          });
+
+          return selfRecovered;
+        }
+
+        const rawRole = matchedData.role;
+        const resolvedRole: UserProfile['role'] =
+          rawRole === 'super_admin' || rawRole === 'agent' || rawRole === 'client' ? rawRole : 'client';
+        const rawStatus = matchedData.status;
+        const resolvedStatus: UserProfile['status'] =
+          rawStatus === 'active' ||
+          rawStatus === 'pending' ||
+          rawStatus === 'rejected' ||
+          rawStatus === 'suspended'
+            ? rawStatus
+            : 'active';
+        const resolvedDiscount =
+          typeof matchedData.discountRate === 'number'
+            ? matchedData.discountRate
+            : resolvedRole === 'agent'
+            ? appSettings.agentDiscountPercent
+            : appSettings.clientDiscountPercent;
+        const resolvedBalance = typeof matchedData.balance === 'number' ? matchedData.balance : 0;
+        const resolvedPhone =
+          typeof matchedData.phone === 'string' && matchedData.phone.trim().length >= 7
+            ? matchedData.phone.trim().slice(0, 20)
+            : (phoneDigits || '770000000').slice(0, 20);
+        const resolvedEmail =
+          typeof matchedData.email === 'string' && matchedData.email.trim().length >= 5
+            ? matchedData.email.trim().toLowerCase().slice(0, 120)
+            : (emailLower || `${resolvedPhone}@taibah.net`).slice(0, 120);
+        const resolvedName =
+          typeof matchedData.name === 'string' && matchedData.name.trim().length >= 2
+            ? matchedData.name.trim().slice(0, 100)
+            : (user.displayName?.trim() || resolvedPhone).slice(0, 100);
+        const resolvedParentAgentId =
+          typeof matchedData.parentAgentId === 'string' ? matchedData.parentAgentId.slice(0, 128) : '';
+        const resolvedFcmTokens = Array.isArray(matchedData.fcmTokens)
+          ? (matchedData.fcmTokens as unknown[])
+              .filter((t): t is string => typeof t === 'string' && t.length <= 300)
+              .slice(0, 5)
+          : [];
+
+        const resolvedProfile: UserProfile = {
+          uid,
+          name: resolvedName,
+          phone: resolvedPhone,
+          email: resolvedEmail,
+          role: resolvedRole,
+          status: resolvedStatus,
+          parentAgentId: resolvedParentAgentId,
+          discountRate: resolvedDiscount,
+          balance: resolvedBalance,
+          fcmTokens: resolvedFcmTokens,
+          ...(typeof matchedData.rejectionReason === 'string' && matchedData.rejectionReason
+            ? { rejectionReason: matchedData.rejectionReason }
+            : {}),
+        };
+
+        // Immediately hydrate profile & open Home Screen with exact role & discountRate
+        pendingProfileLookupRef.current = false;
+        setFirestoreConnected(true);
+        setProfile(resolvedProfile);
+        persistProfileToLocalCache(resolvedProfile);
+        setProfileLoading(false);
+
+        // Auto-link UID (`setDoc` with `merge: true`) so `users/{uid}` and source doc are synced
+        const needsCanonicalDoc = matchedCol !== 'users' || matchedDocId !== uid;
+        if (needsCanonicalDoc) {
+          const canonicalPayload: Record<string, unknown> = {
+            uid,
+            name: resolvedName,
+            phone: resolvedPhone,
+            email: resolvedEmail,
+            role: resolvedRole,
+            status: resolvedStatus,
+            parentAgentId: resolvedParentAgentId,
+            discountRate: resolvedDiscount,
+            balance: resolvedBalance,
+            fcmTokens: resolvedFcmTokens,
+            linkedSourceId: matchedDocId,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          };
+          await setDoc(doc(db, 'users', uid), canonicalPayload, { merge: true }).catch(() => {
+            // Keep active resolved profile if network is transiently unavailable
+          });
+          await setDoc(
+            doc(db, matchedCol, matchedDocId),
+            {
+              uid,
+              updatedAt: serverTimestamp(),
+            },
+            { merge: true }
+          ).catch(() => {
+            // Non-blocking legacy link update
+          });
+        } else if (matchedData.uid !== uid) {
+          await setDoc(
+            doc(db, 'users', uid),
+            {
+              uid,
+              updatedAt: serverTimestamp(),
+            },
+            { merge: true }
+          ).catch(() => {});
+        }
+
+        return resolvedProfile;
+      } finally {
+        profileLookupRunningRef.current = null;
+      }
+    },
+    [adminDocApproved, appSettings.agentDiscountPercent, appSettings.clientDiscountPercent, bootstrapSuperAdminIfNeeded]
+  );
+
+  // Stable refs so Firestore onSnapshot listeners NEVER tear down & re-subscribe on callback/state identity changes
+  const bootstrapRef = useRef(bootstrapSuperAdminIfNeeded);
+  bootstrapRef.current = bootstrapSuperAdminIfNeeded;
+  const resolveProfileRef = useRef(resolveAndLinkUserProfile);
+  resolveProfileRef.current = resolveAndLinkUserProfile;
+  const adminDocApprovedRef = useRef(adminDocApproved);
+  adminDocApprovedRef.current = adminDocApproved;
+  const adminApprovalCheckingRef = useRef(adminApprovalChecking);
+  adminApprovalCheckingRef.current = adminApprovalChecking;
+  const clientDiscountPercentRef = useRef(appSettings.clientDiscountPercent);
+  clientDiscountPercentRef.current = appSettings.clientDiscountPercent;
+
+  // Separate Super Admin bootstrap effect (never unsubscribes/resubscribes user profile onSnapshot)
   useEffect(() => {
     const activeUser = auth.currentUser || firebaseUser;
-    if (!authReady || !activeUser) return;
+    if (!authReady || !activeUser || !userUid || needsAdminEmailVerification) return;
+    if (!isSuperAdminEmail(activeUser.email)) return;
+    if (activeUser.emailVerified || adminDocApproved) {
+      void bootstrapRef.current(activeUser);
+    }
+  }, [authReady, userUid, adminDocApproved, needsAdminEmailVerification, syncNonce]);
+
+  // Retry deferred bootstrap / profile lookup upon reconnection (WITHOUT calling enableNetwork mid-stream!)
+  useEffect(() => {
+    if (!isOnline || !firestoreConnected) return;
+    const activeUser = auth.currentUser || firebaseUser;
+    if (!authReady || !activeUser || !userUid) return;
+    if (
+      pendingBootstrapRef.current &&
+      isSuperAdminEmail(activeUser.email) &&
+      (activeUser.emailVerified || adminDocApprovedRef.current)
+    ) {
+      void bootstrapRef.current(activeUser);
+    }
+    if (pendingProfileLookupRef.current) {
+      void resolveProfileRef.current(activeUser);
+    }
+  }, [isOnline, firestoreConnected, authReady, userUid]);
+
+  // Listen to current user profile in real time with a STABLE subscription (zero target churn!)
+  useEffect(() => {
+    const activeUser = auth.currentUser || firebaseUser;
+    if (!authReady || !activeUser || !userUid) return;
     if (needsAdminEmailVerification) {
       setProfileLoading(false);
       return;
     }
 
     let cancelled = false;
-    let bootstrapInProgress = false;
     const isAdminAccount = isSuperAdminEmail(activeUser.email);
 
-    if (isAdminAccount && (activeUser.emailVerified || adminDocApproved)) {
-      bootstrapInProgress = true;
-      void bootstrapSuperAdminIfNeeded(activeUser).finally(() => {
-        bootstrapInProgress = false;
-        if (!cancelled) {
-          setProfileLoading((prev) => (prev ? false : prev));
-        }
-      });
+    // Hydrate from local cache or Super Admin recovery immediately so Home Screen opens without waiting
+    const cached = readProfileFromLocalCache(activeUser);
+    if (cached) {
+      setProfile((prev) => prev || cached);
+      setProfileLoading(false);
+    } else if (isAdminAccount) {
+      const adminProfile = buildSuperAdminProfile(activeUser);
+      setProfile((prev) => prev || adminProfile);
+      persistProfileToLocalCache(adminProfile);
+      setProfileLoading(false);
     }
 
-    const userDocPath = `users/${activeUser.uid}`;
+    const userDocPath = `users/${userUid}`;
     const unsub = onSnapshot(
-      doc(db, 'users', activeUser.uid),
+      doc(db, 'users', userUid),
       (snap) => {
         if (cancelled) return;
+        if (!snap.metadata.fromCache) {
+          setFirestoreConnected(true);
+        }
         if (snap.exists()) {
           const p = snap.data() as UserProfile;
           setProfile(p);
           if (p.role === 'super_admin' && p.status === 'active') {
             setAdminDocApproved(true);
           }
-          writeCachedJson(CACHE_PROFILE_KEY, {
-            uid: p.uid,
-            name: p.name,
-            phone: p.phone,
-            email: p.email,
-            role: p.role,
-            status: p.status,
-            parentAgentId: p.parentAgentId,
-            discountRate: p.discountRate,
-            balance: p.balance,
-          });
+          persistProfileToLocalCache(p);
           setProfileLoading(false);
-        } else if (!bootstrapInProgress && !adminApprovalChecking) {
-          setProfile(null);
-          writeCachedJson(CACHE_PROFILE_KEY, null);
-          setProfileLoading(false);
+        } else {
+          // Super Admin: NEVER show profile load error — automatically recreate Firestore doc in background
+          if (isAdminAccount) {
+            const adminProfile = buildSuperAdminProfile(activeUser);
+            setProfile((prev) =>
+              prev && prev.uid === userUid && prev.role === 'super_admin' ? prev : adminProfile
+            );
+            persistProfileToLocalCache(adminProfile);
+            setProfileLoading(false);
+            if (activeUser.emailVerified || adminDocApprovedRef.current) {
+              void bootstrapRef.current(activeUser);
+            }
+            return;
+          }
+
+          // If snapshot came from an empty local cache while offline/connecting, keep cached profile active!
+          const localCached = readProfileFromLocalCache(activeUser);
+          if (snap.metadata.fromCache && localCached) {
+            setProfile((prev) => prev || localCached);
+            setProfileLoading(false);
+            pendingProfileLookupRef.current = true;
+            return;
+          }
+
+          // Run Smart Multi-Strategy Lookup + Instant Auto-Recovery (UID -> Email -> Phone -> Auto-Create)
+          if (!adminApprovalCheckingRef.current) {
+            void resolveProfileRef.current(activeUser).then((resolved) => {
+              if (cancelled) return;
+              if (resolved) {
+                setProfile(resolved);
+                persistProfileToLocalCache(resolved);
+                setProfileLoading(false);
+              } else {
+                const fallbackCached = readProfileFromLocalCache(activeUser);
+                const emergencyProfile =
+                  fallbackCached ||
+                  buildAutoRecoveredProfile(
+                    activeUser,
+                    clientDiscountPercentRef.current,
+                    findCachedAccountInBackups(activeUser)
+                  );
+                setProfile(emergencyProfile);
+                persistProfileToLocalCache(emergencyProfile);
+                setProfileLoading(false);
+              }
+            });
+          }
         }
       },
       (err) => {
-        handleFirestoreError(err, OperationType.GET, userDocPath);
+        if (isFirestoreOfflineError(err)) {
+          setFirestoreConnected(false);
+          pendingProfileLookupRef.current = true;
+          const localCached = readProfileFromLocalCache(activeUser);
+          if (localCached) {
+            setProfile((prev) => prev || localCached);
+          } else if (isAdminAccount) {
+            const adminProfile = buildSuperAdminProfile(activeUser);
+            setProfile((prev) => prev || adminProfile);
+            persistProfileToLocalCache(adminProfile);
+          } else {
+            const offlineAuto = buildAutoRecoveredProfile(
+              activeUser,
+              clientDiscountPercentRef.current,
+              findCachedAccountInBackups(activeUser)
+            );
+            setProfile((prev) => prev || offlineAuto);
+            persistProfileToLocalCache(offlineAuto);
+          }
+        } else {
+          handleFirestoreError(err, OperationType.GET, userDocPath);
+          if (!isAdminAccount) {
+            const localCached = readProfileFromLocalCache(activeUser);
+            const safeFallback =
+              localCached ||
+              buildAutoRecoveredProfile(
+                activeUser,
+                clientDiscountPercentRef.current,
+                findCachedAccountInBackups(activeUser)
+              );
+            setProfile((prev) => prev || safeFallback);
+            persistProfileToLocalCache(safeFallback);
+          }
+        }
         if (!cancelled) setProfileLoading(false);
       }
     );
@@ -644,16 +1384,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       cancelled = true;
       unsub();
     };
-  }, [
-    authReady,
-    firebaseUser,
-    verificationVersion,
-    adminDocApproved,
-    adminApprovalChecking,
-    needsAdminEmailVerification,
-    bootstrapSuperAdminIfNeeded,
-    syncNonce,
-  ]);
+  }, [authReady, userUid, needsAdminEmailVerification, syncNonce]);
 
   // A. ALWAYS-ON LIGHTWEIGHT CORE LISTENERS (Home counters, Packages, Unread Notifications, Pending Queues)
   useEffect(() => {
@@ -894,7 +1625,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     return () => {
       unsubscribers.forEach((u) => u());
     };
-  }, [authReady, firebaseUser, profile?.uid, profile?.role, profile?.status, syncNonce]);
+  }, [authReady, userUid, profile?.uid, profile?.role, profile?.status, syncNonce]);
 
   // B. LAZY ROUTE-SCOPED LISTENERS (Update 12: Load on demand & auto-unsubscribe on screen exit!)
   useEffect(() => {
@@ -1017,7 +1748,14 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         onSnapshot(
           usersQuery,
           (snap) => {
-            setManagedUsers(snap.docs.map((d) => d.data() as UserProfile));
+            const list = snap.docs.map((d) => d.data() as UserProfile);
+            setManagedUsers(list);
+            if (isAdmin && list.length > 0) {
+              const serialized = list.map((u) =>
+                serializePlainAccountForBackup(u as unknown as Record<string, unknown>, u.uid)
+              );
+              writeCachedJson(CACHE_USERS_LIST_KEY, serialized);
+            }
           },
           (err) => handleFirestoreError(err, OperationType.LIST, 'users')
         )
@@ -1046,7 +1784,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     };
   }, [
     authReady,
-    firebaseUser,
+    userUid,
     profile?.uid,
     profile?.role,
     profile?.status,
@@ -1325,7 +2063,11 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     try {
       const ok = await testFirestoreConnection();
       setFirestoreConnected(ok);
+      const activeUser = auth.currentUser || firebaseUser;
       if (ok) {
+        if (activeUser && (!profile || pendingProfileLookupRef.current)) {
+          await resolveAndLinkUserProfile(activeUser);
+        }
         await flushOfflineSalesQueue();
       }
       setSyncNonce((n) => n + 1);
@@ -1337,7 +2079,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     } finally {
       setTimeout(() => setIsSyncing(false), 500);
     }
-  }, [flushOfflineSalesQueue, notifyError, notifySuccess]);
+  }, [firebaseUser, flushOfflineSalesQueue, notifyError, notifySuccess, profile, resolveAndLinkUserProfile]);
 
   const signOutUser = useCallback(async () => {
     try {
@@ -2819,12 +3561,19 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       const rate =
         input.discountRate ??
         (input.role === 'agent' ? appSettings.agentDiscountPercent : appSettings.clientDiscountPercent);
+      const normalizedPhoneDigits = normalizeDigits(input.phone)
+        .replace(/[^\d]/g, '')
+        .replace(/^00967|^967/, '');
+      const cleanPhone = (normalizedPhoneDigits.length >= 7 ? normalizedPhoneDigits : input.phone.trim()).slice(0, 20);
+      const cleanEmail = (
+        input.email?.trim().toLowerCase() || `${normalizedPhoneDigits || cleanPhone.replace(/[^\d]/g, '')}@taibah.net`
+      ).slice(0, 120);
       try {
         await setDoc(doc(db, 'users', uid), {
           uid,
           name: input.name.trim().slice(0, 100),
-          phone: input.phone.trim().slice(0, 20),
-          email: (input.email?.trim() || `${input.phone.replace(/[^\d]/g, '')}@taibah.net`).slice(0, 120),
+          phone: cleanPhone,
+          email: cleanEmail,
           role: input.role,
           status: 'active',
           parentAgentId: input.role === 'client' ? (input.parentAgentId || '').slice(0, 128) : '',
@@ -2989,6 +3738,16 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const exportCloudBackup = useCallback(async () => {
     if (!profile) return;
     try {
+      const serializedUsers = (profile.role === 'super_admin' ? managedUsers : [profile]).map((u) =>
+        serializePlainAccountForBackup(u as unknown as Record<string, unknown>, u.uid)
+      );
+      const serializedPackages = packages.slice(0, 20).map((p) => ({
+        id: p.id,
+        code: p.code,
+        price: p.price,
+        availableCount: p.availableCount,
+        soldCount: p.soldCount,
+      }));
       const backupPayload = {
         exportedAt: new Date().toISOString(),
         app: 'TAIBAH NET — كروت طيبة نت',
@@ -3005,6 +3764,37 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         notificationsCount: notifications.length,
         auditLogsCount: auditLogs.length,
       };
+      // Also store a cloud + local snapshot for Super Admin so one-click recovery can restore from it
+      if (profile.role === 'super_admin') {
+        const activeUid = auth.currentUser?.uid || profile.uid;
+        writeCachedJson(CACHE_USERS_LIST_KEY, serializedUsers);
+        writeCachedJson(CACHE_AUTO_BACKUP_KEY, {
+          backupType: 'manual_backup',
+          createdBy: activeUid,
+          createdAt: new Date().toISOString(),
+          usersCount: serializedUsers.length,
+          clientsCount: 0,
+          salesCount: sales.length,
+          customersCount: customers.length,
+          users: serializedUsers,
+          clients: [],
+          packages: serializedPackages,
+        });
+        await setDoc(doc(db, 'backups', `manual_backup_${Date.now()}`), {
+          backupType: 'manual_backup',
+          createdBy: activeUid,
+          createdAt: serverTimestamp(),
+          scope: 'manual_export',
+          usersCount: serializedUsers.length,
+          clientsCount: 0,
+          salesCount: sales.length,
+          customersCount: customers.length,
+          users: serializedUsers.slice(0, 500),
+          clients: [],
+          packages: serializedPackages,
+        }).catch(() => {});
+      }
+
       const blob = new Blob([JSON.stringify(backupPayload, null, 2)], {
         type: 'application/json;charset=utf-8',
       });
@@ -3016,8 +3806,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-      await writeAuditLog('نسخة احتياطية سحابية', 'تم تصدير ملف النسخة الاحتياطية الكاملة JSON');
-      notifySuccess('تم تنزيل ملف النسخة الاحتياطية بنجاح');
+      await writeAuditLog('نسخة احتياطية سحابية', 'تم تصدير وحفظ النسخة الاحتياطية الكاملة (سحابياً + JSON)');
+      notifySuccess('تم تنزيل وحفظ النسخة الاحتياطية السحابية بنجاح');
     } catch {
       notifyError('فشل التصدير');
     }
@@ -3039,7 +3829,845 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   ]);
 
   // =========================================================================
-  // SUPER ADMIN ONLY: COMPLETE CLOUD + LOCAL APP DATA RESET (500-doc writeBatch)
+  // SUPER ADMIN ONLY: RESTORE DELETED AGENTS & CLIENTS FROM ALL SOURCES
+  // 1) Cloud Backups (`backups`) + Local Backups (`localStorage` & `IndexedDB`)
+  // 2) Historical logs & records (`auditLogs`, `audit_logs`, `registrationRequests`,
+  //    `topupRequests`, `sales`, `customers`, `passwordResetRequests`)
+  // Writes recovered accounts cleanly to BOTH `users` and `clients` via writeBatch
+  // =========================================================================
+  const restoreDeletedAgentsAndClients = useCallback(
+    async (
+      onProgress?: (stage: string) => void
+    ): Promise<{
+      ok: boolean;
+      restoredCount: number;
+      updatedClientsMirrorCount: number;
+      totalFound: number;
+      sourcesSummary: string;
+      summary: string;
+    }> => {
+      const activeUser = auth.currentUser || firebaseUser;
+      if (!activeUser || !profile || profile.role !== 'super_admin') {
+        const msg = 'هذه الأداة محصورة بالمدير العام (super_admin) فقط.';
+        notifyError('صلاحية غير كافية', msg);
+        return {
+          ok: false,
+          restoredCount: 0,
+          updatedClientsMirrorCount: 0,
+          totalFound: 0,
+          sourcesSummary: '',
+          summary: msg,
+        };
+      }
+
+      if (!navigator.onLine) {
+        const msg = 'يرجى التأكد من الاتصال بالإنترنت لاسترجاع الحسابات ومزامنتها مع قاعدة البيانات السحابية.';
+        notifyWarning('لا يوجد اتصال بالإنترنت', msg);
+        return {
+          ok: false,
+          restoredCount: 0,
+          updatedClientsMirrorCount: 0,
+          totalFound: 0,
+          sourcesSummary: '',
+          summary: msg,
+        };
+      }
+
+      interface RecoveredCandidate {
+        uid: string;
+        name: string;
+        phone: string;
+        email: string;
+        role: 'agent' | 'client';
+        status: 'active' | 'pending' | 'rejected' | 'suspended';
+        parentAgentId: string;
+        discountRate: number;
+        balance: number;
+        priority: number;
+        source: string;
+      }
+
+      const defaultAgentRate = appSettings.agentDiscountPercent || 70;
+      const defaultClientRate = appSettings.clientDiscountPercent || 80;
+      const adminPhone = SUPER_ADMIN_CONFIG.phone;
+      const isSuperAdminIdentity = (uid: string, email: string, phone: string) => {
+        if (uid && uid === activeUser.uid) return true;
+        if (email && isSuperAdminEmail(email)) return true;
+        if (phone && phone === adminPhone) return true;
+        return false;
+      };
+
+      const candidatesByKey = new Map<string, RecoveredCandidate>();
+      const sourceHitCounts = new Map<string, number>();
+
+      const bumpSource = (src: string) => {
+        sourceHitCounts.set(src, (sourceHitCounts.get(src) || 0) + 1);
+      };
+
+      const isValidDocId = (id: string) => /^[a-zA-Z0-9_-]{1,128}$/.test(id);
+
+      const addCandidate = (input: {
+        uid?: unknown;
+        name?: unknown;
+        phone?: unknown;
+        email?: unknown;
+        role?: unknown;
+        status?: unknown;
+        parentAgentId?: unknown;
+        discountRate?: unknown;
+        balance?: unknown;
+        priority: number;
+        source: string;
+      }) => {
+        const rawEmail = typeof input.email === 'string' ? input.email.trim().toLowerCase() : '';
+        let phone = normalizePhoneDigits(input.phone);
+        if (!phone && rawEmail.includes('@')) {
+          phone = normalizePhoneDigits(rawEmail.split('@')[0]);
+        }
+        const rawUid = typeof input.uid === 'string' && isValidDocId(input.uid.trim()) ? input.uid.trim() : '';
+        const email = rawEmail && rawEmail.includes('@') ? rawEmail.slice(0, 120) : phone ? `${phone}@taibah.net` : '';
+
+        if (!phone && !email && !rawUid) return;
+        if (isSuperAdminIdentity(rawUid, email, phone)) return;
+
+        const key = phone ? `p:${phone}` : email ? `e:${email}` : `u:${rawUid}`;
+        const parsedRole: 'agent' | 'client' = input.role === 'agent' ? 'agent' : 'client';
+        const parsedStatus: 'active' | 'pending' | 'rejected' | 'suspended' =
+          input.status === 'suspended' ? 'suspended' : 'active';
+        const rawName = typeof input.name === 'string' ? input.name.trim() : '';
+        const cleanName =
+          rawName.length >= 2 && !rawName.startsWith('حساب ')
+            ? rawName.slice(0, 100)
+            : rawName.length >= 2
+            ? rawName.slice(0, 100)
+            : phone
+            ? `حساب ${phone}`
+            : 'عميل طيبة نت';
+        const parsedDiscount =
+          typeof input.discountRate === 'number' && input.discountRate >= 1 && input.discountRate <= 100
+            ? input.discountRate
+            : parsedRole === 'agent'
+            ? defaultAgentRate
+            : defaultClientRate;
+        const parsedBalance = typeof input.balance === 'number' && Number.isFinite(input.balance) ? input.balance : 0;
+        const parsedParent =
+          typeof input.parentAgentId === 'string' && input.parentAgentId.trim()
+            ? input.parentAgentId.trim().slice(0, 128)
+            : '';
+
+        const existing = candidatesByKey.get(key);
+        if (!existing) {
+          candidatesByKey.set(key, {
+            uid: rawUid,
+            name: cleanName,
+            phone: (phone || '770000000').slice(0, 20),
+            email: (email || `${phone || rawUid}@taibah.net`).slice(0, 120),
+            role: parsedRole,
+            status: parsedStatus,
+            parentAgentId: parsedParent,
+            discountRate: parsedDiscount,
+            balance: parsedBalance,
+            priority: input.priority,
+            source: input.source,
+          });
+          bumpSource(input.source);
+          return;
+        }
+
+        // Merge with higher-priority or richer details (never downgrade an authoritative 'agent' to 'client')
+        const mergedRole: 'agent' | 'client' =
+          existing.role === 'agent' || (parsedRole === 'agent' && input.priority >= 60) ? 'agent' : 'client';
+        const preferIncomingName =
+          (existing.name.startsWith('حساب ') || existing.name === 'عميل طيبة نت' || input.priority > existing.priority) &&
+          rawName.length >= 2 &&
+          !rawName.startsWith('حساب ');
+        const mergedUid =
+          existing.uid && !existing.uid.startsWith('rec_') && !existing.uid.startsWith('usr_')
+            ? existing.uid
+            : rawUid || existing.uid;
+        const mergedDiscount =
+          mergedRole === 'agent'
+            ? existing.role === 'agent'
+              ? existing.discountRate
+              : defaultAgentRate
+            : input.priority > existing.priority
+            ? parsedDiscount
+            : existing.discountRate;
+
+        candidatesByKey.set(key, {
+          uid: mergedUid,
+          name: preferIncomingName ? cleanName : existing.name,
+          phone: phone || existing.phone,
+          email: rawEmail && rawEmail.includes('@') && input.priority >= existing.priority ? email : existing.email,
+          role: mergedRole,
+          status: input.priority > existing.priority ? parsedStatus : existing.status,
+          parentAgentId: existing.parentAgentId || parsedParent,
+          discountRate: mergedDiscount,
+          balance: existing.balance !== 0 ? existing.balance : parsedBalance,
+          priority: Math.max(existing.priority, input.priority),
+          source: input.priority > existing.priority ? input.source : existing.source,
+        });
+      };
+
+      const extractFromFreeText = (text: string, sourceLabel: string, priority: number, fallbackUid?: string) => {
+        if (!text) return;
+        const normalized = normalizeDigits(text);
+        const phoneMatches = normalized.match(/(?:00967|967)?(7[01378]\d{7})/g) || [];
+        const emailMatches = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g) || [];
+        const isAgentHint = /وكيل|70%|تخفيض\s*70|ترقية\s*إلى\s*وكيل/i.test(text);
+        const roleGuess: 'agent' | 'client' = isAgentHint ? 'agent' : 'client';
+
+        // Extract Arabic name before phone number in parentheses or after action keywords
+        const parenNameMatch = text.match(
+          /(?:الوكيل|العميل|حساب|المستخدم|تقدّم|الموافقة على|اعتماد|إنشاء|إضافة|حذف)?\s*([^\d():,\-–—\n]{2,45}?)\s*\(\s*(?:00967|967)?7[01378]\d{7}\s*\)/
+        );
+        const guessedName = parenNameMatch?.[1]?.trim() || '';
+
+        for (const pm of phoneMatches) {
+          const p = normalizePhoneDigits(pm);
+          if (!p) continue;
+          addCandidate({
+            uid: fallbackUid,
+            name: guessedName || `حساب ${p}`,
+            phone: p,
+            email: emailMatches[0] || `${p}@taibah.net`,
+            role: roleGuess,
+            status: 'active',
+            discountRate: roleGuess === 'agent' ? defaultAgentRate : defaultClientRate,
+            priority,
+            source: sourceLabel,
+          });
+        }
+        for (const em of emailMatches) {
+          const p = normalizePhoneDigits(em.split('@')[0]);
+          addCandidate({
+            uid: fallbackUid,
+            name: guessedName || (p ? `حساب ${p}` : em.split('@')[0]),
+            phone: p,
+            email: em,
+            role: roleGuess,
+            status: 'active',
+            discountRate: roleGuess === 'agent' ? defaultAgentRate : defaultClientRate,
+            priority,
+            source: sourceLabel,
+          });
+        }
+      };
+
+      try {
+        // Step 0: Snapshot current live `users` & `clients` collections in Firestore
+        onProgress?.('جاري فحص الحسابات الحالية في السحابة (users & clients)...');
+        const [liveUsersSnap, liveClientsSnap] = await Promise.all([
+          getDocs(collection(db, 'users')),
+          getDocs(collection(db, 'clients')).catch(() => null),
+        ]);
+
+        const liveUsersById = new Map<string, Record<string, unknown>>();
+        const liveUsersByPhone = new Map<string, { id: string; data: Record<string, unknown> }>();
+        const liveUsersByEmail = new Map<string, { id: string; data: Record<string, unknown> }>();
+        for (const d of liveUsersSnap.docs) {
+          const data = d.data() as Record<string, unknown>;
+          liveUsersById.set(d.id, data);
+          const p = normalizePhoneDigits(data.phone);
+          const em = typeof data.email === 'string' ? data.email.trim().toLowerCase() : '';
+          if (p) liveUsersByPhone.set(p, { id: d.id, data });
+          if (em) liveUsersByEmail.set(em, { id: d.id, data });
+        }
+
+        const liveClientsById = new Map<string, Record<string, unknown>>();
+        const liveClientsByPhone = new Map<string, { id: string; data: Record<string, unknown> }>();
+        if (liveClientsSnap) {
+          for (const d of liveClientsSnap.docs) {
+            const data = d.data() as Record<string, unknown>;
+            liveClientsById.set(d.id, data);
+            const p = normalizePhoneDigits(data.phone);
+            if (p) liveClientsByPhone.set(p, { id: d.id, data });
+            // Any account currently only in `clients` is also a top-priority candidate for `users`!
+            addCandidate({
+              uid: (typeof data.uid === 'string' && data.uid) || d.id,
+              name: data.name,
+              phone: data.phone,
+              email: data.email,
+              role: data.role,
+              status: data.status,
+              parentAgentId: data.parentAgentId,
+              discountRate: data.discountRate,
+              balance: data.balance,
+              priority: 95,
+              source: 'مجموعة clients السحابية',
+            });
+          }
+        }
+
+        // Step 1A: Scan Firestore `backups` collection
+        onProgress?.('جاري مسح النسخ الاحتياطية السحابية (backups)...');
+        try {
+          const backupsSnap = await getDocs(query(collection(db, 'backups'), limit(30)));
+          const sortedBackups = [...backupsSnap.docs].sort((a, b) => {
+            const ta = (a.data().createdAt as Timestamp | undefined)?.toMillis?.() ?? 0;
+            const tb = (b.data().createdAt as Timestamp | undefined)?.toMillis?.() ?? 0;
+            return tb - ta;
+          });
+          for (const bDoc of sortedBackups) {
+            const bData = bDoc.data() as {
+              users?: Array<Record<string, unknown>>;
+              clients?: Array<Record<string, unknown>>;
+            };
+            if (Array.isArray(bData.users)) {
+              for (const u of bData.users) {
+                if (!u || typeof u !== 'object') continue;
+                addCandidate({
+                  uid: u.uid,
+                  name: u.name,
+                  phone: u.phone,
+                  email: u.email,
+                  role: u.role,
+                  status: u.status,
+                  parentAgentId: u.parentAgentId,
+                  discountRate: u.discountRate,
+                  balance: u.balance,
+                  priority: 100,
+                  source: 'النسخ الاحتياطية السحابية',
+                });
+              }
+            }
+            if (Array.isArray(bData.clients)) {
+              for (const c of bData.clients) {
+                if (!c || typeof c !== 'object') continue;
+                addCandidate({
+                  uid: c.uid,
+                  name: c.name,
+                  phone: c.phone,
+                  email: c.email,
+                  role: c.role,
+                  status: c.status,
+                  parentAgentId: c.parentAgentId,
+                  discountRate: c.discountRate,
+                  balance: c.balance,
+                  priority: 98,
+                  source: 'النسخ الاحتياطية السحابية',
+                });
+              }
+            }
+          }
+        } catch {
+          // Ignore if backups collection is empty
+        }
+
+        // Step 1B: Scan Local Backups (`localStorage` & non-Firebase `IndexedDB`)
+        onProgress?.('جاري فحص النسخ المحلية في localStorage و IndexedDB...');
+        try {
+          const localAutoBackup = readCachedJson<{
+            users?: Array<Record<string, unknown>>;
+            clients?: Array<Record<string, unknown>>;
+          } | null>(CACHE_AUTO_BACKUP_KEY, null);
+          if (localAutoBackup?.users && Array.isArray(localAutoBackup.users)) {
+            for (const u of localAutoBackup.users) {
+              addCandidate({
+                uid: u.uid,
+                name: u.name,
+                phone: u.phone,
+                email: u.email,
+                role: u.role,
+                status: u.status,
+                parentAgentId: u.parentAgentId,
+                discountRate: u.discountRate,
+                balance: u.balance,
+                priority: 92,
+                source: 'النسخ المحلية (localStorage)',
+              });
+            }
+          }
+          if (localAutoBackup?.clients && Array.isArray(localAutoBackup.clients)) {
+            for (const c of localAutoBackup.clients) {
+              addCandidate({
+                uid: c.uid,
+                name: c.name,
+                phone: c.phone,
+                email: c.email,
+                role: c.role,
+                status: c.status,
+                parentAgentId: c.parentAgentId,
+                discountRate: c.discountRate,
+                balance: c.balance,
+                priority: 90,
+                source: 'النسخ المحلية (localStorage)',
+              });
+            }
+          }
+
+          const cachedUsers = readCachedJson<Array<Record<string, unknown>>>(CACHE_USERS_LIST_KEY, []);
+          if (Array.isArray(cachedUsers)) {
+            for (const u of cachedUsers) {
+              addCandidate({
+                uid: u.uid,
+                name: u.name,
+                phone: u.phone,
+                email: u.email,
+                role: u.role,
+                status: u.status,
+                parentAgentId: u.parentAgentId,
+                discountRate: u.discountRate,
+                balance: u.balance,
+                priority: 91,
+                source: 'النسخ المحلية (localStorage)',
+              });
+            }
+          }
+
+          for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (!key) continue;
+            if (
+              key.startsWith(CACHE_PROFILE_UID_PREFIX) ||
+              key.startsWith(CACHE_PROFILE_EMAIL_PREFIX)
+            ) {
+              const pObj = readCachedJson<Record<string, unknown> | null>(key, null);
+              if (pObj) {
+                addCandidate({
+                  uid: pObj.uid,
+                  name: pObj.name,
+                  phone: pObj.phone,
+                  email: pObj.email,
+                  role: pObj.role,
+                  status: pObj.status,
+                  parentAgentId: pObj.parentAgentId,
+                  discountRate: pObj.discountRate,
+                  balance: pObj.balance,
+                  priority: 88,
+                  source: 'ذاكرة الملفات المحلية',
+                });
+              }
+            } else if (key.startsWith(CACHE_SALES_PREFIX)) {
+              const cachedSales = readCachedJson<Array<Record<string, unknown>>>(key, []);
+              if (Array.isArray(cachedSales)) {
+                for (const s of cachedSales) {
+                  if (s && (s.buyerRole === 'agent' || s.buyerRole === 'client')) {
+                    addCandidate({
+                      uid: s.buyerId,
+                      name: s.buyerName,
+                      phone: s.buyerPhone,
+                      role: s.buyerRole,
+                      discountRate: s.discountRate,
+                      priority: 72,
+                      source: 'فواتير الكاش المحلي',
+                    });
+                  }
+                }
+              }
+            } else if (key.startsWith(CACHE_CUSTOMERS_PREFIX)) {
+              const cachedCustomers = readCachedJson<Array<Record<string, unknown>>>(key, []);
+              if (Array.isArray(cachedCustomers)) {
+                for (const c of cachedCustomers) {
+                  if (c && normalizePhoneDigits(c.phone)) {
+                    const cat = typeof c.category === 'string' ? c.category : '';
+                    addCandidate({
+                      name: c.name,
+                      phone: c.phone,
+                      role: /وكيل/.test(cat) ? 'agent' : 'client',
+                      priority: 52,
+                      source: 'عملاء الكاش المحلي',
+                    });
+                  }
+                }
+              }
+            }
+          }
+        } catch {
+          // Ignore localStorage access restrictions
+        }
+
+        // Non-destructive scan of any app-owned IndexedDB databases (strictly skipping firebase internal DBs)
+        try {
+          const idb = window.indexedDB as IDBFactory & {
+            databases?: () => Promise<Array<{ name?: string }>>;
+          };
+          if (typeof idb?.databases === 'function') {
+            const dbs = await idb.databases();
+            const appDbs = dbs.filter(
+              (d) =>
+                !!d.name &&
+                d.name.toLowerCase().includes('taibah') &&
+                !d.name.toLowerCase().includes('firebase')
+            );
+            for (const entry of appDbs) {
+              await new Promise<void>((resolve) => {
+                const openReq = window.indexedDB.open(entry.name!);
+                openReq.onerror = () => resolve();
+                openReq.onsuccess = () => {
+                  const idbConn = openReq.result;
+                  const storeNames = Array.from(idbConn.objectStoreNames);
+                  if (storeNames.length === 0) {
+                    idbConn.close();
+                    resolve();
+                    return;
+                  }
+                  let remaining = storeNames.length;
+                  for (const sName of storeNames) {
+                    try {
+                      const tx = idbConn.transaction(sName, 'readonly');
+                      const req = tx.objectStore(sName).getAll();
+                      req.onsuccess = () => {
+                        const rows = Array.isArray(req.result) ? req.result : [];
+                        for (const row of rows) {
+                          if (!row || typeof row !== 'object') continue;
+                          const obj = row as Record<string, unknown>;
+                          if (obj.phone || obj.email || obj.buyerPhone) {
+                            addCandidate({
+                              uid: obj.uid || obj.buyerId,
+                              name: obj.name || obj.buyerName,
+                              phone: obj.phone || obj.buyerPhone,
+                              email: obj.email,
+                              role: obj.role || obj.buyerRole,
+                              discountRate: obj.discountRate,
+                              priority: 86,
+                              source: 'IndexedDB المحلي',
+                            });
+                          }
+                        }
+                        remaining--;
+                        if (remaining <= 0) {
+                          idbConn.close();
+                          resolve();
+                        }
+                      };
+                      req.onerror = () => {
+                        remaining--;
+                        if (remaining <= 0) {
+                          idbConn.close();
+                          resolve();
+                        }
+                      };
+                    } catch {
+                      remaining--;
+                      if (remaining <= 0) {
+                        idbConn.close();
+                        resolve();
+                      }
+                    }
+                  }
+                };
+              });
+            }
+          }
+        } catch {
+          // Ignore IndexedDB scan errors
+        }
+
+        // Step 2: Scan Historical Logs, Requests, Sales, and Ledger Customers in Firestore
+        onProgress?.('جاري تحليل سجل العمليات (auditLogs / audit_logs) والطلبات والفواتير التاريخية...');
+
+        const [
+          auditSnapA,
+          auditSnapB,
+          regReqSnap,
+          topupSnap,
+          salesSnap,
+          customersSnap,
+          pwdResetSnap,
+        ] = await Promise.all([
+          getDocs(query(collection(db, 'auditLogs'), limit(500))).catch(() => null),
+          getDocs(query(collection(db, 'audit_logs'), limit(500))).catch(() => null),
+          getDocs(query(collection(db, 'registrationRequests'), limit(500))).catch(() => null),
+          getDocs(query(collection(db, 'topupRequests'), limit(500))).catch(() => null),
+          getDocs(query(collection(db, 'sales'), limit(500))).catch(() => null),
+          getDocs(query(collection(db, 'customers'), limit(500))).catch(() => null),
+          getDocs(query(collection(db, 'passwordResetRequests'), limit(500))).catch(() => null),
+        ]);
+
+        // 2a. Registration Requests (authoritative role + UID + phone + email)
+        if (regReqSnap) {
+          for (const d of regReqSnap.docs) {
+            const data = d.data() as Record<string, unknown>;
+            if (data.status === 'rejected') continue;
+            addCandidate({
+              uid: data.applicantUid,
+              name: data.name,
+              phone: data.phone,
+              email: data.email,
+              role: data.requestedRole,
+              status: 'active',
+              parentAgentId: data.parentAgentId,
+              priority: 82,
+              source: 'طلبات الانضمام التاريخية',
+            });
+          }
+        }
+
+        // 2b. Topup Requests (authoritative requesterId + requesterRole + discountRate)
+        if (topupSnap) {
+          for (const d of topupSnap.docs) {
+            const data = d.data() as Record<string, unknown>;
+            addCandidate({
+              uid: data.requesterId,
+              name: data.requesterName,
+              phone: data.requesterPhone,
+              role: data.requesterRole,
+              discountRate: data.discountRate,
+              status: 'active',
+              priority: 85,
+              source: 'طلبات التغذية التاريخية',
+            });
+          }
+        }
+
+        // 2c. Sales & Wholesale Invoices
+        if (salesSnap) {
+          for (const d of salesSnap.docs) {
+            const data = d.data() as Record<string, unknown>;
+            const buyerRole = data.buyerRole;
+            if (buyerRole === 'agent' || buyerRole === 'client') {
+              addCandidate({
+                uid: data.buyerId,
+                name: data.buyerName,
+                phone: data.buyerPhone,
+                role: buyerRole,
+                discountRate: data.discountRate,
+                status: 'active',
+                priority: 76,
+                source: 'الفواتير والمبيعات التاريخية',
+              });
+            }
+          }
+        }
+
+        // 2d. Audit Logs (`auditLogs` + legacy `audit_logs`)
+        for (const snap of [auditSnapA, auditSnapB]) {
+          if (!snap) continue;
+          for (const d of snap.docs) {
+            const data = d.data() as Record<string, unknown>;
+            const details = typeof data.details === 'string' ? data.details : '';
+            const action = typeof data.action === 'string' ? data.action : '';
+            extractFromFreeText(`${action} ${details}`, 'سجل العمليات (Audit Log)', 68);
+          }
+        }
+
+        // 2e. Password Reset Requests
+        if (pwdResetSnap) {
+          for (const d of pwdResetSnap.docs) {
+            const data = d.data() as Record<string, unknown>;
+            const ident = typeof data.identifier === 'string' ? data.identifier.trim() : '';
+            const phone = normalizePhoneDigits(data.phone) || normalizePhoneDigits(ident);
+            const email = ident.includes('@') ? ident.toLowerCase() : '';
+            if (phone || email) {
+              addCandidate({
+                uid: data.requesterUid,
+                name: data.name || (phone ? `حساب ${phone}` : email.split('@')[0]),
+                phone,
+                email,
+                role: 'client',
+                status: 'active',
+                priority: 60,
+                source: 'طلبات استعادة المرور',
+              });
+            }
+          }
+        }
+
+        // 2f. Customers Ledger Accounts (with valid phone numbers)
+        if (customersSnap) {
+          for (const d of customersSnap.docs) {
+            const data = d.data() as Record<string, unknown>;
+            const phone = normalizePhoneDigits(data.phone);
+            if (!phone) continue;
+            const cat = typeof data.category === 'string' ? data.category : '';
+            addCandidate({
+              name: data.name,
+              phone,
+              role: /وكيل/.test(cat) ? 'agent' : 'client',
+              status: 'active',
+              priority: 55,
+              source: 'حسابات العملاء والدفتر',
+            });
+          }
+        }
+
+        // Step 3: Batch-write all recovered accounts into BOTH `users` and `clients`
+        const allCandidates = Array.from(candidatesByKey.values());
+        onProgress?.(`تم العثور على ${allCandidates.length} حساب مرشح — جاري الاسترجاع والكتابة في السحابة...`);
+
+        interface WriteItem {
+          targetId: string;
+          candidate: RecoveredCandidate;
+          writeUser: boolean;
+          writeClient: boolean;
+          preserveExistingCreatedAt?: Timestamp;
+          preserveExistingBalance?: number;
+        }
+
+        const itemsToWrite: WriteItem[] = [];
+        for (const cand of allCandidates) {
+          const existingUser =
+            (cand.uid && liveUsersById.has(cand.uid)
+              ? { id: cand.uid, data: liveUsersById.get(cand.uid)! }
+              : null) ||
+            (cand.phone && liveUsersByPhone.get(cand.phone)) ||
+            (cand.email && liveUsersByEmail.get(cand.email)) ||
+            null;
+
+          const targetId =
+            existingUser?.id ||
+            (cand.uid && isValidDocId(cand.uid) ? cand.uid : `rec_${cand.phone.replace(/[^\d]/g, '') || Date.now()}`);
+
+          const hasUserDoc = !!existingUser;
+          const needsRoleRestore =
+            hasUserDoc &&
+            existingUser.data.role === 'client' &&
+            cand.role === 'agent' &&
+            cand.priority >= 75;
+          const hasClientMirror =
+            liveClientsById.has(targetId) || (!!cand.phone && liveClientsByPhone.has(cand.phone));
+
+          if (!hasUserDoc || needsRoleRestore || !hasClientMirror) {
+            itemsToWrite.push({
+              targetId,
+              candidate: cand,
+              writeUser: !hasUserDoc || needsRoleRestore,
+              writeClient: !hasClientMirror || needsRoleRestore,
+              preserveExistingCreatedAt: existingUser?.data.createdAt as Timestamp | undefined,
+              preserveExistingBalance:
+                typeof existingUser?.data.balance === 'number' ? existingUser.data.balance : undefined,
+            });
+          }
+        }
+
+        let restoredCount = 0;
+        let updatedClientsMirrorCount = 0;
+        const CHUNK_SIZE = 200; // Up to 400 writes per batch (< 500 Firestore batch limit)
+
+        for (let i = 0; i < itemsToWrite.length; i += CHUNK_SIZE) {
+          const chunk = itemsToWrite.slice(i, i + CHUNK_SIZE);
+          const batch = writeBatch(db);
+          for (const item of chunk) {
+            const c = item.candidate;
+            const finalRole = c.role;
+            const finalDiscount =
+              finalRole === 'agent'
+                ? c.discountRate > 0 && c.discountRate <= 100
+                  ? c.discountRate
+                  : defaultAgentRate
+                : c.discountRate > 0 && c.discountRate <= 100
+                ? c.discountRate
+                : defaultClientRate;
+            const finalBalance =
+              item.preserveExistingBalance !== undefined ? item.preserveExistingBalance : c.balance;
+
+            if (item.writeUser) {
+              batch.set(doc(db, 'users', item.targetId), {
+                uid: item.targetId,
+                name: c.name.slice(0, 100),
+                phone: c.phone.slice(0, 20),
+                email: c.email.slice(0, 120),
+                role: finalRole,
+                status: 'active',
+                parentAgentId: c.parentAgentId.slice(0, 128),
+                discountRate: finalDiscount,
+                balance: finalBalance,
+                fcmTokens: [],
+                createdAt: item.preserveExistingCreatedAt || serverTimestamp(),
+                updatedAt: serverTimestamp(),
+              });
+              restoredCount++;
+            }
+
+            if (item.writeClient) {
+              batch.set(doc(db, 'clients', item.targetId), {
+                uid: item.targetId,
+                name: c.name.slice(0, 100),
+                phone: c.phone.slice(0, 20),
+                email: c.email.slice(0, 120),
+                role: finalRole,
+                status: 'active',
+                parentAgentId: c.parentAgentId.slice(0, 128),
+                discountRate: finalDiscount,
+                balance: finalBalance,
+                createdAt: item.preserveExistingCreatedAt || serverTimestamp(),
+                updatedAt: serverTimestamp(),
+              });
+              updatedClientsMirrorCount++;
+            }
+          }
+          await batch.commit();
+          onProgress?.(
+            `جاري الاسترجاع السحابي... (${Math.min(i + chunk.length, itemsToWrite.length)} / ${itemsToWrite.length})`
+          );
+        }
+
+        // Refresh local cache with all live + recovered accounts
+        const mergedCacheList = allCandidates.map((c) =>
+          serializePlainAccountForBackup(c as unknown as Record<string, unknown>, c.uid || `rec_${c.phone}`)
+        );
+        if (mergedCacheList.length > 0) {
+          writeCachedJson(CACHE_USERS_LIST_KEY, mergedCacheList);
+        }
+
+        const sourcesSummary = Array.from(sourceHitCounts.entries())
+          .map(([src, cnt]) => `${src} (${cnt})`)
+          .join(' • ');
+
+        const summary =
+          restoredCount > 0
+            ? `تم استرجاع ${restoredCount} حساب وكيل/عميل بنجاح ومزامنة ${updatedClientsMirrorCount} سجل في مجموعة clients ✅`
+            : updatedClientsMirrorCount > 0
+            ? `جميع حسابات الوكلاء والعملاء موجودة بالفعل (${allCandidates.length} حساب) وتمت مزامنة ${updatedClientsMirrorCount} سجل في clients ✅`
+            : allCandidates.length > 0
+            ? `تم فحص جميع المصادر (${allCandidates.length} حساب) — جميع حسابات الوكلاء والعملاء سليمة وموجودة بالفعل ✅`
+            : 'تم فحص النسخ الاحتياطية والسجلات التاريخية ولم يتم العثور على حسابات محذوفة إضافية.';
+
+        await writeAuditLog(
+          'استرجاع الوكلاء والعملاء',
+          `فحص ${allCandidates.length} حساب مرشح • استرجاع ${restoredCount} حساب في users ومزامنة ${updatedClientsMirrorCount} في clients`
+        );
+
+        if (restoredCount > 0 || updatedClientsMirrorCount > 0) {
+          notifySuccess(summary);
+        } else {
+          notifyInfo('نتيجة فحص الاسترجاع', summary);
+        }
+
+        return {
+          ok: true,
+          restoredCount,
+          updatedClientsMirrorCount,
+          totalFound: allCandidates.length,
+          sourcesSummary,
+          summary,
+        };
+      } catch (err) {
+        handleFirestoreError(err, OperationType.WRITE, 'restoreDeletedAgentsAndClients');
+        const msg =
+          err instanceof Error && err.message
+            ? `تعذر إكمال عملية الاسترجاع: ${err.message}`
+            : 'تعذر إكمال عملية الاسترجاع، يرجى التحقق من الاتصال والمحاولة مجدداً.';
+        notifyError('فشل الاسترجاع', msg);
+        return {
+          ok: false,
+          restoredCount: 0,
+          updatedClientsMirrorCount: 0,
+          totalFound: 0,
+          sourcesSummary: '',
+          summary: msg,
+        };
+      }
+    },
+    [
+      appSettings.agentDiscountPercent,
+      appSettings.clientDiscountPercent,
+      firebaseUser,
+      notifyError,
+      notifyInfo,
+      notifySuccess,
+      notifyWarning,
+      profile,
+      writeAuditLog,
+    ]
+  );
+
+  // =========================================================================
+  // SUPER ADMIN ONLY: SAFE CLOUD + LOCAL APP DATA RESET (500-doc writeBatch)
+  // 1) Mandatory `auto_backup` in Firestore (`backups`) + `localStorage` BEFORE any deletion
+  // 2) Resets ONLY cards, sales, invoices, ledger/topup/notifications & zeroes balances to 0
+  // 3) STRICTLY PRESERVES Super Admin + ALL registered Agents & Clients (never deleted!)
   // =========================================================================
   const resetAppData = useCallback(
     async (
@@ -3059,7 +4687,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (!navigator.onLine) {
         return {
           ok: false,
-          error: 'يتطلب تصفير البيانات السحابية اتصالاً نشطاً بالإنترنت لضمان حذف جميع السجلات بشكل كامل.',
+          error: 'يتطلب تصفير البيانات السحابية اتصالاً نشطاً بالإنترنت لضمان أخذ النسخة الاحتياطية وتصفير السجلات بأمان.',
           deletedCount: 0,
         };
       }
@@ -3147,6 +4775,63 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
       let totalDeleted = 0;
       try {
+        // =====================================================================
+        // MANDATORY STEP 0: AUTOMATIC `auto_backup` BEFORE ANY DELETION
+        // =====================================================================
+        onProgress?.('جاري إنشاء نسخة احتياطية تلقائية (auto_backup) في السحابة والهاتف قبل التصفير...');
+        currentStepPath = 'backups/auto_backup';
+        const [usersPreSnap, clientsPreSnap, pkgPreSnap, salesPreSnap, customersPreSnap] = await Promise.all([
+          getDocs(collection(db, 'users')),
+          getDocs(collection(db, 'clients')).catch(() => null),
+          getDocs(query(collection(db, 'packages'), where('price', '>', 0))).catch(() => null),
+          getDocs(query(collection(db, 'sales'), limit(500))).catch(() => null),
+          getDocs(query(collection(db, 'customers'), limit(500))).catch(() => null),
+        ]);
+
+        const serializedUsers = usersPreSnap.docs.map((d) =>
+          serializePlainAccountForBackup(d.data() as Record<string, unknown>, d.id)
+        );
+        const serializedClients = clientsPreSnap
+          ? clientsPreSnap.docs.map((d) =>
+              serializePlainAccountForBackup(d.data() as Record<string, unknown>, d.id)
+            )
+          : [];
+        const serializedPackages = (pkgPreSnap?.docs || []).slice(0, 20).map((d) => {
+          const pd = d.data() as Partial<PackageDoc>;
+          return {
+            id: d.id,
+            code: String(pd.code || d.id),
+            price: Number(pd.price || 0),
+            availableCount: Number(pd.availableCount || 0),
+            soldCount: Number(pd.soldCount || 0),
+          };
+        });
+
+        const autoBackupId = `auto_backup_${Date.now()}`;
+        const autoBackupCloudDoc = {
+          backupType: 'auto_backup' as const,
+          createdBy: activeUser.uid,
+          createdAt: serverTimestamp(),
+          scope,
+          usersCount: serializedUsers.length,
+          clientsCount: serializedClients.length,
+          salesCount: salesPreSnap?.docs.length ?? 0,
+          customersCount: customersPreSnap?.docs.length ?? 0,
+          users: serializedUsers.slice(0, 500),
+          clients: serializedClients.slice(0, 500),
+          packages: serializedPackages,
+        };
+        await setDoc(doc(db, 'backups', autoBackupId), autoBackupCloudDoc);
+        await setDoc(doc(db, 'backups', 'latest_auto_backup'), autoBackupCloudDoc);
+
+        // Also persist local auto_backup immediately (and preserve it during cache cleanup)
+        writeCachedJson(CACHE_AUTO_BACKUP_KEY, {
+          ...autoBackupCloudDoc,
+          backupId: autoBackupId,
+          createdAt: new Date().toISOString(),
+        });
+        writeCachedJson(CACHE_USERS_LIST_KEY, serializedUsers);
+
         if (scope === 'sales_only') {
           onProgress?.('جاري حذف فواتير وسجل المبيعات...');
           totalDeleted += await deleteCollectionInBatches('sales', 'فواتير المبيعات');
@@ -3173,26 +4858,27 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
           await writeAuditLog(
             'تصفير المبيعات والتقارير',
-            `تم تصفير سجل المبيعات والتقارير بواسطة المدير العام (حذف ${totalDeleted} فاتورة وتصفير عداد المباع)`
+            `تم حفظ نسخة auto_backup وتصفير سجل المبيعات والتقارير (حذف ${totalDeleted} فاتورة مع الإبقاء على الكروت والوكلاء والعملاء)`
           );
-          notifySuccess(`تم تصفير المبيعات والتقارير بنجاح (حذف ${totalDeleted} سجل) ✅`);
+          notifySuccess(`تم حفظ نسخة احتياطية وتصفير المبيعات والتقارير بنجاح (حذف ${totalDeleted} سجل) ✅`);
           return { ok: true, deletedCount: totalDeleted };
         }
 
         // =====================================================================
-        // FULL APP DATA RESET: Real 500-doc writeBatch wipe across ALL Firestore
-        // operational collections, keeping ONLY Super Admin & 8 base packages (0)
+        // SAFE FULL OPERATIONAL RESET:
+        // Deletes ONLY cards, sales, invoices, ledger/topup/notifications,
+        // zeroes balances to 0, and STRICTLY PRESERVES Super Admin + ALL Agents & Clients
+        // as well as `backups` and `auditLogs`!
         // =====================================================================
         const targetCollections: Array<{ name: string; label: string }> = [
           { name: 'cards', label: 'جميع الكروت (المتاحة والمباعة والمحجوزة)' },
           { name: 'sales', label: 'فواتير البيع المباشر والجملة والورقية' },
           { name: 'ledgerEntries', label: 'قيود الدفتر المحاسبي' },
-          { name: 'customers', label: 'حسابات العملاء' },
+          { name: 'customers', label: 'سجلات الدفتر المحاسبي' },
           { name: 'topupRequests', label: 'طلبات التغذية' },
           { name: 'notifications', label: 'الإشعارات' },
-          { name: 'registrationRequests', label: 'طلبات الانضمام' },
+          { name: 'registrationRequests', label: 'طلبات الانضمام المعلقة' },
           { name: 'passwordResetRequests', label: 'طلبات استعادة كلمة المرور' },
-          { name: 'auditLogs', label: 'سجل العمليات الرقابي (Audit Log)' },
         ];
 
         for (const col of targetCollections) {
@@ -3200,29 +4886,37 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           totalDeleted += await deleteCollectionInBatches(col.name, col.label);
         }
 
-        // Delete ALL non-admin user accounts (agents & clients) in 500-doc batches,
-        // while STRICTLY preserving the Super Admin account and resetting their balance to 0
-        onProgress?.('جاري حذف حسابات الوكلاء والعملاء وتصفير الأرصدة...');
+        // STRICTLY PRESERVE ALL ACCOUNTS (Super Admin + Agents + Clients) — ONLY zero their balance to 0!
+        onProgress?.(
+          `جاري تصفير أرصدة جميع الحسابات إلى (0) مع الإبقاء الكامل على المدير والوكلاء والعملاء (${usersPreSnap.docs.length} حساب)...`
+        );
         currentStepPath = 'users';
-        const usersSnap = await getDocs(collection(db, 'users'));
-        const nonAdminUsers = usersSnap.docs.filter((u) => {
-          const data = u.data() as Partial<UserProfile>;
-          return u.id !== activeUser.uid && data.role !== 'super_admin';
-        });
-        for (let i = 0; i < nonAdminUsers.length; i += BATCH_LIMIT) {
-          const chunk = nonAdminUsers.slice(i, i + BATCH_LIMIT);
+        for (let i = 0; i < usersPreSnap.docs.length; i += BATCH_LIMIT) {
+          const chunk = usersPreSnap.docs.slice(i, i + BATCH_LIMIT);
           const uBatch = writeBatch(db);
           for (const uDoc of chunk) {
-            uBatch.delete(uDoc.ref);
+            uBatch.update(uDoc.ref, {
+              balance: 0,
+              updatedAt: serverTimestamp(),
+            });
           }
           await uBatch.commit();
-          totalDeleted += chunk.length;
         }
-        // Keep Super Admin user document intact with balance = 0
-        await updateDoc(doc(db, 'users', activeUser.uid), {
-          balance: 0,
-          updatedAt: serverTimestamp(),
-        }).catch(() => {});
+
+        if (clientsPreSnap && !clientsPreSnap.empty) {
+          currentStepPath = 'clients';
+          for (let i = 0; i < clientsPreSnap.docs.length; i += BATCH_LIMIT) {
+            const chunk = clientsPreSnap.docs.slice(i, i + BATCH_LIMIT);
+            const cBatch = writeBatch(db);
+            for (const cDoc of chunk) {
+              cBatch.update(cDoc.ref, {
+                balance: 0,
+                updatedAt: serverTimestamp(),
+              });
+            }
+            await cBatch.commit();
+          }
+        }
 
         // Preserve ONLY the 8 official base packages with exact 0 counts (ready for fresh import)
         onProgress?.('جاري تصفير هيكل الباقات الثماني الأساسية إلى الصفر (0)...');
@@ -3238,7 +4932,6 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             buildValidPackagePayload(basePkg, existingData, true)
           );
         }
-        // Remove any non-official stray package docs if any exist
         for (const pDoc of pkgSnap.docs) {
           if (!officialIds.has(pDoc.id)) {
             pkgBatch.delete(pDoc.ref);
@@ -3247,14 +4940,27 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         }
         await pkgBatch.commit();
 
+        // Write audit log BEFORE cleaning up local caches / reloading
+        await writeAuditLog(
+          'تصفير بيانات التطبيق بأمان',
+          `تم حفظ نسخة auto_backup (${autoBackupId}) وحذف ${totalDeleted} سجل تشغيلي وتصفير الأرصدة مع الاحتفاظ بجميع حسابات الإدارة والوكلاء والعملاء (${usersPreSnap.docs.length} حساب)`
+        );
+
         // =====================================================================
-        // CLEAR ALL LOCAL APP CACHES (localStorage + Firestore IndexedDB ONLY)
-        // while strictly preserving Firebase Auth session & biometric vault!
+        // CLEAR OPERATIONAL LOCAL CACHES while strictly preserving Firebase Auth,
+        // biometric vault, auto_backup, and cached accounts!
         // =====================================================================
-        onProgress?.('جاري تنظيف التخزين المحلي والكاش مع الإبقاء على جلسة المدير...');
+        onProgress?.('جاري تنظيف الكاش التشغيلي مع الحفاظ على النسخة الاحتياطية وجلسة المدير...');
         clearAllLocalOfflineCardCaches();
         try {
-          const preservePrefixes = ['firebase:', 'taibah_theme', 'taibah_bio'];
+          const preservePrefixes = [
+            'firebase:',
+            'taibah_theme',
+            'taibah_bio',
+            'taibah_auto_backup',
+            'taibah_cached_users',
+            'taibah_cached_profile',
+          ];
           const keysToDelete: string[] = [];
           for (let i = 0; i < localStorage.length; i++) {
             const k = localStorage.key(i);
@@ -3267,25 +4973,25 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           for (const k of keysToDelete) {
             localStorage.removeItem(k);
           }
+          persistProfileToLocalCache(buildSuperAdminProfile(activeUser));
         } catch {
           // Ignore storage errors
         }
 
-        // Reset in-memory React states immediately
+        // Reset operational in-memory React states while keeping preserved accounts with 0 balance
         setSales([]);
         setCustomers([]);
         setLedgerEntries([]);
         setTopupRequests([]);
         setNotifications([]);
-        setAuditLogs([]);
-        setManagedUsers([]);
+        setManagedUsers((prev) => prev.map((u) => ({ ...u, balance: 0 })));
         setPendingRegistrations([]);
         setPendingPasswordResets([]);
         setPendingOfflineSales([]);
         setPersonalCardCounts({});
         setPersonalSoldCounts({});
 
-        // Wipe Firestore IndexedDB persistence cleanly without touching Firebase Auth's firebaseLocalStorageDb
+        // Wipe Firestore IndexedDB cache cleanly without touching Firebase Auth's firebaseLocalStorageDb
         try {
           await terminate(db);
           await clearIndexedDbPersistence(db);
@@ -3321,12 +5027,11 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           // Ignore IndexedDB enumeration restrictions
         }
 
-        onProgress?.('تم التصفير بالكامل — جاري إعادة تحميل التطبيق...');
+        onProgress?.('تم حفظ النسخة الاحتياطية والتصفير بنجاح — جاري إعادة تحميل التطبيق...');
         notifySuccess(
-          `تم تصفير بيانات التطبيق بالكامل بنجاح (حذف ${totalDeleted} سجل) — جاري إعادة التشغيل ✅`
+          `تم أخذ نسخة احتياطية تلقائية وتصفير الكروت والفواتير والأرصدة (حذف ${totalDeleted} سجل) مع الإبقاء الكامل على الإدارة والوكلاء والعملاء ✅`
         );
 
-        // Automatically reload the app clean with 0 balances while Super Admin remains signed in
         window.setTimeout(() => {
           window.location.reload();
         }, 700);
@@ -3410,6 +5115,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       resolvePasswordReset,
       enablePushNotifications,
       exportCloudBackup,
+      restoreDeletedAgentsAndClients,
       resetAppData,
     }),
     [
@@ -3475,6 +5181,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       resolvePasswordReset,
       enablePushNotifications,
       exportCloudBackup,
+      restoreDeletedAgentsAndClients,
       resetAppData,
     ]
   );

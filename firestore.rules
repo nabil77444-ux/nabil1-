@@ -47,6 +47,40 @@ service cloud.firestore {
       return isSignedIn() && request.auth.uid == uid;
     }
 
+    function authEmail() {
+      return request.auth.token.email is string ? request.auth.token.email : '';
+    }
+
+    // Extract phone number strictly from deterministic <digits>@taibah.net accounts (excluding Super Admin phone)
+    function authPhoneFromTaibahEmail() {
+      return request.auth.token.email is string &&
+        request.auth.token.email.matches('^[0-9]{7,15}@taibah\\.net$') &&
+        request.auth.token.email != '772466998@taibah.net'
+        ? request.auth.token.email.split('@')[0]
+        : '';
+    }
+
+    function authPhoneRaw() {
+      return request.auth.token.phone_number is string ? request.auth.token.phone_number : '';
+    }
+
+    function authPhoneLocal() {
+      return request.auth.token.phone_number is string && request.auth.token.phone_number.matches('^\\+967[0-9]+$')
+        ? request.auth.token.phone_number.replace('^\\+967', '')
+        : '';
+    }
+
+    // Statically-provable self-profile match across UID, Auth email, and normalized phone
+    function isSelfProfileMatch(data) {
+      return isSignedIn() && (
+        data.uid == request.auth.uid ||
+        (authEmail().size() > 0 && data.email == authEmail()) ||
+        (authPhoneFromTaibahEmail().size() >= 7 && data.phone == authPhoneFromTaibahEmail()) ||
+        (authPhoneRaw().size() >= 7 && data.phone == authPhoneRaw()) ||
+        (authPhoneLocal().size() >= 7 && data.phone == authPhoneLocal())
+      );
+    }
+
     // =========================================================================
     // Validation Blueprints (Anti-Update-Gap Helpers)
     // =========================================================================
@@ -63,7 +97,7 @@ service cloud.firestore {
 
     function isValidUserProfile(data) {
       return data.keys().hasAll(['uid', 'name', 'phone', 'email', 'role', 'status', 'parentAgentId', 'discountRate', 'balance', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['uid', 'name', 'phone', 'email', 'role', 'status', 'parentAgentId', 'discountRate', 'balance', 'fcmTokens', 'rejectionReason', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'name', 'phone', 'email', 'role', 'status', 'parentAgentId', 'discountRate', 'balance', 'fcmTokens', 'rejectionReason', 'linkedSourceId', 'createdAt', 'updatedAt']) &&
         isValidId(data.uid) &&
         isValidString(data.name, 2, 100) &&
         isValidString(data.phone, 7, 20) &&
@@ -75,8 +109,78 @@ service cloud.firestore {
         data.balance is number &&
         (!('fcmTokens' in data) || (data.fcmTokens is list && data.fcmTokens.size() <= 5 && (data.fcmTokens.size() == 0 || (data.fcmTokens[0] is string && data.fcmTokens[0].size() <= 300)))) &&
         (!('rejectionReason' in data) || isValidString(data.rejectionReason, 0, 300)) &&
+        (!('linkedSourceId' in data) || isValidString(data.linkedSourceId, 0, 128)) &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
+    }
+
+    function isValidClientProfile(data) {
+      return data.keys().hasAll(['name']) &&
+        data.keys().hasOnly(['uid', 'name', 'phone', 'email', 'role', 'status', 'parentAgentId', 'discountRate', 'balance', 'fcmTokens', 'notes', 'createdAt', 'updatedAt']) &&
+        (!('uid' in data) || isValidString(data.uid, 0, 128)) &&
+        isValidString(data.name, 1, 100) &&
+        (!('phone' in data) || isValidString(data.phone, 0, 20)) &&
+        (!('email' in data) || isValidString(data.email, 0, 120)) &&
+        (!('role' in data) || data.role in ['agent', 'client']) &&
+        (!('status' in data) || data.status in ['pending', 'active', 'rejected', 'suspended']) &&
+        (!('parentAgentId' in data) || isValidString(data.parentAgentId, 0, 128)) &&
+        (!('discountRate' in data) || (data.discountRate is number && data.discountRate >= 0 && data.discountRate <= 100)) &&
+        (!('balance' in data) || data.balance is number) &&
+        (!('fcmTokens' in data) || (data.fcmTokens is list && data.fcmTokens.size() <= 5 && (data.fcmTokens.size() == 0 || (data.fcmTokens[0] is string && data.fcmTokens[0].size() <= 300)))) &&
+        (!('notes' in data) || isValidString(data.notes, 0, 500)) &&
+        (!('createdAt' in data) || data.createdAt is timestamp) &&
+        (!('updatedAt' in data) || data.updatedAt is timestamp);
+    }
+
+    function isValidBackupDoc(data) {
+      return data.keys().hasAll(['backupType', 'createdBy', 'createdAt', 'usersCount', 'clientsCount']) &&
+        data.keys().hasOnly(['backupType', 'createdBy', 'createdAt', 'scope', 'usersCount', 'clientsCount', 'salesCount', 'customersCount', 'users', 'clients', 'packages']) &&
+        data.backupType in ['auto_backup', 'manual_backup'] &&
+        isValidId(data.createdBy) &&
+        data.createdAt is timestamp &&
+        (!('scope' in data) || isValidString(data.scope, 0, 64)) &&
+        data.usersCount is number && data.usersCount >= 0 &&
+        data.clientsCount is number && data.clientsCount >= 0 &&
+        (!('salesCount' in data) || (data.salesCount is number && data.salesCount >= 0)) &&
+        (!('customersCount' in data) || (data.customersCount is number && data.customersCount >= 0)) &&
+        (!('users' in data) || (data.users is list && data.users.size() <= 500 && (data.users.size() == 0 || data.users[0] is map))) &&
+        (!('clients' in data) || (data.clients is list && data.clients.size() <= 500 && (data.clients.size() == 0 || data.clients[0] is map))) &&
+        (!('packages' in data) || (data.packages is list && data.packages.size() <= 20 && (data.packages.size() == 0 || data.packages[0] is map)));
+    }
+
+    function isVerifiedLinkedUserSource(srcId) {
+      return isValidId(srcId) && (
+        (
+          exists(/databases/$(database)/documents/users/$(srcId)) &&
+          get(/databases/$(database)/documents/users/$(srcId)).data.role in ['agent', 'client'] &&
+          isSelfProfileMatch(get(/databases/$(database)/documents/users/$(srcId)).data) &&
+          incoming().role == get(/databases/$(database)/documents/users/$(srcId)).data.role &&
+          incoming().status == get(/databases/$(database)/documents/users/$(srcId)).data.status &&
+          incoming().discountRate == get(/databases/$(database)/documents/users/$(srcId)).data.discountRate &&
+          incoming().balance == get(/databases/$(database)/documents/users/$(srcId)).data.balance &&
+          incoming().parentAgentId == get(/databases/$(database)/documents/users/$(srcId)).data.parentAgentId
+        ) ||
+        (
+          exists(/databases/$(database)/documents/clients/$(srcId)) &&
+          isSelfProfileMatch(get(/databases/$(database)/documents/clients/$(srcId)).data) &&
+          incoming().role in ['agent', 'client'] &&
+          ('role' in get(/databases/$(database)/documents/clients/$(srcId)).data
+            ? incoming().role == get(/databases/$(database)/documents/clients/$(srcId)).data.role
+            : incoming().role == 'client') &&
+          ('status' in get(/databases/$(database)/documents/clients/$(srcId)).data
+            ? incoming().status == get(/databases/$(database)/documents/clients/$(srcId)).data.status
+            : incoming().status == 'active') &&
+          ('discountRate' in get(/databases/$(database)/documents/clients/$(srcId)).data
+            ? incoming().discountRate == get(/databases/$(database)/documents/clients/$(srcId)).data.discountRate
+            : incoming().discountRate == 80) &&
+          ('balance' in get(/databases/$(database)/documents/clients/$(srcId)).data
+            ? incoming().balance == get(/databases/$(database)/documents/clients/$(srcId)).data.balance
+            : incoming().balance == 0) &&
+          ('parentAgentId' in get(/databases/$(database)/documents/clients/$(srcId)).data
+            ? incoming().parentAgentId == get(/databases/$(database)/documents/clients/$(srcId)).data.parentAgentId
+            : incoming().parentAgentId == '')
+        )
+      );
     }
 
     function isValidRegistrationRequest(data) {
@@ -297,18 +401,22 @@ service cloud.firestore {
     }
 
     // =========================================================================
-    // 2. Users (PII Isolated: Owner, Parent Agent, or Super Admin only)
+    // 2. Users (PII Isolated: Owner, Self Email/Phone Match, Parent Agent, or Super Admin)
     // =========================================================================
     match /users/{uid} {
       allow get: if isValidId(uid) && isSignedIn() && (
         isOwner(uid) ||
         isSuperAdmin() ||
-        (resource != null && existing().parentAgentId == request.auth.uid)
+        (resource != null && (
+          existing().parentAgentId == request.auth.uid ||
+          isSelfProfileMatch(existing())
+        ))
       );
       allow list: if isSignedIn() && (
-        isSuperAdmin() ||
         resource.data.uid == request.auth.uid ||
-        resource.data.parentAgentId == request.auth.uid
+        resource.data.parentAgentId == request.auth.uid ||
+        isSelfProfileMatch(resource.data) ||
+        isSuperAdmin()
       );
       allow create: if isValidId(uid) && isSignedIn() && isValidUserProfile(incoming()) &&
         incoming().uid == uid &&
@@ -321,23 +429,111 @@ service cloud.firestore {
             incoming().status == 'pending' &&
             incoming().balance == 0 &&
             incoming().discountRate == 100
+          ) ||
+          (
+            isOwner(uid) &&
+            'linkedSourceId' in incoming() &&
+            isVerifiedLinkedUserSource(incoming().linkedSourceId)
+          ) ||
+          (
+            isOwner(uid) &&
+            isSelfProfileMatch(incoming()) &&
+            incoming().role == 'client' &&
+            incoming().status == 'active' &&
+            incoming().balance == 0 &&
+            incoming().discountRate >= 80 &&
+            incoming().discountRate <= 100 &&
+            incoming().parentAgentId == ''
           )
         );
       allow update: if isValidId(uid) && isSignedIn() && isValidUserProfile(incoming()) &&
-        incoming().uid == existing().uid &&
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time && (
-          isSuperAdmin() ||
+          (
+            isSuperAdmin() &&
+            incoming().uid == existing().uid
+          ) ||
           (
             isOwner(uid) &&
+            incoming().uid == existing().uid &&
             incoming().diff(existing()).affectedKeys().hasOnly(['name', 'phone', 'fcmTokens', 'updatedAt'])
           ) ||
           (
+            existing().role in ['agent', 'client'] &&
+            isSelfProfileMatch(existing()) &&
+            incoming().uid == request.auth.uid &&
+            incoming().role == existing().role &&
+            incoming().status == existing().status &&
+            incoming().discountRate == existing().discountRate &&
+            incoming().balance == existing().balance &&
+            incoming().parentAgentId == existing().parentAgentId &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['uid', 'updatedAt'])
+          ) ||
+          (
             existing().parentAgentId == request.auth.uid &&
+            incoming().uid == existing().uid &&
             incoming().diff(existing()).affectedKeys().hasOnly(['balance', 'status', 'updatedAt'])
           )
         );
       allow delete: if isValidId(uid) && isSuperAdmin() && uid != request.auth.uid;
+    }
+
+    // =========================================================================
+    // 2B. Clients Directory (Multi-Collection Profile Lookup, Self-Recovery & UID Auto-Linking)
+    // =========================================================================
+    match /clients/{clientId} {
+      allow get: if isValidId(clientId) && isSignedIn() && (
+        isOwner(clientId) ||
+        isSuperAdmin() ||
+        (resource != null && (
+          existing().parentAgentId == request.auth.uid ||
+          isSelfProfileMatch(existing())
+        ))
+      );
+      allow list: if isSignedIn() && (
+        resource.data.uid == request.auth.uid ||
+        resource.data.parentAgentId == request.auth.uid ||
+        isSelfProfileMatch(resource.data) ||
+        isSuperAdmin()
+      );
+      allow create: if isValidId(clientId) && isSignedIn() && isValidClientProfile(incoming()) &&
+        (!('createdAt' in incoming()) || incoming().createdAt == request.time) &&
+        (!('updatedAt' in incoming()) || incoming().updatedAt == request.time) && (
+          isSuperAdmin() ||
+          (
+            isOwner(clientId) &&
+            isSelfProfileMatch(incoming()) &&
+            (!('role' in incoming()) || incoming().role == 'client') &&
+            (!('status' in incoming()) || incoming().status in ['active', 'pending']) &&
+            (!('balance' in incoming()) || incoming().balance == 0)
+          )
+        );
+      allow update: if isValidId(clientId) && isSignedIn() && isValidClientProfile(incoming()) &&
+        (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt) &&
+        incoming().updatedAt == request.time && (
+          isSuperAdmin() ||
+          (
+            isSelfProfileMatch(existing()) &&
+            incoming().uid == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['uid', 'updatedAt'])
+          )
+        );
+      allow delete: if isValidId(clientId) && isSuperAdmin();
+    }
+
+    // =========================================================================
+    // 2C. Cloud Backups (Auto-Backup before Reset & Account Recovery — Super Admin Only)
+    // =========================================================================
+    match /backups/{backupId} {
+      allow get: if isValidId(backupId) && isSuperAdmin();
+      allow list: if isSuperAdmin();
+      allow create: if isValidId(backupId) && isValidBackupDoc(incoming()) && isSuperAdmin() &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().createdAt == request.time;
+      allow update: if isValidId(backupId) && isValidBackupDoc(incoming()) && isSuperAdmin() &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().createdAt == request.time;
+      allow delete: if isValidId(backupId) && isSuperAdmin();
     }
 
     // =========================================================================
@@ -567,7 +763,7 @@ service cloud.firestore {
     }
 
     // =========================================================================
-    // 12. Audit Logs (Super Admin Delete Allowed Only for Full App Reset)
+    // 12. Audit Logs & Legacy Alias (Read-Only Historical Recovery)
     // =========================================================================
     match /auditLogs/{logId} {
       allow get: if isValidId(logId) && isSuperAdmin();
@@ -577,6 +773,14 @@ service cloud.firestore {
         incoming().createdAt == request.time;
       allow update: if false;
       allow delete: if isValidId(logId) && isSuperAdmin();
+    }
+
+    match /audit_logs/{logId} {
+      allow get: if isValidId(logId) && isSuperAdmin();
+      allow list: if isSuperAdmin();
+      allow create: if false;
+      allow update: if false;
+      allow delete: if false;
     }
 
     // =========================================================================

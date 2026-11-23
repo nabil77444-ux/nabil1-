@@ -229,6 +229,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
     updateAppSettings,
     enablePushNotifications,
     exportCloudBackup,
+    restoreDeletedAgentsAndClients,
     resetAppData,
   } = useFirebase();
   const { notifySuccess, notifyError } = useFeedback();
@@ -273,13 +274,20 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
   const [settingsBioPass, setSettingsBioPass] = useState('');
   const [enrollingSettingsBio, setEnrollingSettingsBio] = useState(false);
 
-  // Super Admin Only: App Data Reset Modal States
+  // Super Admin Only: App Data Reset & Account Recovery States
   const [resetScope, setResetScope] = useState<'sales_only' | 'full_reset' | null>(null);
   const [resetPassword, setResetPassword] = useState('');
   const [resetConfirmPhrase, setResetConfirmPhrase] = useState('');
   const [resettingData, setResettingData] = useState(false);
   const [resetProgressText, setResetProgressText] = useState('');
   const [resetError, setResetError] = useState('');
+  const [restoringAccounts, setRestoringAccounts] = useState(false);
+  const [restoreProgressText, setRestoreProgressText] = useState('');
+  const [restoreResult, setRestoreResult] = useState<{
+    ok: boolean;
+    summary: string;
+    sourcesSummary?: string;
+  } | null>(null);
 
   useEffect(() => {
     setNewsTicker(appSettings.newsTicker);
@@ -1121,7 +1129,94 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
             </form>
           )}
 
-          {/* Super Admin Exclusive: Complete App Data Reset Box (STRICTLY HIDDEN & BLOCKED FOR AGENTS & CLIENTS) */}
+          {/* Super Admin Exclusive: Recover Deleted Agents & Clients Tool */}
+          {isAdmin && (
+            <div className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-emerald-600/85 p-3.5 shadow-md space-y-2.5">
+              <div className="flex items-start gap-2.5">
+                <span className="w-7 h-7 rounded-lg bg-emerald-600 text-white flex items-center justify-center shrink-0 shadow-sm mt-0.5">
+                  <RotateCcw className="w-4 h-4" />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <h2 className="text-sm font-extrabold text-emerald-700 dark:text-emerald-400">
+                    استرجاع الوكلاء والعملاء المحذوفين
+                  </h2>
+                  <p className="text-[11px] font-bold text-slate-600 dark:text-slate-300 mt-0.5 leading-relaxed">
+                    فحص واسترجاع جميع حسابات الوكلاء والعملاء تلقائياً من النسخ الاحتياطية السحابية والمحلية وسجل العمليات والفواتير التاريخية وإعادة ربطها في السحابة (users و clients).
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                disabled={restoringAccounts}
+                onClick={async () => {
+                  if (!isAdmin || restoringAccounts) return;
+                  setRestoringAccounts(true);
+                  setRestoreResult(null);
+                  setRestoreProgressText('جاري فحص النسخ الاحتياطية والسجلات التاريخية...');
+                  try {
+                    const res = await restoreDeletedAgentsAndClients((stage) => {
+                      setRestoreProgressText(stage);
+                    });
+                    setRestoreResult({
+                      ok: res.ok,
+                      summary: res.summary,
+                      sourcesSummary: res.sourcesSummary,
+                    });
+                  } finally {
+                    setRestoringAccounts(false);
+                    setRestoreProgressText('');
+                  }
+                }}
+                className="w-full min-h-[46px] rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white text-xs font-extrabold flex items-center justify-center gap-2 px-3 shadow transition-colors"
+              >
+                {restoringAccounts ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                    <span>جاري البحث والاسترجاع...</span>
+                  </>
+                ) : (
+                  <>
+                    <RotateCcw className="w-4 h-4 shrink-0" />
+                    <span>استرجاع الوكلاء والعملاء المحذوفين</span>
+                  </>
+                )}
+              </button>
+
+              {restoringAccounts && restoreProgressText && (
+                <p className="text-[11px] font-bold text-emerald-700 dark:text-emerald-300 text-center">
+                  {restoreProgressText}
+                </p>
+              )}
+
+              {restoreResult && (
+                <div
+                  className={`rounded-xl px-3 py-2 text-[11px] font-bold flex items-start justify-between gap-2 border ${
+                    restoreResult.ok
+                      ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-300 dark:border-emerald-800 text-emerald-800 dark:text-emerald-200'
+                      : 'bg-red-50 dark:bg-red-950/40 border-red-300 dark:border-red-800 text-red-800 dark:text-red-200'
+                  }`}
+                >
+                  <div className="space-y-0.5 leading-relaxed">
+                    <p>{restoreResult.summary}</p>
+                    {restoreResult.sourcesSummary && (
+                      <p className="text-[10px] opacity-85">المصادر: {restoreResult.sourcesSummary}</p>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setRestoreResult(null)}
+                    className="p-0.5 opacity-70 hover:opacity-100 shrink-0"
+                    aria-label="إغلاق"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Super Admin Exclusive: Safe App Data Reset Box (STRICTLY HIDDEN & BLOCKED FOR AGENTS & CLIENTS) */}
           {isAdmin && (
             <div className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#DC2626]/85 p-3.5 shadow-md space-y-3">
               <div className="flex items-start gap-2.5">
@@ -1133,7 +1228,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                     تصفير بيانات التطبيق بالكامل
                   </h2>
                   <p className="text-[11px] font-bold text-slate-600 dark:text-slate-300 mt-0.5 leading-relaxed">
-                    ميزة حصرية للمدير العام فقط لإعادة التطبيق نظيفاً بأرصدة صفرية (0) سحابياً ومحلياً، مع الاحتفاظ بحساب المدير العام وهيكل الباقات الثماني الأساسية فقط.
+                    يتم أولاً حفظ نسخة احتياطية تلقائية (auto_backup) في السحابة والهاتف، ثم تصفير الكروت والمبيعات والفواتير والأرصدة إلى (0) مع الإبقاء الكامل على المدير العام وجميع الوكلاء والعملاء وهيكل الباقات الثماني.
                   </p>
                 </div>
               </div>
@@ -1155,7 +1250,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                     <span>تصفير بيانات التطبيق بالكامل</span>
                   </div>
                   <p className="text-[10.5px] font-bold text-red-700/90 dark:text-red-300/90 mt-0.5">
-                    حذف جميع الكروت، المبيعات، الوكلاء، العملاء، الدفتر، التغذية، الإشعارات، وسجل العمليات، ومسح الكاش وإعادة التشغيل.
+                    أخذ نسخة تلقائية ثم تصفير الكروت والمبيعات والفواتير والدفتر والأرصدة إلى (0) مع بقاء جميع حسابات الإدارة والوكلاء والعملاء.
                   </p>
                 </button>
 
@@ -1175,7 +1270,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                     <span>تصفير المبيعات والتقارير فقط</span>
                   </div>
                   <p className="text-[10.5px] font-bold text-amber-800/90 dark:text-amber-300/90 mt-0.5">
-                    حذف فواتير المبيعات وتصفير عداد المباع مع بقاء الكروت والوكلاء والعملاء.
+                    أخذ نسخة تلقائية ثم حذف فواتير المبيعات وتصفير عداد المباع مع بقاء الكروت والوكلاء والعملاء.
                   </p>
                 </button>
               </div>
@@ -1242,8 +1337,8 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
 
                 <div className="rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-300 dark:border-red-900 p-2.5 text-[11.5px] font-bold text-red-800 dark:text-red-200 leading-relaxed">
                   {resetScope === 'full_reset'
-                    ? 'تحذير أمني نهائي: سيتم حذف جميع الكروت، والمبيعات، وحسابات العملاء والوكلاء، والدفتر المحاسبي، وطلبات التغذية، والإشعارات، وسجل العمليات (Audit Log) نهائياً من السحابة والتخزين المحلي، مع الاحتفاظ بحساب المدير العام وهيكل الباقات الثماني الأساسية فقط (برصيد 0) ثم إعادة تحميل التطبيق تلقائياً.'
-                    : 'تحذير: سيتم حذف جميع فواتير المبيعات والتقارير وتصفير عداد الكروت المباعة نهائياً، مع الإبقاء على الكروت المتاحة وحسابات الوكلاء والعملاء.'}
+                    ? 'تنبيه أمني: سيتم أولاً أخذ نسخة احتياطية تلقائية كاملة (auto_backup) في السحابة والهاتف، ثم حذف الكروت والمبيعات والفواتير والدفتر وطلبات التغذية والإشعارات وتصفير الأرصدة إلى (0)، مع الاحتفاظ الكامل بحساب المدير العام وجميع الوكلاء والعملاء المسجلين وهيكل الباقات الثماني.'
+                    : 'تنبيه: سيتم أولاً أخذ نسخة احتياطية تلقائية (auto_backup)، ثم حذف فواتير المبيعات والتقارير وتصفير عداد المباع مع الإبقاء على الكروت المتاحة وحسابات الإدارة والوكلاء والعملاء.'}
                 </div>
 
                 <div>

@@ -37,9 +37,6 @@ function isEmbeddedIframe(): boolean {
 // - `memoryLocalCache()` inside embedded iframes to avoid partitioned-storage stalls.
 function createOfflineFirstFirestore(): Firestore {
   const embedded = isEmbeddedIframe();
-  const pollingOption = embedded
-    ? { experimentalForceLongPolling: true }
-    : { experimentalAutoDetectLongPolling: true };
 
   if (!embedded) {
     try {
@@ -50,7 +47,6 @@ function createOfflineFirstFirestore(): Firestore {
             tabManager: persistentMultipleTabManager(),
             cacheSizeBytes: CACHE_SIZE_UNLIMITED,
           }),
-          ...pollingOption,
         },
         firebaseConfig.firestoreDatabaseId
       );
@@ -63,7 +59,6 @@ function createOfflineFirstFirestore(): Firestore {
               tabManager: persistentSingleTabManager({}),
               cacheSizeBytes: CACHE_SIZE_UNLIMITED,
             }),
-            ...pollingOption,
           },
           firebaseConfig.firestoreDatabaseId
         );
@@ -78,7 +73,6 @@ function createOfflineFirstFirestore(): Firestore {
       app,
       {
         localCache: memoryLocalCache(),
-        ...pollingOption,
       },
       firebaseConfig.firestoreDatabaseId
     );
@@ -149,6 +143,27 @@ export function handleFirestoreError(
 }
 
 /**
+ * Detect transient Firestore offline / network-unavailable errors so non-critical
+ * background startup checks can gracefully defer and retry instead of crashing.
+ */
+export function isFirestoreOfflineError(error: unknown): boolean {
+  if (!error) return false;
+  const code =
+    typeof error === 'object' && 'code' in error && typeof (error as { code?: unknown }).code === 'string'
+      ? (error as { code: string }).code.toLowerCase()
+      : '';
+  const msg = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  return (
+    code === 'unavailable' ||
+    (code === 'failed-precondition' && msg.includes('offline')) ||
+    msg.includes('the client is offline') ||
+    msg.includes('client is offline') ||
+    msg.includes('could not reach cloud firestore backend') ||
+    msg.includes('network-request-failed')
+  );
+}
+
+/**
  * Startup connectivity verification against Firestore server with one automatic retry
  * to handle slow mobile handshakes without false offline errors.
  */
@@ -157,7 +172,7 @@ export async function testFirestoreConnection(attempt = 1): Promise<boolean> {
     await getDocFromServer(doc(db, 'test', 'connection'));
     return true;
   } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
+    if (isFirestoreOfflineError(error)) {
       if (attempt < 2 && (typeof navigator === 'undefined' || navigator.onLine)) {
         await new Promise((resolve) => setTimeout(resolve, 1500));
         return testFirestoreConnection(attempt + 1);

@@ -47,6 +47,7 @@ export interface UserProfile {
   balance: number;
   fcmTokens?: string[];
   rejectionReason?: string;
+  linkedSourceId?: string;
   createdAt?: Timestamp;
   updatedAt?: Timestamp;
 }

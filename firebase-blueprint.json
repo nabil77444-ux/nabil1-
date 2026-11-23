@@ -30,10 +30,32 @@
         "balance": { "type": "number" },
         "fcmTokens": { "type": "array" },
         "rejectionReason": { "type": "string", "maxLength": 300 },
+        "linkedSourceId": { "type": "string", "maxLength": 128 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["uid", "name", "phone", "email", "role", "status", "parentAgentId", "discountRate", "balance", "createdAt", "updatedAt"]
+    },
+    "ClientProfile": {
+      "title": "ClientProfile",
+      "description": "Agent or client account record stored in clients collection for multi-collection profile resolution and UID auto-linking",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "phone": { "type": "string", "maxLength": 20 },
+        "email": { "type": "string", "format": "email", "maxLength": 120 },
+        "role": { "type": "string", "enum": ["agent", "client"] },
+        "status": { "type": "string", "enum": ["pending", "active", "rejected", "suspended"] },
+        "parentAgentId": { "type": "string", "maxLength": 128 },
+        "discountRate": { "type": "number" },
+        "balance": { "type": "number" },
+        "fcmTokens": { "type": "array" },
+        "notes": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name"]
     },
     "RegistrationRequest": {
       "title": "RegistrationRequest",
@@ -247,11 +269,32 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["newsTicker", "lowStockThreshold", "agentDiscountPercent", "clientDiscountPercent", "directSaleMessageTemplate", "updatedAt"]
+    },
+    "BackupSnapshot": {
+      "title": "BackupSnapshot",
+      "description": "Automatic pre-reset and manual cloud backup snapshot preserving agents, clients, packages, and operational summary",
+      "type": "object",
+      "properties": {
+        "backupType": { "type": "string", "enum": ["auto_backup", "manual_backup"] },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "scope": { "type": "string", "maxLength": 64 },
+        "usersCount": { "type": "number" },
+        "clientsCount": { "type": "number" },
+        "salesCount": { "type": "number" },
+        "customersCount": { "type": "number" },
+        "users": { "type": "array" },
+        "clients": { "type": "array" },
+        "packages": { "type": "array" }
+      },
+      "required": ["backupType", "createdBy", "createdAt", "usersCount", "clientsCount"]
     }
   },
   "firestore": {
     "/admins/{uid}": { "schema": { "$ref": "#/entities/AdminDoc" }, "description": "Trusted Super Admin accounts" },
     "/users/{uid}": { "schema": { "$ref": "#/entities/UserProfile" }, "description": "User accounts for Super Admin, Agents, and Clients" },
+    "/clients/{clientId}": { "schema": { "$ref": "#/entities/ClientProfile" }, "description": "Client and agent profile records supporting email/phone lookup and UID auto-linking" },
+    "/backups/{backupId}": { "schema": { "$ref": "#/entities/BackupSnapshot" }, "description": "Automatic and manual cloud backup snapshots for account recovery" },
     "/registrationRequests/{requestId}": { "schema": { "$ref": "#/entities/RegistrationRequest" }, "description": "Pending account registration requests" },
     "/passwordResetRequests/{requestId}": { "schema": { "$ref": "#/entities/PasswordResetRequest" }, "description": "Pending password reset requests" },
     "/packages/{packageId}": { "schema": { "$ref": "#/entities/PackageDoc" }, "description": "The 8 exclusive Taibah Net voucher packages" },
@@ -262,6 +305,7 @@
     "/topupRequests/{requestId}": { "schema": { "$ref": "#/entities/TopupRequest" }, "description": "Two-tier feed/topup requests" },
     "/notifications/{notificationId}": { "schema": { "$ref": "#/entities/NotificationDoc" }, "description": "Real-time notification center" },
     "/auditLogs/{logId}": { "schema": { "$ref": "#/entities/AuditLogDoc" }, "description": "Immutable operation audit logs" },
+    "/audit_logs/{logId}": { "schema": { "$ref": "#/entities/AuditLogDoc" }, "description": "Legacy alias audit logs collection for historical account recovery" },
     "/settings/{settingId}": { "schema": { "$ref": "#/entities/AppSettingsDoc" }, "description": "Global Taibah Net configuration" }
   }
 }

@@ -107,6 +107,13 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ isDark, onToggleTheme })
     });
   }, []);
 
+  // Auto-heal guard: if authenticated with no hydrated profile yet, automatically trigger recovery/sync
+  useEffect(() => {
+    if (firebaseUser && !profileLoading && !profile && !needsAdminEmailVerification) {
+      void syncNow();
+    }
+  }, [firebaseUser, profileLoading, profile, needsAdminEmailVerification, syncNow]);
+
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!identifier.trim() || !password) {
@@ -577,7 +584,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ isDark, onToggleTheme })
     );
   }
 
-  // State C: Authenticated in Firebase Auth, but profile document not loaded yet
+  // State C: Auto-healing profile hydration (NEVER blocks user on «تعذر تحميل ملف الحساب»)
   if (firebaseUser && !profileLoading && !profile) {
     return (
       <div
@@ -595,11 +602,14 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ isDark, onToggleTheme })
               />
             </div>
           </div>
-          <h2 className="mt-4 text-lg font-extrabold text-slate-900 dark:text-white">
-            تعذر تحميل ملف الحساب
+          <div className="mt-4 inline-flex items-center justify-center w-11 h-11 rounded-2xl bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300">
+            <RefreshCw className="w-5 h-5 animate-spin" />
+          </div>
+          <h2 className="mt-3 text-lg font-extrabold text-slate-900 dark:text-white">
+            جاري استعادة وفتح ملف الحساب...
           </h2>
           <p className="mt-2 text-xs font-semibold text-slate-600 dark:text-slate-300 leading-relaxed">
-            تم التحقق من دخولك ({firebaseUser.email})، لكن لم نتمكن من قراءة ملف الحساب من قاعدة البيانات السحابية حالياً. تحقق من الاتصال ثم اضغط إعادة المحاولة.
+            تم التحقق من دخولك ({firebaseUser.email})، جاري ربط ملفك تلقائياً وفتح الشاشة الرئيسية مباشرة.
           </p>
           <div className="mt-5 space-y-2.5">
             <button
@@ -611,7 +621,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ isDark, onToggleTheme })
               className="w-full min-h-[46px] royal-btn-3d text-white font-extrabold text-sm rounded-xl flex items-center justify-center gap-2"
             >
               <RefreshCw className="w-4 h-4" />
-              إعادة التحقق وفتح الشاشة الرئيسية
+              فتح الشاشة الرئيسية الآن
             </button>
             <button
               type="button"

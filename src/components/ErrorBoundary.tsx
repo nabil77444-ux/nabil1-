@@ -29,6 +29,8 @@ export class ErrorBoundary extends React.Component<{ children: React.ReactNode }
       let friendly = 'حدث خلل مؤقت في الاتصال أو الصلاحيات.';
       if (this.state.message.includes('Missing or insufficient permissions')) {
         friendly = 'صلاحيات الوصول السحابية غير مكتملة لهذه العملية. يرجى إعادة المحاولة أو تحديث الصفحة.';
+      } else if (this.state.message.includes('INTERNAL ASSERTION FAILED')) {
+        friendly = 'حدث تحديث مؤقت في اتصال قاعدة البيانات السحابية. اضغط إعادة تحميل التطبيق لاستئناف العمل بسلاسة.';
       }
       return (
         <div
