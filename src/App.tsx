@@ -1,4 +1,6 @@
 import React, { useEffect, useState } from 'react';
+import { Capacitor } from '@capacitor/core';
+import { StatusBar, Style } from '@capacitor/status-bar';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { FeedbackProvider, useFeedback } from './lib/feedback';
 import { FirebaseProvider, useFirebase } from './contexts/FirebaseContext';
@@ -6,7 +8,7 @@ import { SplashScreen } from './components/SplashScreen';
 import { AuthScreen } from './components/AuthScreen';
 import { HomeScreen } from './components/HomeScreen';
 import { SidebarDrawer } from './components/SidebarDrawer';
-import { ActiveSubScreen } from './components/SubScreens';
+import { ActiveSubScreen, preloadCoreSubScreens } from './components/SubScreens';
 import type { AppRoute } from './types/taibah';
 
 const THEME_STORAGE_KEY = 'taibah_theme_v1';
@@ -58,12 +60,24 @@ const TaibahAppShell: React.FC = () => {
   const [splashCapReached, setSplashCapReached] = useState(false);
 
   useEffect(() => {
+    // Enforce native Android Safe Area (prevent top status bar overlap with WebView)
+    if (Capacitor.isNativePlatform()) {
+      StatusBar.setOverlaysWebView({ overlay: false }).catch(() => {});
+      StatusBar.setStyle({ style: Style.Dark }).catch(() => {});
+      StatusBar.setBackgroundColor({ color: '#0F172A' }).catch(() => {});
+    }
+
     const initial = getInitialRoute();
     if (initial !== 'home') {
       setActiveRoute(initial);
     }
     const timer = window.setTimeout(() => setSplashCapReached(true), 1200);
-    return () => window.clearTimeout(timer);
+    // Warm up secondary sub-screen chunks silently in the background for snappy navigation
+    const preloadTimer = window.setTimeout(() => preloadCoreSubScreens(), 550);
+    return () => {
+      window.clearTimeout(timer);
+      window.clearTimeout(preloadTimer);
+    };
   }, [setActiveRoute]);
 
   const [isDark, setIsDark] = useState<boolean>(() => {

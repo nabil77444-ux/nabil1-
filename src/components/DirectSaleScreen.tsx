@@ -234,9 +234,9 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
   });
 
   return (
-    <div className="space-y-3.5 pb-20">
+    <div className="space-y-3 pb-28 safe-bottom">
       {/* Top Direct Sale Action Bar */}
-      <div className="royal-header-3d rounded-3xl border-2 border-[#D4AF37] p-3.5 shadow-lg space-y-2.5">
+      <div className="royal-header-3d rounded-3xl border-2 border-[#D4AF37] p-3 shadow-lg space-y-2">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <div className="w-10 h-10 rounded-xl bg-white/15 border border-[#D4AF37] flex items-center justify-center text-[#FDE68A]">
@@ -293,14 +293,14 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
         </div>
       </div>
 
-      {/* Optional Buyer Quick Bar with Contact Picker */}
-      <div className="rounded-2xl bg-white dark:bg-slate-900 border border-[#D4AF37]/60 p-3 grid grid-cols-1 sm:grid-cols-2 gap-2 shadow-sm">
+      {/* Optional Buyer Quick Bar with Full Official Phonebook Contact Picker */}
+      <div className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37]/75 p-2.5 grid grid-cols-1 sm:grid-cols-2 gap-2 shadow-sm">
         <input
           type="text"
           value={buyerName}
           onChange={(e) => setBuyerName(e.target.value)}
           placeholder="اسم الزبون (اختياري — افتراضي: زبون مباشر)"
-          className="min-h-[42px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold focus:border-[#D4AF37] focus:outline-none"
+          className="min-h-[40px] rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold text-slate-900 dark:text-white focus:border-[#D4AF37] focus:outline-none"
         />
         <div className="flex items-center gap-1.5">
           <input
@@ -308,9 +308,10 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
             value={buyerPhone}
             onChange={(e) => setBuyerPhone(e.target.value)}
             placeholder="رقم هاتف الزبون لإرسال الكرت..."
-            className="flex-1 min-h-[42px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold tabular-nums focus:border-[#D4AF37] focus:outline-none"
+            className="flex-1 min-h-[40px] rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold text-slate-900 dark:text-white tabular-nums focus:border-[#D4AF37] focus:outline-none"
           />
           <ContactPickerButton
+            title="اختر من سجل أسماء الهاتف الرسمي"
             onSelect={(c) => {
               if (c.name) setBuyerName(c.name);
               if (c.phone) setBuyerPhone(c.phone);
@@ -319,8 +320,8 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
         </div>
       </div>
 
-      {/* Update 15: Unified 8 Color-Coded Exclusive Package Cards (2 columns) */}
-      <div className="grid grid-cols-2 gap-2.5">
+      {/* Update 15: Unified 8 Color-Coded Exclusive Package Cards (2 columns, compact & zero clipping) */}
+      <div className="grid grid-cols-2 gap-2">
         {displayPackages.map((pkg) => {
           const qty = cart[pkg.id] || 0;
           return (
@@ -356,9 +357,9 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
         })}
       </div>
 
-      {/* UPDATE 4: FLOATING BOTTOM MULTI-PACKAGE CONFIRMATION BAR */}
+      {/* UPDATE 4: FLOATING BOTTOM MULTI-PACKAGE CONFIRMATION BAR (Safe Area Protected) */}
       {selectedPackagesCount > 0 && (
-        <div className="fixed bottom-3 inset-x-3 z-40 max-w-2xl mx-auto">
+        <div className="fixed bottom-[calc(env(safe-area-inset-bottom,0px)+0.75rem)] inset-x-3 z-40 max-w-2xl mx-auto">
           <div className="rounded-2xl royal-header-3d border-2 border-[#D4AF37] p-3 shadow-2xl flex items-center justify-between gap-3">
             <div className="min-w-0">
               <div className="text-xs font-extrabold text-[#FDE68A] tabular-nums">
@@ -393,7 +394,7 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
 
       {/* POST-SALE UNIFIED MESSAGE & INVOICE MODAL */}
       {completedSale && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3 overflow-y-auto">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3 safe-top safe-bottom overflow-y-auto">
           <div className="w-full max-w-md rounded-3xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] shadow-2xl overflow-hidden my-auto">
             <div className="royal-header-3d px-4 py-3.5 flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -551,11 +552,13 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
 
       {/* DIRECT SALE RETURNS MODAL */}
       {showReturnsModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3 safe-top safe-bottom">
           <div className="w-full max-w-md rounded-3xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] shadow-2xl overflow-hidden max-h-[85dvh] flex flex-col">
             <div className="royal-header-3d px-4 py-3 flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <img src={TAIBAH_ASSETS.logo} alt="طيبة نت" className="w-8 h-8 rounded-full object-contain bg-white p-0.5 border border-[#D4AF37]" />
+                <div className="w-9 h-9 rounded-full bg-[#061124] border-2 border-[#D4AF37] p-0.5 flex items-center justify-center overflow-hidden shrink-0">
+                  <img src={TAIBAH_ASSETS.logo} alt="طيبة نت" className="w-full h-full rounded-full object-contain" />
+                </div>
                 <h3 className="text-sm font-extrabold text-white">سجل التسليم والمرتجعات المباشرة</h3>
               </div>
               <button

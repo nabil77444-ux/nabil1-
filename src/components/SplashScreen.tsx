@@ -9,12 +9,14 @@ export const SplashScreen: React.FC = () => {
     >
       <div className="relative flex flex-col items-center">
         <div className="w-28 h-28 rounded-full p-1 bg-gradient-to-tr from-[#B4860B] via-[#FDE68A] to-[#D4AF37] shadow-[0_0_40px_rgba(212,175,55,0.45)]">
-          <img
-            src={TAIBAH_ASSETS.logo}
-            alt="شعار كروت طيبة نت"
-            referrerPolicy="no-referrer"
-            className="w-full h-full rounded-full object-contain bg-white p-1"
-          />
+          <div className="w-full h-full rounded-full bg-[#061124] flex items-center justify-center overflow-hidden p-1.5">
+            <img
+              src={TAIBAH_ASSETS.logo}
+              alt="شعار كروت طيبة نت"
+              referrerPolicy="no-referrer"
+              className="w-full h-full rounded-full object-contain"
+            />
+          </div>
         </div>
         <h1 className="mt-5 text-2xl font-extrabold tracking-tight text-white">
           كروت طيبة نت

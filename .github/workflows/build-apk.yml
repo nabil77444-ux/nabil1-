@@ -50,62 +50,117 @@ jobs:
           set -euo pipefail
           test -f capacitor.config.json
           npm install --no-save --no-audit --no-fund \
-            @capacitor/core@7 \
             @capacitor/cli@7 \
             @capacitor/android@7 \
-            @capacitor/status-bar@7 \
-            @capacitor/filesystem@7 \
-            @capacitor/share@7 \
-            @capacitor-community/contacts@7 \
             @capacitor/push-notifications@7 \
             @capacitor/haptics@7 \
-            @capgo/capacitor-native-biometric@7 \
             @capacitor/assets@3
           if [ ! -d "android" ]; then
             npx cap add android
           fi
           npx cap sync android
 
-      - name: Generate Uncropped Padded Android Adaptive Icon & Splash Assets
+      - name: Generate Full Circular Uncropped Android Adaptive Icon, Round Launcher & Splash
         run: |
           set -euo pipefail
           mkdir -p resources
           python3 - <<'PYEOF'
           import os, shutil
           try:
-              from PIL import Image
+              from PIL import Image, ImageDraw
               src = Image.open("public/pwa-512x512.png").convert("RGBA")
+              # Sample deep midnight navy from the official logo's top-left corner for seamless blending
+              bg_sample = src.getpixel((4, 4))
+              navy_rgb = (bg_sample[0], bg_sample[1], bg_sample[2])
+              navy_rgba = (navy_rgb[0], navy_rgb[1], navy_rgb[2], 255)
+              gold_rgba = (212, 175, 55, 255)
 
-              # Adaptive Icon Foreground (1024x1024 canvas, logo centered at 62% inside safe zone — NEVER cropped)
+              def make_circular_medallion(diameter: int, logo_ratio: float = 0.78, ring_px: int = 12) -> Image.Image:
+                  """Build a crisp anti-aliased full circular royal medallion with zero square clipping."""
+                  scale = 2
+                  D = diameter * scale
+                  R = ring_px * scale
+                  canvas = Image.new("RGBA", (D, D), (0, 0, 0, 0))
+
+                  # 1. Outer circular disc filled with matching navy
+                  disc = Image.new("RGBA", (D, D), navy_rgba)
+                  logo_side = int(D * logo_ratio)
+                  logo_resized = src.resize((logo_side, logo_side), Image.LANCZOS)
+                  offset = (D - logo_side) // 2
+                  disc.paste(logo_resized, (offset, offset), logo_resized)
+
+                  # 2. Apply crisp circular alpha mask
+                  mask = Image.new("L", (D, D), 0)
+                  mdraw = ImageDraw.Draw(mask)
+                  mdraw.ellipse((0, 0, D - 1, D - 1), fill=255)
+                  canvas.paste(disc, (0, 0), mask)
+
+                  # 3. Draw refined royal gold circular ring around the perimeter
+                  if R > 0:
+                      draw = ImageDraw.Draw(canvas)
+                      draw.ellipse((R // 2, R // 2, D - 1 - R // 2, D - 1 - R // 2), outline=gold_rgba, width=R)
+
+                  return canvas.resize((diameter, diameter), Image.LANCZOS)
+
+              # 1. Android Adaptive Icon Foreground (1024x1024, circular medallion at 64% inside 66% Safe Zone)
               fg = Image.new("RGBA", (1024, 1024), (0, 0, 0, 0))
-              logo_fg = src.resize((634, 634), Image.LANCZOS)
-              fg.paste(logo_fg, ((1024 - 634) // 2, (1024 - 634) // 2), logo_fg)
+              medallion_fg = make_circular_medallion(656, logo_ratio=0.76, ring_px=14)
+              fg.paste(medallion_fg, ((1024 - 656) // 2, (1024 - 656) // 2), medallion_fg)
               fg.save("resources/icon-foreground.png")
 
-              # Adaptive Icon Background (1024x1024 Royal Dark Navy #0F172A)
-              bg = Image.new("RGBA", (1024, 1024), (15, 23, 42, 255))
+              # 2. Android Adaptive Icon Background (solid matching deep royal navy)
+              bg = Image.new("RGBA", (1024, 1024), navy_rgba)
               bg.save("resources/icon-background.png")
 
-              # Legacy Launcher Icon (1024x1024 padded on #0F172A so circular/rounded-square launchers never clip edges)
-              legacy = Image.new("RGBA", (1024, 1024), (15, 23, 42, 255))
-              logo_leg = src.resize((780, 780), Image.LANCZOS)
-              legacy.paste(logo_leg, ((1024 - 780) // 2, (1024 - 780) // 2), logo_leg)
-              legacy.save("resources/icon.png")
+              # 3. Master Circular Icon (1024x1024 transparent corners with full padded circular medallion)
+              master_circle = make_circular_medallion(1024, logo_ratio=0.76, ring_px=22)
+              master_circle.save("resources/icon.png")
 
-              # Splash Screen (2732x2732 centered uncropped logo on #0F172A)
-              splash = Image.new("RGBA", (2732, 2732), (15, 23, 42, 255))
-              logo_sp = src.resize((760, 760), Image.LANCZOS)
-              splash.paste(logo_sp, ((2732 - 760) // 2, (2732 - 760) // 2), logo_sp)
+              # 4. Splash Screen (2732x2732 centered circular gold-ringed medallion on matching navy)
+              splash = Image.new("RGBA", (2732, 2732), navy_rgba)
+              medallion_sp = make_circular_medallion(820, logo_ratio=0.76, ring_px=18)
+              splash.paste(medallion_sp, ((2732 - 820) // 2, (2732 - 820) // 2), medallion_sp)
               splash.save("resources/splash.png")
-              print("Generated padded Adaptive Icon & Splash assets successfully via Pillow.")
+              print("Generated full circular uncropped Adaptive Icon & Splash assets successfully.")
           except Exception as e:
               print("Pillow fallback triggered:", e)
               shutil.copyfile("public/pwa-512x512.png", "resources/icon.png")
               shutil.copyfile("public/pwa-512x512.png", "resources/splash.png")
           PYEOF
-          npx capacitor-assets generate --android --iconBackgroundColor '#0F172A' --splashBackgroundColor '#0F172A' || true
+          npx capacitor-assets generate --android --iconBackgroundColor '#061124' --splashBackgroundColor '#061124' || true
+
+          # Guarantee crisp circular ic_launcher & ic_launcher_round across ALL Android mipmap densities (Android 5.1 - 15)
+          python3 - <<'PYEOF'
+          import os
+          try:
+              from PIL import Image
+              circle_src = Image.open("resources/icon.png").convert("RGBA")
+              densities = {
+                  "mipmap-mdpi": 48,
+                  "mipmap-hdpi": 72,
+                  "mipmap-xhdpi": 96,
+                  "mipmap-xxhdpi": 144,
+                  "mipmap-xxxhdpi": 192,
+              }
+              res_dir = "android/app/src/main/res"
+              for folder, px in densities.items():
+                  out_dir = os.path.join(res_dir, folder)
+                  os.makedirs(out_dir, exist_ok=True)
+                  # Pad slightly (92% circle) so legacy launchers never clip the gold perimeter
+                  canvas = Image.new("RGBA", (px, px), (0, 0, 0, 0))
+                  inner = max(1, int(round(px * 0.92)))
+                  resized = circle_src.resize((inner, inner), Image.LANCZOS)
+                  off = (px - inner) // 2
+                  canvas.paste(resized, (off, off), resized)
+                  canvas.save(os.path.join(out_dir, "ic_launcher.png"))
+                  canvas.save(os.path.join(out_dir, "ic_launcher_round.png"))
+              print("Verified circular ic_launcher & ic_launcher_round across all mipmap densities.")
+          except Exception as e:
+              print("Mipmap post-process skipped:", e)
+          PYEOF
+
           mkdir -p android/app/src/main/res/drawable
-          cp public/pwa-512x512.png android/app/src/main/res/drawable/taibah_logo.png || true
+          cp resources/icon.png android/app/src/main/res/drawable/taibah_logo.png || cp public/pwa-512x512.png android/app/src/main/res/drawable/taibah_logo.png || true
 
       - name: Configure Android 5.1+ (minSdk 22), Auto-Increment VersionCode & Native Permissions
         run: |

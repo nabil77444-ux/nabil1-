@@ -118,7 +118,7 @@ export const FeedbackProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       {children}
       <div
         aria-live="polite"
-        className="fixed top-3 left-1/2 -translate-x-1/2 z-[100] flex flex-col gap-2 w-[92vw] max-w-md pointer-events-none"
+        className="fixed top-[calc(env(safe-area-inset-top,0px)+0.75rem)] left-1/2 -translate-x-1/2 z-[100] flex flex-col gap-2 w-[92vw] max-w-md safe-x pointer-events-none"
       >
         {toasts.map((toast) => {
           const styles =

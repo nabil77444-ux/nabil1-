@@ -36,12 +36,16 @@ export class ErrorBoundary extends React.Component<{ children: React.ReactNode }
           className="min-h-[100dvh] flex items-center justify-center bg-slate-100 dark:bg-[#0F172A] p-4 safe-top safe-bottom"
         >
           <div className="w-full max-w-md rounded-3xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37]/70 p-6 text-center shadow-2xl">
-            <img
-              src={TAIBAH_ASSETS.logo}
-              alt="شعار شبكة طيبة نت"
-              referrerPolicy="no-referrer"
-              className="w-16 h-16 rounded-full mx-auto object-contain bg-white p-1 gold-ring-3d mb-4"
-            />
+            <div className="w-16 h-16 rounded-full mx-auto p-0.5 bg-gradient-to-tr from-[#B4860B] via-[#FDE68A] to-[#D4AF37] shadow-lg mb-4">
+              <div className="w-full h-full rounded-full bg-[#061124] flex items-center justify-center overflow-hidden p-1">
+                <img
+                  src={TAIBAH_ASSETS.logo}
+                  alt="شعار شبكة طيبة نت"
+                  referrerPolicy="no-referrer"
+                  className="w-full h-full rounded-full object-contain"
+                />
+              </div>
+            </div>
             <div className="w-12 h-12 rounded-2xl bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 flex items-center justify-center mx-auto mb-3">
               <AlertTriangle className="w-6 h-6" />
             </div>

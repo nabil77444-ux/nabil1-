@@ -16,6 +16,7 @@ import {
   Moon,
   Phone,
   RefreshCw,
+  ScanFace,
   ShieldCheck,
   Sun,
   UserPlus,
@@ -42,7 +43,10 @@ import {
 import {
   getSavedBiometricEnrollment,
   isBiometricHardwareAvailable,
+  rememberSessionCredentialInMemory,
+  syncBiometricVaultOnPasswordLogin,
   verifyDeviceBiometric,
+  type BiometricMethod,
 } from '../lib/biometric';
 import { useFeedback } from '../lib/feedback';
 import { useFirebase } from '../contexts/FirebaseContext';
@@ -95,6 +99,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ isDark, onToggleTheme })
   const [hasEnrolledBiometric, setHasEnrolledBiometric] = useState(() => !!getSavedBiometricEnrollment());
   const [showPinModal, setShowPinModal] = useState(false);
   const [pinInput, setPinInput] = useState('');
+  const [pendingBioMethod, setPendingBioMethod] = useState<BiometricMethod>('fingerprint');
 
   useEffect(() => {
     isBiometricHardwareAvailable().then(() => {
@@ -123,6 +128,8 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ isDark, onToggleTheme })
 
       const { email } = normalizeAuthIdentifier(identifier);
       await signInWithEmailAndPassword(auth, email, password);
+      // Keep credential in ephemeral RAM & silently update encrypted biometric vault if enrolled
+      await syncBiometricVaultOnPasswordLogin(email, password, identifier.trim());
       notifySuccess('مرحباً بك في كروت طيبة نت — تم تسجيل الدخول');
     } catch (err: unknown) {
       const code = (err as { code?: string })?.code || '';
@@ -169,6 +176,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ isDark, onToggleTheme })
     try {
       await applyAuthPersistence(true);
       const cred = await createUserWithEmailAndPassword(auth, email, password);
+      rememberSessionCredentialInMemory(email, password);
       await sendEmailVerification(cred.user);
       notifySuccess('تم إنشاء حساب المدير الأساسي وإرسال رابط التحقق إلى بريدك الإلكتروني');
     } catch (err: unknown) {
@@ -186,17 +194,56 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ isDark, onToggleTheme })
     }
   };
 
-  const handleBiometricLogin = async () => {
+  const completeStandaloneBiometricSignIn = async (
+    displayName: string,
+    savedIdentifier: string,
+    credentials: { email: string; password: string } | null | undefined,
+    method: BiometricMethod
+  ) => {
+    const methodLabel = method === 'face' ? 'التعرف على الوجه' : 'البصمة';
+    setIdentifier(savedIdentifier);
+
+    if (auth.currentUser) {
+      notifySuccess(`تم الدخول الفوري عبر ${methodLabel} — مرحباً ${displayName} ✅`);
+      return;
+    }
+
+    if (credentials?.email && credentials?.password) {
+      setSubmitting(true);
+      try {
+        await applyAuthPersistence(true);
+        await signInWithEmailAndPassword(auth, credentials.email, credentials.password);
+        rememberSessionCredentialInMemory(credentials.email, credentials.password);
+        notifySuccess(`تم الدخول الفوري عبر ${methodLabel} — مرحباً ${displayName} ✅`);
+      } catch {
+        notifyError(
+          'تعذر إتمام الجلسة السحابية',
+          'ربما تم تغيير كلمة مرور الحساب مؤخراً — سجّل الدخول بكلمة المرور الجديدة لتحديث خزنة البصمة تلقائياً.'
+        );
+      } finally {
+        setSubmitting(false);
+      }
+      return;
+    }
+
+    notifyWarning(
+      'يلزم ربط الخزنة الآمنة مرة واحدة فقط',
+      'سجّل الدخول بكلمة المرور مرة واحدة فقط ليتم تشفير الجلسة، وبعدها ستدخل بالبصمة والوجه مباشرة دون كلمة مرور نهائياً.'
+    );
+  };
+
+  const handleBiometricLogin = async (method: BiometricMethod) => {
     const saved = getSavedBiometricEnrollment();
     if (!saved) {
       notifyInfo(
-        'تفعيل الدخول بالبصمة والوجه',
-        'سجّل الدخول أولاً بكلمة المرور ثم اضغط تفعيل البصمة من الإعدادات أو الشريط الجانبي لتفعيلها فوراً.'
+        method === 'face' ? 'تفعيل الدخول بالوجه' : 'تفعيل الدخول بالبصمة',
+        'سجّل الدخول أولاً ثم اضغط "تفعيل الدخول بالبصمة / الوجه" من القائمة الجانبية أو الإعدادات لمرة واحدة فقط.'
       );
       return;
     }
 
-    const result = await verifyDeviceBiometric();
+    setPendingBioMethod(method);
+    const result = await verifyDeviceBiometric(undefined, method);
     if (result.requiresPin) {
       setPinInput('');
       setShowPinModal(true);
@@ -204,26 +251,28 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ isDark, onToggleTheme })
     }
 
     if (result.verified && result.enrollment) {
-      setIdentifier(result.enrollment.identifier);
-      if (auth.currentUser) {
-        notifySuccess(`تم التحقق بالبصمة بنجاح — مرحباً ${result.enrollment.displayName}`);
-      } else {
-        notifySuccess(
-          `تم التحقق بالبصمة (${result.enrollment.displayName}) — أدخل كلمة المرور لفتح جلستك السحابية`
-        );
-      }
+      await completeStandaloneBiometricSignIn(
+        result.enrollment.displayName,
+        result.enrollment.identifier,
+        result.credentials,
+        method
+      );
     } else {
-      notifyWarning('لم يكتمل التحقق الحيوي', 'أعد المحاولة بالبصمة/الوجه أو أدخل كلمة المرور.');
+      notifyWarning('لم يكتمل التحقق الحيوي', 'أعد المحاولة بالبصمة أو التعرف على الوجه.');
     }
   };
 
   const handlePinConfirm = async (e: React.FormEvent) => {
     e.preventDefault();
-    const res = await verifyDeviceBiometric(pinInput.trim());
+    const res = await verifyDeviceBiometric(pinInput.trim(), pendingBioMethod);
     if (res.verified && res.enrollment) {
       setShowPinModal(false);
-      setIdentifier(res.enrollment.identifier);
-      notifySuccess(`تم التحقق السريع بنجاح — مرحباً ${res.enrollment.displayName}`);
+      await completeStandaloneBiometricSignIn(
+        res.enrollment.displayName,
+        res.enrollment.identifier,
+        res.credentials,
+        pendingBioMethod
+      );
     } else {
       notifyWarning('الرمز غير مطابق', 'يرجى التأكد من رمز الدخول السريع والمحاولة مجدداً.');
     }
@@ -362,12 +411,16 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ isDark, onToggleTheme })
         className="min-h-[100dvh] flex items-center justify-center bg-gradient-to-b from-[#0F172A] via-[#1A365D] to-[#0F172A] p-4 safe-top safe-bottom"
       >
         <div className="w-full max-w-sm rounded-3xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] p-6 shadow-2xl text-center">
-          <img
-            src={TAIBAH_ASSETS.logo}
-            alt="شعار شبكة طيبة نت"
-            referrerPolicy="no-referrer"
-            className="w-20 h-20 rounded-full mx-auto object-contain bg-white p-1 gold-ring-3d"
-          />
+          <div className="w-20 h-20 rounded-full mx-auto p-1 bg-gradient-to-tr from-[#B4860B] via-[#FDE68A] to-[#D4AF37] shadow-lg">
+            <div className="w-full h-full rounded-full bg-[#061124] flex items-center justify-center overflow-hidden p-1">
+              <img
+                src={TAIBAH_ASSETS.logo}
+                alt="شعار شبكة طيبة نت"
+                referrerPolicy="no-referrer"
+                className="w-full h-full rounded-full object-contain"
+              />
+            </div>
+          </div>
           <div className="mt-4 inline-flex items-center justify-center w-11 h-11 rounded-2xl bg-blue-100 dark:bg-blue-900/40 text-[#1A365D] dark:text-[#FDE68A]">
             <RefreshCw className="w-5 h-5 animate-spin" />
           </div>
@@ -398,12 +451,16 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ isDark, onToggleTheme })
         className="min-h-[100dvh] flex items-center justify-center bg-gradient-to-b from-[#0F172A] via-[#1A365D] to-[#0F172A] p-4 safe-top safe-bottom"
       >
         <div className="w-full max-w-md rounded-3xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] p-6 shadow-2xl text-center">
-          <img
-            src={TAIBAH_ASSETS.logo}
-            alt="شعار شبكة طيبة نت"
-            referrerPolicy="no-referrer"
-            className="w-20 h-20 rounded-full mx-auto object-contain bg-white p-1 gold-ring-3d"
-          />
+          <div className="w-20 h-20 rounded-full mx-auto p-1 bg-gradient-to-tr from-[#B4860B] via-[#FDE68A] to-[#D4AF37] shadow-lg">
+            <div className="w-full h-full rounded-full bg-[#061124] flex items-center justify-center overflow-hidden p-1">
+              <img
+                src={TAIBAH_ASSETS.logo}
+                alt="شعار شبكة طيبة نت"
+                referrerPolicy="no-referrer"
+                className="w-full h-full rounded-full object-contain"
+              />
+            </div>
+          </div>
           <div className="mt-4 inline-flex items-center justify-center w-12 h-12 rounded-2xl bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400">
             <MailCheck className="w-6 h-6" />
           </div>
@@ -461,12 +518,16 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ isDark, onToggleTheme })
         className="min-h-[100dvh] flex items-center justify-center bg-gradient-to-b from-[#0F172A] via-[#1A365D] to-[#0F172A] p-4 safe-top safe-bottom"
       >
         <div className="w-full max-w-md rounded-3xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] p-6 shadow-2xl text-center">
-          <img
-            src={TAIBAH_ASSETS.logo}
-            alt="شعار شبكة طيبة نت"
-            referrerPolicy="no-referrer"
-            className="w-20 h-20 rounded-full mx-auto object-contain bg-white p-1 gold-ring-3d"
-          />
+          <div className="w-20 h-20 rounded-full mx-auto p-1 bg-gradient-to-tr from-[#B4860B] via-[#FDE68A] to-[#D4AF37] shadow-lg">
+            <div className="w-full h-full rounded-full bg-[#061124] flex items-center justify-center overflow-hidden p-1">
+              <img
+                src={TAIBAH_ASSETS.logo}
+                alt="شعار شبكة طيبة نت"
+                referrerPolicy="no-referrer"
+                className="w-full h-full rounded-full object-contain"
+              />
+            </div>
+          </div>
           <div
             className={`mt-4 inline-flex items-center justify-center w-12 h-12 rounded-2xl ${
               isRejected
@@ -508,12 +569,16 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ isDark, onToggleTheme })
         className="min-h-[100dvh] flex items-center justify-center bg-gradient-to-b from-[#0F172A] via-[#1A365D] to-[#0F172A] p-4 safe-top safe-bottom"
       >
         <div className="w-full max-w-md rounded-3xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] p-6 shadow-2xl text-center">
-          <img
-            src={TAIBAH_ASSETS.logo}
-            alt="شعار شبكة طيبة نت"
-            referrerPolicy="no-referrer"
-            className="w-20 h-20 rounded-full mx-auto object-contain bg-white p-1 gold-ring-3d"
-          />
+          <div className="w-20 h-20 rounded-full mx-auto p-1 bg-gradient-to-tr from-[#B4860B] via-[#FDE68A] to-[#D4AF37] shadow-lg">
+            <div className="w-full h-full rounded-full bg-[#061124] flex items-center justify-center overflow-hidden p-1">
+              <img
+                src={TAIBAH_ASSETS.logo}
+                alt="شعار شبكة طيبة نت"
+                referrerPolicy="no-referrer"
+                className="w-full h-full rounded-full object-contain"
+              />
+            </div>
+          </div>
           <h2 className="mt-4 text-lg font-extrabold text-slate-900 dark:text-white">
             تعذر تحميل ملف الحساب
           </h2>
@@ -566,12 +631,14 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ isDark, onToggleTheme })
           {/* Royal Brand Card Header */}
           <div className="rounded-t-3xl royal-header-3d px-6 pt-6 pb-5 text-center border-x-2 border-t-2 border-[#D4AF37]/80">
             <div className="w-20 h-20 rounded-full mx-auto p-1 bg-gradient-to-tr from-[#B4860B] via-[#FDE68A] to-[#D4AF37] shadow-xl">
-              <img
-                src={TAIBAH_ASSETS.logo}
-                alt="الشعار الرسمي لشبكة طيبة نت"
-                referrerPolicy="no-referrer"
-                className="w-full h-full rounded-full object-contain bg-white p-1"
-              />
+              <div className="w-full h-full rounded-full bg-[#061124] flex items-center justify-center overflow-hidden p-1">
+                <img
+                  src={TAIBAH_ASSETS.logo}
+                  alt="الشعار الرسمي لشبكة طيبة نت"
+                  referrerPolicy="no-referrer"
+                  className="w-full h-full rounded-full object-contain"
+                />
+              </div>
             </div>
             <h1 className="mt-3 text-xl font-extrabold text-white tracking-tight">
               كروت طيبة نت — TAIBAH NET
@@ -720,31 +787,45 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ isDark, onToggleTheme })
                   </label>
                 </div>
 
-                {/* Primary 3D Login + Biometric/Face ID Button */}
-                <div className="flex items-center gap-2 pt-1">
+                {/* Primary 3D Password Login Button */}
+                <button
+                  type="submit"
+                  disabled={submitting}
+                  className="w-full min-h-[48px] royal-btn-3d text-white font-extrabold text-sm rounded-xl flex items-center justify-center gap-2 disabled:opacity-60"
+                >
+                  <LogIn className="w-4 h-4" />
+                  <span>{submitting ? 'جاري التحقق...' : 'تسجيل الدخول بكلمة المرور'}</span>
+                </button>
+
+                {/* Independent Instant Fingerprint & Face Unlock Buttons (Zero Password Required) */}
+                <div className="grid grid-cols-2 gap-2 pt-0.5">
                   <button
-                    type="submit"
+                    type="button"
                     disabled={submitting}
-                    className="flex-1 min-h-[48px] royal-btn-3d text-white font-extrabold text-sm rounded-xl flex items-center justify-center gap-2 disabled:opacity-60"
+                    onClick={() => void handleBiometricLogin('fingerprint')}
+                    className={`min-h-[44px] rounded-xl px-3 text-xs font-extrabold flex items-center justify-center gap-1.5 relative transition-transform active:scale-[0.98] ${
+                      hasEnrolledBiometric
+                        ? 'bg-emerald-600 hover:bg-emerald-700 text-white border-2 border-[#D4AF37] shadow-md'
+                        : 'gold-btn-3d text-[#0F172A]'
+                    }`}
+                    aria-label="الدخول الفوري بالبصمة"
                   >
-                    <LogIn className="w-4 h-4" />
-                    <span>{submitting ? 'جاري التحقق...' : 'تسجيل الدخول الآمن'}</span>
+                    <Fingerprint className="w-4 h-4 shrink-0" />
+                    <span>دخول بالبصمة</span>
                   </button>
                   <button
                     type="button"
-                    onClick={handleBiometricLogin}
-                    title={hasEnrolledBiometric ? 'الدخول بالبصمة / الوجه (مُفعّل ✅)' : 'الدخول السريع بالبصمة أو الوجه'}
-                    className={`min-h-[48px] min-w-[54px] rounded-xl flex items-center justify-center shrink-0 relative ${
+                    disabled={submitting}
+                    onClick={() => void handleBiometricLogin('face')}
+                    className={`min-h-[44px] rounded-xl px-3 text-xs font-extrabold flex items-center justify-center gap-1.5 relative transition-transform active:scale-[0.98] ${
                       hasEnrolledBiometric
-                        ? 'bg-emerald-600 hover:bg-emerald-700 text-white border-2 border-[#D4AF37] shadow-lg'
-                        : 'gold-btn-3d text-[#0F172A]'
+                        ? 'bg-[#1A365D] hover:bg-[#142a4a] text-[#FDE68A] border-2 border-[#D4AF37] shadow-md'
+                        : 'bg-slate-100 dark:bg-slate-800 border-2 border-[#D4AF37] text-[#1A365D] dark:text-[#FDE68A]'
                     }`}
-                    aria-label="التحقق بالبصمة أو الوجه"
+                    aria-label="الدخول الفوري بالتعرف على الوجه"
                   >
-                    <Fingerprint className="w-6 h-6" />
-                    {hasEnrolledBiometric && (
-                      <span className="absolute -top-1 -right-1 w-3.5 h-3.5 rounded-full bg-[#D4AF37] border border-white" />
-                    )}
+                    <ScanFace className="w-4 h-4 shrink-0" />
+                    <span>دخول بالوجه</span>
                   </button>
                 </div>
 

@@ -163,11 +163,13 @@ export const TopupRequestsScreen: React.FC<TopupRequestsScreenProps> = ({ hideNu
             </p>
           </div>
         </div>
-        <img
-          src={TAIBAH_ASSETS.logo}
-          alt="شعار طيبة نت"
-          className="w-11 h-11 rounded-full object-contain bg-white p-0.5 border-2 border-[#D4AF37] shrink-0"
-        />
+        <div className="w-11 h-11 rounded-full bg-[#061124] p-0.5 border-2 border-[#D4AF37] shrink-0 overflow-hidden shadow">
+          <img
+            src={TAIBAH_ASSETS.logo}
+            alt="شعار طيبة نت"
+            className="w-full h-full rounded-full object-contain"
+          />
+        </div>
       </div>
 
       {/* Submit New Topup Request Button (Clients & Agents) */}

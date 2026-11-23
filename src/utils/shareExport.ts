@@ -1,3 +1,6 @@
+import { Capacitor } from '@capacitor/core';
+import { Directory, Filesystem } from '@capacitor/filesystem';
+import { Share } from '@capacitor/share';
 import {
   DEFAULT_APP_SETTINGS,
   formatDateTimeAr,
@@ -102,44 +105,39 @@ export function applyMessageTemplate(
   return out;
 }
 
-interface CapacitorWindow extends Window {
-  Capacitor?: {
-    isNativePlatform?: () => boolean;
-    Plugins?: {
-      Filesystem?: {
-        writeFile: (opts: { path: string; data: string; directory: string }) => Promise<{ uri: string }>;
-      };
-      Share?: {
-        share: (opts: { title?: string; text?: string; url?: string; files?: string[]; dialogTitle?: string }) => Promise<void>;
-      };
-    };
-  };
-}
-
 let cachedLogoDataUrl: string | null = null;
 
 /**
- * Load the official Taibah Net logo once as a Base64 Data URL so html2canvas & jsPDF
- * NEVER suffer from CORS tainting or missing logo images in exports.
+ * Load the official Taibah Net logo once as a same-origin Base64 Data URL so html2canvas & jsPDF
+ * NEVER suffer from CORS tainting or missing logo images in exports (Web & Android WebView).
  */
 async function getOfficialLogoDataUrl(): Promise<string> {
   if (cachedLogoDataUrl) return cachedLogoDataUrl;
-  const src = `${window.location.origin}${TAIBAH_ASSETS.logo}`;
-  try {
-    const res = await fetch(src, { mode: 'cors' });
-    if (!res.ok) return src;
-    const blob = await res.blob();
-    const dataUrl = await new Promise<string>((resolve) => {
-      const reader = new FileReader();
-      reader.onloadend = () => resolve(typeof reader.result === 'string' ? reader.result : src);
-      reader.onerror = () => resolve(src);
-      reader.readAsDataURL(blob);
-    });
-    cachedLogoDataUrl = dataUrl;
-    return dataUrl;
-  } catch {
-    return src;
+  const candidates = [
+    TAIBAH_ASSETS.logo,
+    `${window.location.origin}${TAIBAH_ASSETS.logo}`,
+    '/pwa-192x192.png',
+  ];
+  for (const src of candidates) {
+    try {
+      const res = await fetch(src);
+      if (!res.ok) continue;
+      const blob = await res.blob();
+      const dataUrl = await new Promise<string>((resolve) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(typeof reader.result === 'string' ? reader.result : '');
+        reader.onerror = () => resolve('');
+        reader.readAsDataURL(blob);
+      });
+      if (dataUrl.startsWith('data:image/')) {
+        cachedLogoDataUrl = dataUrl;
+        return dataUrl;
+      }
+    } catch {
+      // Try next candidate
+    }
   }
+  return '';
 }
 
 export function cleanYemeniPhone(raw: string): string {
@@ -202,7 +200,7 @@ function buildRoyalDocumentHTML(payload: PrintableDocumentPayload, logoSrc: stri
   const metaHtml = payload.metaRows
     .map(
       (m) => `
-      <div style="background:linear-gradient(180deg,#ffffff 0%,#f8fafc 100%);border:1.5px solid #cbd5e1;border-right:4px solid #D4AF37;border-radius:10px;padding:9px 12px;display:flex;justify-content:space-between;align-items:center;gap:8px;">
+      <div style="background:#f8fafc;border:1.5px solid #cbd5e1;border-right:4px solid #D4AF37;border-radius:10px;padding:9px 12px;display:flex;justify-content:space-between;align-items:center;gap:8px;box-sizing:border-box;">
         <span style="color:#475569;font-size:11.5px;font-weight:700;">${escapeHtml(m.label)}</span>
         <span style="color:#0f172a;font-size:13px;font-weight:800;">${escapeHtml(m.value)}</span>
       </div>`
@@ -212,7 +210,7 @@ function buildRoyalDocumentHTML(payload: PrintableDocumentPayload, logoSrc: stri
   const theadHtml = payload.tableHeaders
     .map(
       (h) =>
-        `<th style="padding:10px 9px;background:linear-gradient(180deg,#1A365D 0%,#0F172A 100%);color:#FDE68A;font-size:12px;font-weight:800;text-align:right;border:1px solid #D4AF37;">${escapeHtml(h)}</th>`
+        `<th style="padding:10px 9px;background:#1A365D;color:#FDE68A;font-size:12px;font-weight:800;text-align:right;border:1px solid #D4AF37;">${escapeHtml(h)}</th>`
     )
     .join('');
 
@@ -237,12 +235,10 @@ function buildRoyalDocumentHTML(payload: PrintableDocumentPayload, logoSrc: stri
     .map(
       (s) => `
       <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-radius:12px;background:${
-        s.highlight
-          ? 'linear-gradient(135deg,#0F172A 0%,#1A365D 100%)'
-          : 'linear-gradient(180deg,#ffffff 0%,#f8fafc 100%)'
+        s.highlight ? '#1A365D' : '#f8fafc'
       };border:${s.highlight ? '2px solid #D4AF37' : '1.5px solid #cbd5e1'};color:${
         s.highlight ? '#FDE68A' : '#0f172a'
-      };box-shadow:${s.highlight ? '0 4px 10px rgba(15,23,42,0.18)' : 'none'};">
+      };box-sizing:border-box;">
         <span style="font-size:12.5px;font-weight:800;">${escapeHtml(s.label)}</span>
         <span style="font-size:15px;font-weight:900;">${escapeHtml(s.value)}</span>
       </div>`
@@ -252,7 +248,7 @@ function buildRoyalDocumentHTML(payload: PrintableDocumentPayload, logoSrc: stri
   const extraHtml =
     payload.extraLines && payload.extraLines.length > 0
       ? `
-      <div style="margin-top:16px;background:#fffbeb;border:2px solid #D4AF37;border-radius:14px;padding:12px 14px;">
+      <div style="margin-top:16px;background:#fffbeb;border:2px solid #D4AF37;border-radius:14px;padding:12px 14px;box-sizing:border-box;">
         <div style="font-size:13px;font-weight:800;color:#1A365D;margin-bottom:9px;display:flex;justify-content:space-between;align-items:center;">
           <span>${escapeHtml(payload.extraSectionTitle || 'أرقام الكروت')}</span>
           <span style="font-size:11px;background:#1A365D;color:#FDE68A;padding:2px 10px;border-radius:999px;">العدد: ${payload.extraLines.length}</span>
@@ -270,20 +266,24 @@ function buildRoyalDocumentHTML(payload: PrintableDocumentPayload, logoSrc: stri
       </div>`
       : '';
 
+  const logoElement = logoSrc
+    ? `<div style="width:70px;height:70px;border-radius:50%;background:#061124;border:3px solid #D4AF37;padding:5px;display:flex;align-items:center;justify-content:center;flex-shrink:0;overflow:hidden;box-sizing:border-box;">
+         <img src="${logoSrc}" style="width:100%;height:100%;object-fit:contain;border-radius:50%;display:block;" />
+       </div>`
+    : `<div style="width:70px;height:70px;border-radius:50%;background:#061124;border:3px solid #D4AF37;color:#FDE68A;font-size:24px;font-weight:900;display:flex;align-items:center;justify-content:center;flex-shrink:0;">T</div>`;
+
   return `
-    <div dir="rtl" style="width:794px;background:#ffffff;font-family:'Cairo',system-ui,sans-serif;color:#0f172a;border:3px solid #D4AF37;border-radius:18px;overflow:hidden;box-sizing:border-box;">
-      <div style="background:linear-gradient(135deg,#0F172A 0%,#1A365D 55%,#1E3A8A 100%);padding:20px 24px;display:flex;align-items:center;justify-content:space-between;gap:14px;border-bottom:4px solid #D4AF37;">
+    <div id="taibah-export-root" dir="rtl" style="width:794px;background:#ffffff;font-family:'Cairo',system-ui,sans-serif;color:#0f172a;border:3px solid #D4AF37;border-radius:18px;overflow:hidden;box-sizing:border-box;">
+      <div style="background:#1A365D;padding:20px 24px;display:flex;align-items:center;justify-content:space-between;gap:14px;border-bottom:4px solid #D4AF37;box-sizing:border-box;">
         <div style="display:flex;align-items:center;gap:14px;min-width:0;">
-          <div style="width:68px;height:68px;border-radius:50%;background:#ffffff;border:3px solid #D4AF37;padding:4px;display:flex;align-items:center;justify-content:center;flex-shrink:0;box-shadow:0 4px 12px rgba(0,0,0,0.28);">
-            <img src="${logoSrc}" crossorigin="anonymous" style="width:100%;height:100%;object-fit:contain;border-radius:50%;" />
-          </div>
+          ${logoElement}
           <div>
-            <div style="font-size:21px;font-weight:900;color:#ffffff;line-height:1.2;">${escapeHtml(headerTitle)}</div>
+            <div style="font-size:21px;font-weight:900;color:#ffffff;line-height:1.25;">${escapeHtml(headerTitle)}</div>
             <div style="font-size:12px;font-weight:700;color:#FDE68A;margin-top:3px;">${escapeHtml(headerSubtitle)}</div>
             <div style="font-size:11px;font-weight:700;color:#cbd5e1;margin-top:2px;">الإدارة: ${SUPER_ADMIN_CONFIG.name} • هاتف: ${SUPER_ADMIN_CONFIG.phone}</div>
           </div>
         </div>
-        <div style="text-align:left;background:rgba(255,255,255,0.08);border:1.5px solid rgba(212,175,55,0.65);border-radius:12px;padding:9px 14px;flex-shrink:0;">
+        <div style="text-align:left;background:#0F172A;border:1.5px solid #D4AF37;border-radius:12px;padding:9px 14px;flex-shrink:0;">
           <div style="font-size:15px;font-weight:900;color:#FDE68A;">${escapeHtml(payload.title)}</div>
           ${
             payload.subtitle
@@ -294,7 +294,7 @@ function buildRoyalDocumentHTML(payload: PrintableDocumentPayload, logoSrc: stri
         </div>
       </div>
 
-      <div style="padding:20px 24px;background:#ffffff;">
+      <div style="padding:20px 24px;background:#ffffff;box-sizing:border-box;">
         <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:9px;margin-bottom:16px;">
           ${metaHtml}
         </div>
@@ -315,7 +315,7 @@ function buildRoyalDocumentHTML(payload: PrintableDocumentPayload, logoSrc: stri
         }
       </div>
 
-      <div style="background:linear-gradient(90deg,#0F172A 0%,#1A365D 100%);color:#FDE68A;padding:11px 24px;display:flex;justify-content:space-between;align-items:center;font-size:11.5px;font-weight:800;border-top:3px solid #D4AF37;">
+      <div style="background:#0F172A;color:#FDE68A;padding:11px 24px;display:flex;justify-content:space-between;align-items:center;font-size:11.5px;font-weight:800;border-top:3px solid #D4AF37;box-sizing:border-box;">
         <span>${escapeHtml(footerText)}</span>
         <span style="color:#e2e8f0;">${SUPER_ADMIN_CONFIG.developerCredit}</span>
       </div>
@@ -323,53 +323,335 @@ function buildRoyalDocumentHTML(payload: PrintableDocumentPayload, logoSrc: stri
   `;
 }
 
-async function renderRoyalCanvas(payload: PrintableDocumentPayload): Promise<HTMLCanvasElement> {
-  const [{ default: html2canvas }, logoSrc] = await Promise.all([
-    import('html2canvas'),
-    getOfficialLogoDataUrl(),
-  ]);
+/**
+ * Pure HTML5 Canvas 2D RTL Fallback Renderer — guarantees PDF & HD Image export NEVER fails
+ * even on older Android 5.1 WebViews or restricted CSS engines.
+ */
+async function renderRoyalCanvasFallback2D(
+  payload: PrintableDocumentPayload,
+  logoSrc: string
+): Promise<HTMLCanvasElement> {
+  const width = 1200;
+  const pad = 42;
+  const headerH = 165;
+  const metaRowsCount = Math.ceil(payload.metaRows.length / 2);
+  const metaH = metaRowsCount * 58 + 20;
+  const tableRowsCount = Math.max(1, payload.tableRows.length);
+  const tableH = 54 + tableRowsCount * 46 + 24;
+  const extraRowsCount = payload.extraLines?.length ? Math.ceil(payload.extraLines.length / 3) : 0;
+  const extraH = extraRowsCount > 0 ? 58 + extraRowsCount * 46 + 24 : 0;
+  const summaryRowsCount = payload.summaryRows?.length ? Math.ceil(payload.summaryRows.length / 2) : 0;
+  const summaryH = summaryRowsCount > 0 ? summaryRowsCount * 62 + 20 : 0;
+  const footerH = 64;
 
-  const container = document.createElement('div');
-  container.style.position = 'fixed';
-  container.style.left = '-9999px';
-  container.style.top = '0';
-  container.style.zIndex = '-1';
-  container.innerHTML = buildRoyalDocumentHTML(payload, logoSrc);
-  document.body.appendChild(container);
+  const height = Math.min(7200, headerH + metaH + tableH + extraH + summaryH + footerH + 70);
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('Canvas 2D unavailable');
 
-  try {
-    if (document.fonts?.ready) {
-      await document.fonts.ready;
+  ctx.direction = 'rtl';
+
+  // White card with gold frame
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, width, height);
+  ctx.strokeStyle = '#D4AF37';
+  ctx.lineWidth = 6;
+  ctx.strokeRect(3, 3, width - 6, height - 6);
+
+  // Royal Navy Header
+  ctx.fillStyle = '#1A365D';
+  ctx.fillRect(6, 6, width - 12, headerH);
+  ctx.fillStyle = '#D4AF37';
+  ctx.fillRect(6, headerH, width - 12, 6);
+
+  // Circular Logo Medallion on right
+  const logoCx = width - pad - 54;
+  const logoCy = 6 + headerH / 2;
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(logoCx, logoCy, 52, 0, Math.PI * 2);
+  ctx.fillStyle = '#061124';
+  ctx.fill();
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = '#D4AF37';
+  ctx.stroke();
+  ctx.clip();
+  if (logoSrc) {
+    try {
+      const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+        const el = new Image();
+        el.onload = () => resolve(el);
+        el.onerror = reject;
+        el.src = logoSrc;
+      });
+      ctx.drawImage(img, logoCx - 44, logoCy - 44, 88, 88);
+    } catch {
+      // keep clean circle
     }
-  } catch {
-    // ignore
+  }
+  ctx.restore();
+
+  const headerTitle = payload.pdfHeaderTitle?.trim() || activeBrandTemplates.pdfHeaderTitle;
+  const headerSubtitle = payload.pdfHeaderSubtitle?.trim() || activeBrandTemplates.pdfHeaderSubtitle;
+  const footerText = payload.pdfFooterText?.trim() || activeBrandTemplates.pdfFooterText;
+
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '800 30px Cairo, sans-serif';
+  ctx.fillText(headerTitle, width - pad - 125, 68);
+  ctx.fillStyle = '#FDE68A';
+  ctx.font = '700 18px Cairo, sans-serif';
+  ctx.fillText(headerSubtitle, width - pad - 125, 102);
+  ctx.fillStyle = '#cbd5e1';
+  ctx.font = '700 15px Cairo, sans-serif';
+  ctx.fillText(`الإدارة: ${SUPER_ADMIN_CONFIG.name} • ${SUPER_ADMIN_CONFIG.phone}`, width - pad - 125, 134);
+
+  // Document Title Badge on left
+  ctx.fillStyle = '#0F172A';
+  ctx.fillRect(pad, 36, 330, 104);
+  ctx.strokeStyle = '#D4AF37';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(pad, 36, 330, 104);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#FDE68A';
+  ctx.font = '800 21px Cairo, sans-serif';
+  ctx.fillText(payload.title.slice(0, 32), pad + 165, 74);
+  if (payload.subtitle) {
+    ctx.fillStyle = '#e2e8f0';
+    ctx.font = '700 15px Cairo, sans-serif';
+    ctx.fillText(payload.subtitle.slice(0, 36), pad + 165, 102);
+  }
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '700 14px Cairo, sans-serif';
+  ctx.fillText(formatDateTimeAr(new Date()), pad + 165, 128);
+
+  let y = headerH + 28;
+
+  // Meta rows (2 cols)
+  const colW = (width - pad * 2 - 18) / 2;
+  payload.metaRows.forEach((m, idx) => {
+    const col = idx % 2;
+    const row = Math.floor(idx / 2);
+    const rx = col === 0 ? width - pad - colW : pad;
+    const ry = y + row * 58;
+    ctx.fillStyle = '#f8fafc';
+    ctx.fillRect(rx, ry, colW, 46);
+    ctx.strokeStyle = '#cbd5e1';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(rx, ry, colW, 46);
+    ctx.fillStyle = '#D4AF37';
+    ctx.fillRect(rx + colW - 5, ry, 5, 46);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#475569';
+    ctx.font = '700 16px Cairo, sans-serif';
+    ctx.fillText(m.label, rx + colW - 18, ry + 29);
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#0f172a';
+    ctx.font = '800 17px Cairo, sans-serif';
+    ctx.fillText(m.value, rx + 14, ry + 29);
+  });
+  y += metaH;
+
+  // Table
+  const tableW = width - pad * 2;
+  const cols = Math.max(1, payload.tableHeaders.length);
+  const cellW = tableW / cols;
+
+  ctx.fillStyle = '#1A365D';
+  ctx.fillRect(pad, y, tableW, 48);
+  ctx.font = '800 17px Cairo, sans-serif';
+  ctx.fillStyle = '#FDE68A';
+  payload.tableHeaders.forEach((h, i) => {
+    const cx = width - pad - i * cellW - 14;
+    ctx.textAlign = 'right';
+    ctx.fillText(h.slice(0, 22), cx, y + 31);
+  });
+  y += 48;
+
+  const rowsToDraw = payload.tableRows.length > 0 ? payload.tableRows : [['لا توجد سجلات']];
+  rowsToDraw.forEach((row, rIdx) => {
+    ctx.fillStyle = rIdx % 2 === 0 ? '#ffffff' : '#f1f5f9';
+    ctx.fillRect(pad, y, tableW, 44);
+    ctx.strokeStyle = '#cbd5e1';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(pad, y, tableW, 44);
+    ctx.fillStyle = '#0f172a';
+    ctx.font = '700 16px Cairo, sans-serif';
+    row.forEach((cell, cIdx) => {
+      const cx = width - pad - cIdx * cellW - 14;
+      ctx.textAlign = 'right';
+      ctx.fillText(String(cell ?? '').slice(0, 28), cx, y + 28);
+    });
+    y += 44;
+  });
+  y += 22;
+
+  // Extra lines (Voucher numbers)
+  if (payload.extraLines && payload.extraLines.length > 0) {
+    const boxH = 50 + extraRowsCount * 44;
+    ctx.fillStyle = '#fffbeb';
+    ctx.fillRect(pad, y, tableW, boxH);
+    ctx.strokeStyle = '#D4AF37';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(pad, y, tableW, boxH);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#1A365D';
+    ctx.font = '800 18px Cairo, sans-serif';
+    ctx.fillText(
+      `${payload.extraSectionTitle || 'أرقام الكروت'} (${payload.extraLines.length})`,
+      width - pad - 18,
+      y + 32
+    );
+    const chipW = (tableW - 44) / 3;
+    payload.extraLines.forEach((line, idx) => {
+      const c = idx % 3;
+      const r = Math.floor(idx / 3);
+      const cx = width - pad - 14 - (c + 1) * chipW - c * 8;
+      const cy = y + 46 + r * 42;
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(cx, cy, chipW, 34);
+      ctx.strokeStyle = '#cbd5e1';
+      ctx.strokeRect(cx, cy, chipW, 34);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#0f172a';
+      ctx.font = '800 17px monospace';
+      ctx.fillText(line, cx + chipW / 2, cy + 23);
+    });
+    y += boxH + 20;
   }
 
-  const imgs = Array.from(container.querySelectorAll('img'));
-  await Promise.all(
-    imgs.map(
-      (img) =>
-        new Promise<void>((resolve) => {
-          if (img.complete) return resolve();
-          img.onload = () => resolve();
-          img.onerror = () => resolve();
-        })
-    )
-  );
+  // Summary rows
+  if (payload.summaryRows && payload.summaryRows.length > 0) {
+    payload.summaryRows.forEach((s, idx) => {
+      const col = idx % 2;
+      const row = Math.floor(idx / 2);
+      const rx = col === 0 ? width - pad - colW : pad;
+      const ry = y + row * 60;
+      ctx.fillStyle = s.highlight ? '#1A365D' : '#f8fafc';
+      ctx.fillRect(rx, ry, colW, 50);
+      ctx.strokeStyle = s.highlight ? '#D4AF37' : '#cbd5e1';
+      ctx.lineWidth = s.highlight ? 2.5 : 1.5;
+      ctx.strokeRect(rx, ry, colW, 50);
+      ctx.textAlign = 'right';
+      ctx.fillStyle = s.highlight ? '#FDE68A' : '#0f172a';
+      ctx.font = '800 17px Cairo, sans-serif';
+      ctx.fillText(s.label, rx + colW - 16, ry + 31);
+      ctx.textAlign = 'left';
+      ctx.font = '900 19px Cairo, sans-serif';
+      ctx.fillText(s.value, rx + 16, ry + 31);
+    });
+  }
+
+  // Footer
+  const fy = height - footerH - 6;
+  ctx.fillStyle = '#0F172A';
+  ctx.fillRect(6, fy, width - 12, footerH);
+  ctx.fillStyle = '#D4AF37';
+  ctx.fillRect(6, fy, width - 12, 4);
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#FDE68A';
+  ctx.font = '800 16px Cairo, sans-serif';
+  ctx.fillText(footerText, width - pad, fy + 38);
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#e2e8f0';
+  ctx.font = '700 15px Cairo, sans-serif';
+  ctx.fillText(SUPER_ADMIN_CONFIG.developerCredit, pad, fy + 38);
+
+  return canvas;
+}
+
+/**
+ * Render Royal Document to crisp HD Canvas.
+ * Strips Tailwind v4 `oklch()` / `color-mix()` stylesheets inside html2canvas `onclone`
+ * so html2canvas NEVER crashes on unsupported CSS color functions, with pure Canvas 2D fallback.
+ */
+async function renderRoyalCanvas(payload: PrintableDocumentPayload): Promise<HTMLCanvasElement> {
+  const logoSrc = await getOfficialLogoDataUrl();
 
   try {
-    const target = container.firstElementChild as HTMLElement;
-    const canvas = await html2canvas(target, {
-      scale: 2.5,
-      useCORS: true,
-      allowTaint: false,
-      backgroundColor: '#ffffff',
-      logging: false,
-    });
-    return canvas;
-  } finally {
-    container.remove();
+    const { default: html2canvas } = await import('html2canvas');
+    const container = document.createElement('div');
+    container.style.position = 'fixed';
+    container.style.left = '-10000px';
+    container.style.top = '0';
+    container.style.zIndex = '-1';
+    container.style.background = '#ffffff';
+    container.innerHTML = buildRoyalDocumentHTML(payload, logoSrc);
+    document.body.appendChild(container);
+
+    try {
+      if (document.fonts?.ready) {
+        await Promise.race([
+          document.fonts.ready,
+          new Promise((resolve) => setTimeout(resolve, 600)),
+        ]);
+      }
+    } catch {
+      // ignore font wait errors
+    }
+
+    const imgs = Array.from(container.querySelectorAll('img'));
+    await Promise.all(
+      imgs.map(
+        (img) =>
+          new Promise<void>((resolve) => {
+            if (img.complete) return resolve();
+            img.onload = () => resolve();
+            img.onerror = () => resolve();
+            setTimeout(() => resolve(), 1500);
+          })
+      )
+    );
+
+    try {
+      const target = container.firstElementChild as HTMLElement;
+      const estimatedHeight = Math.max(target.scrollHeight || 900, 600);
+      // Clamp scale so tall reports never exceed Android WebView GPU canvas texture limits
+      const safeScale = Math.min(2.2, Math.max(1.25, 6400 / estimatedHeight));
+
+      const canvas = await html2canvas(target, {
+        scale: safeScale,
+        useCORS: true,
+        allowTaint: false,
+        backgroundColor: '#ffffff',
+        logging: false,
+        onclone: (clonedDoc) => {
+          // CRITICAL FIX: Remove Tailwind v4 stylesheets containing `oklch()` / `oklab()` /
+          // `color-mix()` that crash html2canvas 1.4.1 color parser!
+          clonedDoc.querySelectorAll('style, link[rel="stylesheet"]').forEach((node) => {
+            const href = node.getAttribute('href') || '';
+            if (href.includes('fonts.googleapis.com')) return;
+            node.remove();
+          });
+          const resetStyle = clonedDoc.createElement('style');
+          resetStyle.textContent = `
+            * { box-sizing: border-box; }
+            html, body {
+              margin: 0 !important;
+              padding: 0 !important;
+              background: #ffffff !important;
+              color: #0f172a !important;
+              font-family: 'Cairo', system-ui, -apple-system, sans-serif !important;
+              direction: rtl !important;
+            }
+          `;
+          clonedDoc.head.appendChild(resetStyle);
+        },
+      });
+      if (canvas && canvas.width > 0 && canvas.height > 0) {
+        return canvas;
+      }
+    } finally {
+      container.remove();
+    }
+  } catch (err) {
+    console.warn('html2canvas fallback triggered:', err);
   }
+
+  // Zero-Fail Pure Canvas 2D Fallback
+  return renderRoyalCanvasFallback2D(payload, logoSrc);
 }
 
 async function blobToBase64(blob: Blob): Promise<string> {
@@ -397,81 +679,153 @@ function triggerDirectDownload(blobUrl: string, fileName: string): void {
   a.remove();
 }
 
+function buildSafeAndroidCacheName(extension: 'png' | 'pdf'): string {
+  const stamp = Date.now().toString(36);
+  const rand = Math.random().toString(36).slice(2, 6);
+  return `TaibahNet_${stamp}_${rand}.${extension}`;
+}
+
 /**
- * Share a real File/Blob using Capacitor Native Share (APK) -> Web Share API -> Direct Download fallback.
+ * Share or save a real File/Blob using Capacitor Filesystem + Share (Android APK)
+ * -> Web Share API Level 2 -> Direct Download fallback.
  */
 async function shareOrDownloadFile(
   blob: Blob,
-  fileName: string,
+  displayFileName: string,
+  extension: 'png' | 'pdf',
   title: string,
   shareText?: string,
   sharePhone?: string
 ): Promise<ExportShareResult> {
   const blobUrl = URL.createObjectURL(blob);
-  const capWin = window as CapacitorWindow;
 
-  // 1. Native Android APK via Capacitor Filesystem + Share plugins
-  if (capWin.Capacitor?.isNativePlatform?.() && capWin.Capacitor.Plugins?.Filesystem && capWin.Capacitor.Plugins?.Share) {
+  // 1. Native Android APK via official @capacitor/filesystem + @capacitor/share
+  if (Capacitor.isNativePlatform()) {
     try {
       const base64Data = await blobToBase64(blob);
-      const saved = await capWin.Capacitor.Plugins.Filesystem.writeFile({
-        path: fileName,
+      const cacheFileName = buildSafeAndroidCacheName(extension);
+      const saved = await Filesystem.writeFile({
+        path: cacheFileName,
         data: base64Data,
-        directory: 'CACHE',
+        directory: Directory.Cache,
       });
-      await capWin.Capacitor.Plugins.Share.share({
-        title,
-        text: shareText || title,
-        url: saved.uri,
-        files: [saved.uri],
-        dialogTitle: 'مشاركة عبر واتساب أو التطبيقات',
-      });
-      return { fileName, mimeType: blob.type, blobUrl, sharedNatively: true, sharePhone, shareText };
-    } catch {
-      // Fall through to Web Share / download
+
+      try {
+        await Share.share({
+          title,
+          text: shareText || title,
+          files: [saved.uri],
+          dialogTitle: 'مشاركة أو حفظ عبر التطبيقات',
+        });
+        return {
+          fileName: displayFileName,
+          mimeType: blob.type,
+          blobUrl,
+          sharedNatively: true,
+          sharePhone,
+          shareText,
+        };
+      } catch (shareErr: unknown) {
+        const msg = String((shareErr as { message?: string })?.message || '').toLowerCase();
+        // If user cancelled the share sheet, treat as handled cleanly
+        if (msg.includes('cancel') || msg.includes('abort')) {
+          return {
+            fileName: displayFileName,
+            mimeType: blob.type,
+            blobUrl,
+            sharedNatively: true,
+            sharePhone,
+            shareText,
+          };
+        }
+        // Retry with single `url` param for older Android Share implementations
+        await Share.share({
+          title,
+          text: shareText || title,
+          url: saved.uri,
+          dialogTitle: 'مشاركة أو حفظ الملف',
+        });
+        return {
+          fileName: displayFileName,
+          mimeType: blob.type,
+          blobUrl,
+          sharedNatively: true,
+          sharePhone,
+          shareText,
+        };
+      }
+    } catch (nativeErr) {
+      console.warn('Native Capacitor Filesystem/Share fallback:', nativeErr);
+      // Fall through cleanly to Web Share / preview download
     }
   }
 
   // 2. Web Share API Level 2 (Android Chrome / PWA / Safari)
   try {
-    const file = new File([blob], fileName, { type: blob.type });
+    const file = new File([blob], displayFileName, { type: blob.type });
     if (typeof navigator !== 'undefined' && navigator.canShare && navigator.canShare({ files: [file] })) {
       await navigator.share({
         files: [file],
         title,
         text: shareText || title,
       });
-      return { fileName, mimeType: blob.type, blobUrl, sharedNatively: true, sharePhone, shareText };
+      return {
+        fileName: displayFileName,
+        mimeType: blob.type,
+        blobUrl,
+        sharedNatively: true,
+        sharePhone,
+        shareText,
+      };
     }
   } catch (err: unknown) {
     if (err instanceof Error && err.name === 'AbortError') {
-      return { fileName, mimeType: blob.type, blobUrl, sharedNatively: true, sharePhone, shareText };
+      return {
+        fileName: displayFileName,
+        mimeType: blob.type,
+        blobUrl,
+        sharedNatively: true,
+        sharePhone,
+        shareText,
+      };
     }
   }
 
   // 3. Fallback: Automatic direct file download (works in Desktop & iframe preview)
-  triggerDirectDownload(blobUrl, fileName);
-  return { fileName, mimeType: blob.type, blobUrl, sharedNatively: false, sharePhone, shareText };
+  triggerDirectDownload(blobUrl, displayFileName);
+  return {
+    fileName: displayFileName,
+    mimeType: blob.type,
+    blobUrl,
+    sharedNatively: false,
+    sharePhone,
+    shareText,
+  };
 }
 
 /**
- * Generate and share/download a crisp HD PNG image with official uncropped logo & RTL Arabic.
+ * Generate and share/download a crisp HD PNG image with circular official logo & RTL Arabic.
  */
 export async function exportAsHDImage(payload: PrintableDocumentPayload): Promise<ExportShareResult> {
   const canvas = await renderRoyalCanvas(payload);
-  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png', 1.0));
-  if (!blob) throw new Error('Image generation failed');
+  let blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png', 1.0));
+  if (!blob) {
+    // Fallback via dataURL -> Blob for older WebViews where toBlob can return null
+    const dataUrl = canvas.toDataURL('image/png', 1.0);
+    const res = await fetch(dataUrl);
+    blob = await res.blob();
+  }
 
   const safeName = `${payload.fileName.replace(/[^\w\u0600-\u06FF-]+/g, '_')}_HD.png`;
-  return shareOrDownloadFile(blob, safeName, payload.title, payload.shareText, payload.sharePhone);
+  return shareOrDownloadFile(blob, safeName, 'png', payload.title, payload.shareText, payload.sharePhone);
 }
 
 /**
- * Generate and share/download a crisp Arabic RTL multi-page A4 PDF with official uncropped logo.
+ * Generate and share/download a crisp Arabic RTL multi-page A4 PDF with circular official logo.
  */
 export async function exportAsArabicPDF(payload: PrintableDocumentPayload): Promise<ExportShareResult> {
   const [canvas, { jsPDF }] = await Promise.all([renderRoyalCanvas(payload), import('jspdf')]);
-  const imgData = canvas.toDataURL('image/png', 1.0);
+  const imgData = canvas.toDataURL('image/jpeg', 0.94);
   const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
   const pageWidth = pdf.internal.pageSize.getWidth();
   const pageHeight = pdf.internal.pageSize.getHeight();
@@ -482,19 +836,19 @@ export async function exportAsArabicPDF(payload: PrintableDocumentPayload): Prom
   let heightLeft = imgHeight;
   let position = margin;
 
-  pdf.addImage(imgData, 'PNG', margin, position, usableWidth, imgHeight);
+  pdf.addImage(imgData, 'JPEG', margin, position, usableWidth, imgHeight);
   heightLeft -= pageHeight - margin * 2;
 
   while (heightLeft > 0) {
     position = heightLeft - imgHeight + margin;
     pdf.addPage();
-    pdf.addImage(imgData, 'PNG', margin, position, usableWidth, imgHeight);
+    pdf.addImage(imgData, 'JPEG', margin, position, usableWidth, imgHeight);
     heightLeft -= pageHeight - margin * 2;
   }
 
   const safeName = `${payload.fileName.replace(/[^\w\u0600-\u06FF-]+/g, '_')}.pdf`;
   const pdfBlob = pdf.output('blob');
-  return shareOrDownloadFile(pdfBlob, safeName, payload.title, payload.shareText, payload.sharePhone);
+  return shareOrDownloadFile(pdfBlob, safeName, 'pdf', payload.title, payload.shareText, payload.sharePhone);
 }
 
 /**

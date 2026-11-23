@@ -291,11 +291,13 @@ export const SalesListScreen: React.FC<SalesListScreenProps> = ({ hideNumbers, o
         </div>
 
         <div className="w-12 h-12 rounded-full p-0.5 bg-gradient-to-tr from-[#B4860B] via-[#FDE68A] to-[#D4AF37] shrink-0 shadow-lg">
-          <img
-            src={TAIBAH_ASSETS.logo}
-            alt="شعار شبكة طيبة نت"
-            className="w-full h-full rounded-full object-contain bg-white p-0.5"
-          />
+          <div className="w-full h-full rounded-full bg-[#061124] p-0.5 flex items-center justify-center overflow-hidden">
+            <img
+              src={TAIBAH_ASSETS.logo}
+              alt="شعار شبكة طيبة نت"
+              className="w-full h-full rounded-full object-contain"
+            />
+          </div>
         </div>
       </div>
 
@@ -509,11 +511,13 @@ export const SalesListScreen: React.FC<SalesListScreenProps> = ({ hideNumbers, o
           <div className="w-full max-w-lg rounded-3xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] shadow-2xl overflow-hidden my-auto max-h-[92dvh] flex flex-col">
             <div className="royal-header-3d px-4 py-3 flex items-center justify-between">
               <div className="flex items-center gap-2.5">
-                <img
-                  src={TAIBAH_ASSETS.logo}
-                  alt="شعار طيبة نت"
-                  className="w-9 h-9 rounded-full object-contain bg-white p-0.5 border border-[#D4AF37]"
-                />
+                <div className="w-9 h-9 rounded-full bg-[#061124] p-0.5 border-2 border-[#D4AF37] shrink-0 overflow-hidden">
+                  <img
+                    src={TAIBAH_ASSETS.logo}
+                    alt="شعار طيبة نت"
+                    className="w-full h-full rounded-full object-contain"
+                  />
+                </div>
                 <div>
                   <h3 className="text-sm font-extrabold text-white">
                     تفاصيل الفاتورة {selectedSale.invoiceNumber || selectedSale.id.slice(-6)}

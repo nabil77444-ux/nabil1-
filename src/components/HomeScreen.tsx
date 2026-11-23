@@ -287,12 +287,12 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
             aria-label="الشاشة الرئيسية"
           >
             <div className="w-10 h-10 sm:w-11 sm:h-11 rounded-full p-0.5 bg-gradient-to-tr from-[#B4860B] via-[#FDE68A] to-[#D4AF37] shadow-lg shrink-0">
-              <div className="w-full h-full rounded-full bg-white flex items-center justify-center overflow-hidden p-0.5">
+              <div className="w-full h-full rounded-full bg-[#061124] flex items-center justify-center overflow-hidden p-0.5">
                 <img
                   src={TAIBAH_ASSETS.logo}
                   alt="شعار شبكة طيبة نت"
                   referrerPolicy="no-referrer"
-                  className="w-full h-full object-contain"
+                  className="w-full h-full rounded-full object-contain"
                 />
               </div>
             </div>

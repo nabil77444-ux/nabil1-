@@ -55,6 +55,9 @@ import {
 } from '../types/taibah';
 import { useFeedback } from '../lib/feedback';
 import {
+  clearMemorySessionCredentials,
+} from '../lib/biometric';
+import {
   consumeCachedAvailableCards,
   enqueueOfflineSale,
   getCachedAvailableCards,
@@ -1286,6 +1289,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const signOutUser = useCallback(async () => {
     try {
+      clearMemorySessionCredentials();
       await firebaseSignOut(auth);
       notifySuccess('تم تسجيل الخروج بأمان');
     } catch {

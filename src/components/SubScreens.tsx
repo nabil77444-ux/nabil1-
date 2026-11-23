@@ -9,6 +9,7 @@ import {
   FileText,
   Fingerprint,
   ImagePlus,
+  KeyRound,
   Loader2,
   MessageSquare,
   Moon,
@@ -22,14 +23,17 @@ import {
   Smartphone,
   Sun,
   Trash2,
+  X,
 } from 'lucide-react';
 import { useFirebase } from '../contexts/FirebaseContext';
 import { useFeedback } from '../lib/feedback';
 import {
   clearBiometricEnrollment,
   enrollDeviceBiometric,
+  getMemorySessionCredentials,
   getSavedBiometricEnrollment,
 } from '../lib/biometric';
+import { DirectSaleScreen } from './DirectSaleScreen';
 import {
   DEFAULT_APP_SETTINGS,
   DEFAULT_HERO_SLIDES,
@@ -42,36 +46,47 @@ import {
   type HeroSlideConfig,
 } from '../types/taibah';
 
-// Code Splitting — lazy load all heavy operational sub-screens on demand
-const SalesListScreen = lazy(() =>
-  import('./SalesListScreen').then((m) => ({ default: m.SalesListScreen }))
-);
-const DirectSaleScreen = lazy(() =>
-  import('./DirectSaleScreen').then((m) => ({ default: m.DirectSaleScreen }))
-);
-const WholesaleCardsScreen = lazy(() =>
-  import('./WholesaleCardsScreen').then((m) => ({ default: m.WholesaleCardsScreen }))
-);
-const CustomersLedgerScreen = lazy(() =>
-  import('./CustomersLedgerScreen').then((m) => ({ default: m.CustomersLedgerScreen }))
-);
-const PackagesImportScreen = lazy(() =>
-  import('./PackagesImportScreen').then((m) => ({ default: m.PackagesImportScreen }))
-);
-const TopupRequestsScreen = lazy(() =>
-  import('./TopupRequestsScreen').then((m) => ({ default: m.TopupRequestsScreen }))
-);
-const AgentsManagementScreen = lazy(() =>
-  import('./AgentsManagementScreen').then((m) => ({ default: m.AgentsManagementScreen }))
-);
-const ReportsCenterScreen = lazy(() =>
-  import('./ReportsCenterScreen').then((m) => ({ default: m.ReportsCenterScreen }))
-);
+// Code Splitting — secondary sub-screens lazy-loaded & preloaded silently in background
+const loadSalesList = () =>
+  import('./SalesListScreen').then((m) => ({ default: m.SalesListScreen }));
+const loadWholesaleCards = () =>
+  import('./WholesaleCardsScreen').then((m) => ({ default: m.WholesaleCardsScreen }));
+const loadCustomersLedger = () =>
+  import('./CustomersLedgerScreen').then((m) => ({ default: m.CustomersLedgerScreen }));
+const loadPackagesImport = () =>
+  import('./PackagesImportScreen').then((m) => ({ default: m.PackagesImportScreen }));
+const loadTopupRequests = () =>
+  import('./TopupRequestsScreen').then((m) => ({ default: m.TopupRequestsScreen }));
+const loadAgentsManagement = () =>
+  import('./AgentsManagementScreen').then((m) => ({ default: m.AgentsManagementScreen }));
+const loadReportsCenter = () =>
+  import('./ReportsCenterScreen').then((m) => ({ default: m.ReportsCenterScreen }));
+
+const SalesListScreen = lazy(loadSalesList);
+const WholesaleCardsScreen = lazy(loadWholesaleCards);
+const CustomersLedgerScreen = lazy(loadCustomersLedger);
+const PackagesImportScreen = lazy(loadPackagesImport);
+const TopupRequestsScreen = lazy(loadTopupRequests);
+const AgentsManagementScreen = lazy(loadAgentsManagement);
+const ReportsCenterScreen = lazy(loadReportsCenter);
+
+let preloadedOnce = false;
+export function preloadCoreSubScreens(): void {
+  if (preloadedOnce) return;
+  preloadedOnce = true;
+  void Promise.allSettled([
+    loadSalesList(),
+    loadWholesaleCards(),
+    loadCustomersLedger(),
+    loadTopupRequests(),
+    loadReportsCenter(),
+  ]);
+}
 
 const LazyFallback: React.FC = () => (
-  <div className="py-16 flex flex-col items-center justify-center gap-2 text-[#1A365D] dark:text-[#FDE68A]">
-    <Loader2 className="w-7 h-7 animate-spin" />
-    <span className="text-xs font-extrabold">جاري فتح الشاشة...</span>
+  <div className="py-12 flex flex-col items-center justify-center gap-2 text-[#1A365D] dark:text-[#FDE68A]">
+    <Loader2 className="w-6 h-6 animate-spin" />
+    <span className="text-xs font-extrabold">جاري الفتح...</span>
   </div>
 );
 
@@ -146,12 +161,12 @@ const SubScreenShell: React.FC<SubScreenShellProps> = ({
           )}
         </div>
         <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-full p-0.5 bg-gradient-to-tr from-[#B4860B] via-[#FDE68A] to-[#D4AF37] shrink-0 shadow">
-          <div className="w-full h-full rounded-full bg-white flex items-center justify-center overflow-hidden p-0.5">
+          <div className="w-full h-full rounded-full bg-[#061124] flex items-center justify-center overflow-hidden p-0.5">
             <img
               src={TAIBAH_ASSETS.logo}
               alt="شعار طيبة نت"
               referrerPolicy="no-referrer"
-              className="w-full h-full object-contain"
+              className="w-full h-full rounded-full object-contain"
             />
           </div>
         </div>
@@ -161,14 +176,14 @@ const SubScreenShell: React.FC<SubScreenShellProps> = ({
     <main
       className={
         fixedViewport
-          ? 'flex-1 min-h-0 w-full max-w-5xl mx-auto px-2.5 py-2 overflow-hidden flex flex-col'
-          : 'flex-1 w-full max-w-5xl mx-auto p-3.5 sm:p-5 pb-10'
+          ? 'flex-1 min-h-0 w-full max-w-5xl mx-auto px-2.5 py-2 safe-x overflow-hidden flex flex-col'
+          : 'flex-1 w-full max-w-5xl mx-auto p-3 sm:p-5 pb-12 safe-x'
       }
     >
       {children}
     </main>
 
-    <footer className="shrink-0 bg-[#0F172A] border-t border-[#D4AF37]/60 safe-bottom py-1.5 text-center">
+    <footer className="shrink-0 bg-[#0F172A] border-t-2 border-[#D4AF37]/80 safe-bottom py-1.5 text-center">
       <span className="text-[11px] font-extrabold text-[#FDE68A]">
         {SUPER_ADMIN_CONFIG.developerCredit}
       </span>
@@ -246,6 +261,9 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
     appSettings.appDescription || DEFAULT_APP_SETTINGS.appDescription || ''
   );
   const [savingSettings, setSavingSettings] = useState(false);
+  const [showSettingsBioPassModal, setShowSettingsBioPassModal] = useState(false);
+  const [settingsBioPass, setSettingsBioPass] = useState('');
+  const [enrollingSettingsBio, setEnrollingSettingsBio] = useState(false);
 
   useEffect(() => {
     setNewsTicker(appSettings.newsTicker);
@@ -314,9 +332,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
         subtitle="بيع فوري 100% أونلاين وأوفلاين • حماية كاملة من التكرار"
         onBack={onBack}
       >
-        <Suspense fallback={<LazyFallback />}>
-          <DirectSaleScreen hideNumbers={hideNumbers} />
-        </Suspense>
+        <DirectSaleScreen hideNumbers={hideNumbers} />
       </SubScreenShell>
     );
   }
@@ -604,33 +620,42 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
 
               <button
                 type="button"
+                disabled={enrollingSettingsBio}
                 onClick={async () => {
                   if (biometricActive) {
                     clearBiometricEnrollment();
                     setBiometricActive(false);
-                    notifySuccess('تم إلغاء تفعيل البصمة على هذا الجهاز');
+                    notifySuccess('تم إلغاء تفعيل البصمة والوجه على هذا الجهاز');
                   } else if (profile) {
-                    const result = await enrollDeviceBiometric(
-                      profile.uid,
-                      profile.phone || profile.email,
-                      profile.name
-                    );
-                    if (result.success) {
-                      setBiometricActive(true);
-                      notifySuccess(
-                        result.mode === 'android_biometric'
-                          ? 'تم تفعيل بصمة الإصبع والوجه عبر Android BiometricPrompt بنجاح ✅'
-                          : result.mode === 'webauthn'
-                            ? 'تم تفعيل الدخول بالبصمة والوجه بنجاح ✅'
-                            : 'تم تفعيل الدخول السريع والآمن لهذا الجهاز بنجاح ✅'
+                    const mem = getMemorySessionCredentials();
+                    if (!mem?.password) {
+                      setSettingsBioPass('');
+                      setShowSettingsBioPassModal(true);
+                      return;
+                    }
+                    setEnrollingSettingsBio(true);
+                    try {
+                      const result = await enrollDeviceBiometric(
+                        profile.uid,
+                        profile.phone || profile.email,
+                        profile.name,
+                        { authEmail: mem.email || profile.email, password: mem.password }
                       );
+                      if (result.success) {
+                        setBiometricActive(true);
+                        notifySuccess(
+                          'تم تفعيل الدخول المستقل بالبصمة والوجه بنجاح ✅ — بدون طلب كلمة مرور'
+                        );
+                      }
+                    } finally {
+                      setEnrollingSettingsBio(false);
                     }
                   }
                 }}
                 className={`min-h-[46px] rounded-xl border-2 px-3.5 flex items-center justify-between text-xs font-extrabold transition-colors ${
                   biometricActive
-                    ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-800 dark:text-emerald-300'
-                    : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800'
+                    ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-900 dark:text-emerald-200'
+                    : 'border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white'
                 }`}
               >
                 <span className="flex items-center gap-1.5">
@@ -640,7 +665,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                 <span
                   className={
                     biometricActive
-                      ? 'text-emerald-600 dark:text-emerald-400 font-extrabold'
+                      ? 'text-emerald-700 dark:text-emerald-300 font-extrabold'
                       : 'text-[#1A365D] dark:text-[#FDE68A]'
                   }
                 >
@@ -650,15 +675,78 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
             </div>
           </div>
 
+          {showSettingsBioPassModal && profile && (
+            <div className="fixed inset-0 z-[75] flex items-center justify-center bg-black/70 p-4 safe-top safe-bottom">
+              <form
+                onSubmit={async (e) => {
+                  e.preventDefault();
+                  if (!settingsBioPass) return;
+                  setEnrollingSettingsBio(true);
+                  try {
+                    const result = await enrollDeviceBiometric(
+                      profile.uid,
+                      profile.phone || profile.email,
+                      profile.name,
+                      { authEmail: profile.email, password: settingsBioPass }
+                    );
+                    if (result.success) {
+                      setBiometricActive(true);
+                      setShowSettingsBioPassModal(false);
+                      setSettingsBioPass('');
+                      notifySuccess('تم تفعيل الدخول المستقل بالبصمة والوجه بنجاح ✅');
+                    }
+                  } finally {
+                    setEnrollingSettingsBio(false);
+                  }
+                }}
+                className="w-full max-w-sm rounded-3xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] p-5 shadow-2xl space-y-3"
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2 text-[#1A365D] dark:text-[#FDE68A]">
+                    <KeyRound className="w-5 h-5" />
+                    <h3 className="text-sm font-extrabold">تأكيد ربط البصمة والوجه</h3>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowSettingsBioPassModal(false)}
+                    className="w-8 h-8 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+                <p className="text-xs font-bold text-slate-600 dark:text-slate-300 leading-relaxed">
+                  أدخل كلمة المرور لمرة واحدة فقط لتشفير جلستك بأمان داخل الجهاز، وبعدها ستدخل بالبصمة أو الوجه مباشرةً بدون كلمة مرور.
+                </p>
+                <input
+                  type="password"
+                  value={settingsBioPass}
+                  onChange={(e) => setSettingsBioPass(e.target.value)}
+                  placeholder="كلمة مرور الحساب..."
+                  className="w-full min-h-[44px] rounded-xl border-2 border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-sm font-bold text-slate-900 dark:text-white focus:border-[#D4AF37] focus:outline-none"
+                  autoFocus
+                />
+                <button
+                  type="submit"
+                  disabled={enrollingSettingsBio}
+                  className="w-full min-h-[44px] royal-btn-3d text-white font-extrabold text-xs rounded-xl"
+                >
+                  {enrollingSettingsBio ? 'جاري التفعيل...' : 'تفعيل الدخول الفوري بالبصمة / الوجه'}
+                </button>
+              </form>
+            </div>
+          )}
+
           {/* About App Card */}
           <div className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] p-4 shadow-md">
             <div className="flex items-start gap-3">
-              <div className="w-14 h-14 rounded-full bg-white p-1 border-2 border-[#D4AF37] shrink-0 shadow overflow-hidden">
-                <img
-                  src={TAIBAH_ASSETS.logo}
-                  alt="شعار شبكة طيبة نت"
-                  className="w-full h-full object-contain"
-                />
+              <div className="w-14 h-14 rounded-full p-0.5 bg-gradient-to-tr from-[#B4860B] via-[#FDE68A] to-[#D4AF37] shrink-0 shadow">
+                <div className="w-full h-full rounded-full bg-[#061124] p-1 flex items-center justify-center overflow-hidden">
+                  <img
+                    src={TAIBAH_ASSETS.logo}
+                    alt="شعار شبكة طيبة نت"
+                    className="w-full h-full rounded-full object-contain"
+                  />
+                </div>
               </div>
               <div className="min-w-0 flex-1">
                 <h2 className="text-sm font-extrabold text-[#1A365D] dark:text-[#FDE68A] flex items-center gap-1.5">
@@ -1010,17 +1098,17 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
             {filteredLogs.map((log) => (
               <div
                 key={log.id}
-                className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-3.5 shadow-sm"
+                className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-slate-200 dark:border-slate-700 hover:border-[#D4AF37]/70 p-3.5 shadow-sm transition-colors"
               >
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-sm font-extrabold text-[#1A365D] dark:text-[#FDE68A]">
                     {log.action}
                   </span>
-                  <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                  <span className="text-[11px] font-bold text-slate-600 dark:text-slate-300">
                     {log.actorName} • {formatDateTimeAr(log.createdAt)}
                   </span>
                 </div>
-                <p className="text-xs text-slate-600 dark:text-slate-300 mt-1">{log.details}</p>
+                <p className="text-xs font-semibold text-slate-700 dark:text-slate-200 mt-1">{log.details}</p>
               </div>
             ))}
 

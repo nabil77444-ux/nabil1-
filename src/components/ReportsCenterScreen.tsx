@@ -471,8 +471,8 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
           <h2 className="text-xs sm:text-sm font-extrabold text-[#FDE68A] truncate flex-1 text-center">
             {reportData.title}
           </h2>
-          <div className="w-9 h-9 rounded-full bg-white p-0.5 border border-[#D4AF37] shrink-0 overflow-hidden">
-            <img src={TAIBAH_ASSETS.logo} alt="طيبة نت" className="w-full h-full object-contain" />
+          <div className="w-9 h-9 rounded-full bg-[#061124] p-0.5 border-2 border-[#D4AF37] shrink-0 overflow-hidden">
+            <img src={TAIBAH_ASSETS.logo} alt="طيبة نت" className="w-full h-full rounded-full object-contain" />
           </div>
         </div>
 
@@ -661,8 +661,8 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
           </p>
         </div>
         <div className="w-9 h-9 rounded-full p-0.5 bg-gradient-to-tr from-[#B4860B] via-[#FDE68A] to-[#D4AF37] shrink-0 shadow">
-          <div className="w-full h-full rounded-full bg-white flex items-center justify-center overflow-hidden p-0.5">
-            <img src={TAIBAH_ASSETS.logo} alt="شعار طيبة نت" className="w-full h-full object-contain" />
+          <div className="w-full h-full rounded-full bg-[#061124] flex items-center justify-center overflow-hidden p-0.5">
+            <img src={TAIBAH_ASSETS.logo} alt="شعار طيبة نت" className="w-full h-full rounded-full object-contain" />
           </div>
         </div>
       </div>
@@ -721,8 +721,8 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
           <div className="w-full max-w-xl rounded-3xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] shadow-2xl overflow-hidden my-auto max-h-[90dvh] flex flex-col">
             <div className="royal-header-3d px-4 py-3.5 flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <div className="w-9 h-9 rounded-full bg-white p-0.5 border border-[#D4AF37] overflow-hidden shrink-0">
-                  <img src={TAIBAH_ASSETS.logo} alt="طيبة نت" className="w-full h-full object-contain" />
+                <div className="w-9 h-9 rounded-full bg-[#061124] p-0.5 border-2 border-[#D4AF37] overflow-hidden shrink-0">
+                  <img src={TAIBAH_ASSETS.logo} alt="طيبة نت" className="w-full h-full rounded-full object-contain" />
                 </div>
                 <div>
                   <h3 className="text-sm font-extrabold text-white">

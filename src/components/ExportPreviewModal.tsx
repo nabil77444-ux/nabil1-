@@ -27,7 +27,7 @@ export const ExportPreviewModal: React.FC<ExportPreviewModalProps> = ({ result, 
   return (
     <div
       dir="rtl"
-      className="fixed inset-0 z-[80] flex items-center justify-center bg-black/65 p-3 overflow-y-auto"
+      className="fixed inset-0 z-[80] flex items-center justify-center bg-black/65 p-3 safe-top safe-bottom overflow-y-auto"
     >
       <div className="w-full max-w-md rounded-3xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] shadow-2xl overflow-hidden my-auto max-h-[90dvh] flex flex-col">
         <div className="royal-header-3d px-4 py-3 flex items-center justify-between">

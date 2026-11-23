@@ -1,5 +1,7 @@
 import React, { useMemo, useState } from 'react';
-import { Contact, Phone, Search, User, X } from 'lucide-react';
+import { Capacitor } from '@capacitor/core';
+import { Contacts } from '@capacitor-community/contacts';
+import { Contact, Loader2, Phone, RefreshCw, Search, Smartphone, User, X } from 'lucide-react';
 import { useFirebase } from '../contexts/FirebaseContext';
 import { useFeedback } from '../lib/feedback';
 import { cleanYemeniPhone } from '../utils/shareExport';
@@ -17,80 +19,105 @@ interface ContactPickerButtonProps {
   unauthenticated?: boolean;
 }
 
-interface NativeContactEntry {
-  name?: { display?: string; given?: string; family?: string };
-  phones?: Array<{ number?: string }>;
-}
+// Module-level session cache so opening the phonebook across different screens is instant
+let cachedDevicePhonebook: PickedContact[] | null = null;
 
-interface CapacitorContactsWindow extends Window {
-  Capacitor?: {
-    isNativePlatform?: () => boolean;
-    Plugins?: {
-      Contacts?: {
-        requestPermissions?: () => Promise<{ contacts?: string }>;
-        pickContact?: (opts?: { projection?: Record<string, boolean> }) => Promise<{
-          contact?: NativeContactEntry;
-        }>;
-        getContacts?: (opts?: { projection?: Record<string, boolean> }) => Promise<{
-          contacts?: NativeContactEntry[];
-        }>;
-      };
-    };
-  };
+function extractContactsList(
+  entries: Array<{
+    name?: { display?: string | null; given?: string | null; family?: string | null } | null;
+    phones?: Array<{ number?: string | null }> | null;
+  }>
+): PickedContact[] {
+  const seen = new Set<string>();
+  const out: PickedContact[] = [];
+  for (const entry of entries) {
+    const displayName = (
+      entry?.name?.display ||
+      [entry?.name?.given, entry?.name?.family].filter(Boolean).join(' ') ||
+      ''
+    ).trim();
+    const phones = entry?.phones || [];
+    if (phones.length === 0) continue;
+    for (const p of phones) {
+      const cleaned = cleanYemeniPhone(p?.number || '');
+      if (!cleaned) continue;
+      const dedupeKey = `${cleaned}__${displayName.toLowerCase()}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+      out.push({
+        name: displayName || cleaned,
+        phone: cleaned,
+      });
+    }
+  }
+  out.sort((a, b) => a.name.localeCompare(b.name, 'ar'));
+  return out;
 }
 
 /**
- * Direct Real Phone Contacts Picker:
- * 1. Native Android APK via @capacitor-community/contacts (requestPermissions -> pickContact / getContacts)
- * 2. Mobile Web/PWA via navigator.contacts.select
- * 3. Searchable In-App Directory fallback (only when browser/iframe lacks native Phonebook API — NO .vcf button)
+ * Full Official Phonebook Contacts Picker:
+ * 1. Native Android APK via `@capacitor-community/contacts` (auto-requests `READ_CONTACTS`,
+ *    loads the ENTIRE official phonebook for instant search + supports native Android `pickContact`).
+ * 2. Mobile Web / PWA via `navigator.contacts.select`.
+ * 3. Searchable unified modal combining full device phonebook + app directory (NO .vcf button).
  */
 export const ContactPickerButton: React.FC<ContactPickerButtonProps> = ({
   onSelect,
   className,
-  title = 'جلب من جهات اتصال الهاتف',
+  title = 'جلب من سجل أسماء الهاتف الرسمي',
   unauthenticated = false,
 }) => {
   const { customers, managedUsers } = useFirebase();
-  const { notifySuccess, notifyInfo } = useFeedback();
+  const { notifySuccess, notifyInfo, notifyWarning } = useFeedback();
 
   const [modalOpen, setModalOpen] = useState(false);
   const [search, setSearch] = useState('');
-  const [phonebookContacts, setPhonebookContacts] = useState<PickedContact[]>([]);
+  const [loadingPhonebook, setLoadingPhonebook] = useState(false);
+  const [phonebookContacts, setPhonebookContacts] = useState<PickedContact[]>(
+    () => cachedDevicePhonebook || []
+  );
+  const [activeTab, setActiveTab] = useState<'all' | 'phone' | 'app'>('all');
+
+  const isNative = Capacitor.isNativePlatform();
 
   const directoryContacts = useMemo(() => {
-    const map = new Map<string, PickedContact & { tag: string }>();
+    const map = new Map<string, PickedContact & { tag: string; source: 'phone' | 'app' }>();
 
-    // Real device contacts fetched via Capacitor getContacts (if pickContact wasn't used)
-    for (const c of phonebookContacts) {
-      const phone = cleanYemeniPhone(c.phone);
-      const key = phone || c.name;
-      if (key && !map.has(key)) {
-        map.set(key, { name: c.name || phone, phone, tag: 'دليل الهاتف' });
+    // 1. Official Device Phonebook Contacts (always prioritized first)
+    if (activeTab === 'all' || activeTab === 'phone') {
+      for (const c of phonebookContacts) {
+        const phone = cleanYemeniPhone(c.phone);
+        const key = `p_${phone}_${c.name}`;
+        if (phone && !map.has(key)) {
+          map.set(key, { name: c.name || phone, phone, tag: 'سجل الهاتف', source: 'phone' });
+        }
       }
     }
 
-    if (!unauthenticated) {
+    // 2. App Directory (Agents & Customers)
+    if (!unauthenticated && (activeTab === 'all' || activeTab === 'app')) {
       for (const u of managedUsers) {
         if (u.role === 'super_admin') continue;
         const phone = cleanYemeniPhone(u.phone);
-        const key = phone || u.uid;
+        const key = `a_${phone || u.uid}`;
         if (!map.has(key)) {
           map.set(key, {
             name: u.name,
             phone,
             tag: u.role === 'agent' ? 'وكيل' : 'عميل',
+            source: 'app',
           });
         }
       }
       for (const c of customers) {
         const phone = cleanYemeniPhone(c.phone || '');
-        const key = phone || c.id;
+        const key = `c_${phone || c.id}`;
         if (!map.has(key)) {
           map.set(key, {
             name: c.name,
             phone,
             tag: c.category || 'دفتر العملاء',
+            source: 'app',
           });
         }
       }
@@ -104,7 +131,7 @@ export const ContactPickerButton: React.FC<ContactPickerButtonProps> = ({
         item.phone.includes(q) ||
         item.tag.toLowerCase().includes(q)
     );
-  }, [customers, managedUsers, phonebookContacts, search, unauthenticated]);
+  }, [activeTab, customers, managedUsers, phonebookContacts, search, unauthenticated]);
 
   const handleFinishPick = (picked: PickedContact) => {
     const cleanPhone = cleanYemeniPhone(picked.phone);
@@ -113,69 +140,82 @@ export const ContactPickerButton: React.FC<ContactPickerButtonProps> = ({
     setModalOpen(false);
   };
 
-  const handleClick = async () => {
-    const capWin = window as CapacitorContactsWindow;
-    const nativeContacts = capWin.Capacitor?.Plugins?.Contacts;
+  const ensureContactsPermission = async (): Promise<boolean> => {
+    try {
+      const check = await Contacts.checkPermissions();
+      if (check?.contacts === 'granted') return true;
+      const req = await Contacts.requestPermissions();
+      if (req?.contacts === 'granted') return true;
+      notifyWarning(
+        'صلاحية جهات الاتصال مطلوبة',
+        'يرجى السماح بصلاحية قراءة جهات الاتصال (READ_CONTACTS) لعرض سجل أسماء الهاتف الرسمي بالكامل.'
+      );
+      return false;
+    } catch {
+      return false;
+    }
+  };
 
-    // Tier 1: Native Android APK — Direct Real Phonebook Access
-    if (capWin.Capacitor?.isNativePlatform?.() && nativeContacts) {
-      try {
-        if (typeof nativeContacts.requestPermissions === 'function') {
-          const perm = await nativeContacts.requestPermissions();
-          if (perm?.contacts === 'denied') {
-            notifyInfo('يرجى السماح بصلاحية جهات الاتصال من إعدادات الهاتف للوصول المباشر لدليل الهاتف');
-          }
-        }
+  const fetchFullDevicePhonebook = async (forceRefresh = false): Promise<PickedContact[]> => {
+    if (!isNative) return [];
+    if (!forceRefresh && cachedDevicePhonebook && cachedDevicePhonebook.length > 0) {
+      setPhonebookContacts(cachedDevicePhonebook);
+      return cachedDevicePhonebook;
+    }
+    setLoadingPhonebook(true);
+    try {
+      const granted = await ensureContactsPermission();
+      if (!granted) return [];
+      const res = await Contacts.getContacts({
+        projection: { name: true, phones: true },
+      });
+      const extracted = extractContactsList(res?.contacts || []);
+      cachedDevicePhonebook = extracted;
+      setPhonebookContacts(extracted);
+      return extracted;
+    } catch {
+      return [];
+    } finally {
+      setLoadingPhonebook(false);
+    }
+  };
 
-        if (typeof nativeContacts.pickContact === 'function') {
-          const res = await nativeContacts.pickContact({
-            projection: { name: true, phones: true },
-          });
-          const entry = res?.contact;
-          const displayName = (
-            entry?.name?.display ||
-            [entry?.name?.given, entry?.name?.family].filter(Boolean).join(' ') ||
-            ''
-          ).trim();
-          const rawNumber = entry?.phones?.find((p) => p.number)?.number || '';
-          const phone = cleanYemeniPhone(rawNumber);
-          if (displayName || phone) {
-            handleFinishPick({ name: displayName || phone, phone });
-            return;
-          }
-          // If user dismissed native contact picker, stop without opening extra modal
-          return;
-        }
-      } catch {
-        // If native pickContact failed on a specific ROM, try direct getContacts list
-        if (typeof nativeContacts.getContacts === 'function') {
-          try {
-            const listRes = await nativeContacts.getContacts({
-              projection: { name: true, phones: true },
-            });
-            const extracted: PickedContact[] = [];
-            for (const entry of listRes?.contacts || []) {
-              const name = (
-                entry.name?.display ||
-                [entry.name?.given, entry.name?.family].filter(Boolean).join(' ') ||
-                ''
-              ).trim();
-              const phone = cleanYemeniPhone(entry.phones?.find((p) => p.number)?.number || '');
-              if (phone || name) {
-                extracted.push({ name: name || phone, phone });
-              }
-            }
-            if (extracted.length > 0) {
-              setPhonebookContacts(extracted);
-              setSearch('');
-              setModalOpen(true);
-              return;
-            }
-          } catch {
-            // Fall through cleanly
-          }
-        }
+  const handleOpenNativeAndroidPicker = async () => {
+    if (!isNative) return;
+    try {
+      const granted = await ensureContactsPermission();
+      if (!granted) return;
+      const res = await Contacts.pickContact({
+        projection: { name: true, phones: true },
+      });
+      const entry = res?.contact;
+      const displayName = (
+        entry?.name?.display ||
+        [entry?.name?.given, entry?.name?.family].filter(Boolean).join(' ') ||
+        ''
+      ).trim();
+      const rawNumber = entry?.phones?.find((p) => p?.number)?.number || '';
+      const phone = cleanYemeniPhone(rawNumber);
+      if (displayName || phone) {
+        handleFinishPick({ name: displayName || phone, phone });
       }
+    } catch {
+      notifyInfo('تم إلغاء منتقي جهات اتصال الهاتف');
+    }
+  };
+
+  const handleClick = async () => {
+    // Tier 1: Native Android APK — Load FULL Official Phonebook via @capacitor-community/contacts
+    if (isNative) {
+      setSearch('');
+      setActiveTab('all');
+      setModalOpen(true);
+      const list = await fetchFullDevicePhonebook(false);
+      // If ROM blocked full list read, fall back immediately to native Android single contact picker
+      if (list.length === 0) {
+        await handleOpenNativeAndroidPicker();
+      }
+      return;
     }
 
     // Tier 2: Mobile Web / PWA Contact Picker API (Direct Phone Contacts)
@@ -198,14 +238,15 @@ export const ContactPickerButton: React.FC<ContactPickerButtonProps> = ({
             return;
           }
         }
-        return; // User closed native contact sheet
+        return;
       }
     } catch {
-      // Blocked in desktop browser/iframe — open searchable in-app directory
+      // Blocked in desktop browser/iframe — open searchable modal
     }
 
-    // Tier 3: Searchable In-App Directory (Customers & Agents)
+    // Tier 3: Unified Searchable Directory Modal (Desktop / Iframe)
     setSearch('');
+    setActiveTab('all');
     setModalOpen(true);
   };
 
@@ -218,7 +259,7 @@ export const ContactPickerButton: React.FC<ContactPickerButtonProps> = ({
         aria-label={title}
         className={
           className ||
-          'min-h-[42px] min-w-[42px] rounded-xl bg-[#1A365D] hover:bg-[#142a4a] text-[#FDE68A] border border-[#D4AF37]/70 flex items-center justify-center shrink-0 active:scale-95 transition-transform'
+          'min-h-[42px] min-w-[42px] rounded-xl bg-[#1A365D] hover:bg-[#142a4a] text-[#FDE68A] border-2 border-[#D4AF37]/80 flex items-center justify-center shrink-0 active:scale-95 transition-transform shadow-sm'
         }
       >
         <Contact className="w-4 h-4 sm:w-5 sm:h-5" />
@@ -227,68 +268,152 @@ export const ContactPickerButton: React.FC<ContactPickerButtonProps> = ({
       {modalOpen && (
         <div
           dir="rtl"
-          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-3 overflow-y-auto"
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-black/65 p-3 safe-top safe-bottom overflow-y-auto"
         >
           <div className="w-full max-w-md rounded-3xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] shadow-2xl overflow-hidden my-auto max-h-[85dvh] flex flex-col">
-            <div className="royal-header-3d px-4 py-3 flex items-center justify-between">
-              <div className="flex items-center gap-2 text-white">
-                <Phone className="w-5 h-5 text-[#FDE68A]" />
-                <h3 className="text-sm font-extrabold">دليل جهات الاتصال</h3>
+            <div className="royal-header-3d px-4 py-3 flex items-center justify-between gap-2 shrink-0">
+              <div className="flex items-center gap-2 text-white min-w-0">
+                <Phone className="w-5 h-5 text-[#FDE68A] shrink-0" />
+                <div className="min-w-0">
+                  <h3 className="text-sm font-extrabold truncate">سجل جهات الاتصال الرسمي</h3>
+                  {phonebookContacts.length > 0 && (
+                    <p className="text-[10.5px] font-bold text-[#FDE68A] tabular-nums">
+                      سجل الهاتف: {phonebookContacts.length} جهة اتصال
+                    </p>
+                  )}
+                </div>
               </div>
-              <button
-                type="button"
-                onClick={() => setModalOpen(false)}
-                className="w-8 h-8 rounded-full bg-white/15 text-white flex items-center justify-center"
-              >
-                <X className="w-4 h-4" />
-              </button>
+              <div className="flex items-center gap-1.5 shrink-0">
+                {isNative && (
+                  <button
+                    type="button"
+                    onClick={() => void fetchFullDevicePhonebook(true)}
+                    title="تحديث سجل الهاتف"
+                    aria-label="تحديث سجل الهاتف"
+                    className="w-8 h-8 rounded-full bg-white/15 border border-[#D4AF37]/60 text-[#FDE68A] flex items-center justify-center"
+                  >
+                    <RefreshCw className={`w-4 h-4 ${loadingPhonebook ? 'animate-spin' : ''}`} />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setModalOpen(false)}
+                  aria-label="إغلاق"
+                  className="w-8 h-8 rounded-full bg-white/15 border border-white/25 text-white flex items-center justify-center"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
             </div>
 
-            <div className="p-3.5 space-y-3 flex-1 overflow-y-auto">
-              <div className="relative">
-                <Search className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2" />
+            <div className="p-3.5 space-y-2.5 flex-1 min-h-0 flex flex-col overflow-hidden">
+              {/* Direct Native Android Picker Shortcut */}
+              {isNative && (
+                <button
+                  type="button"
+                  onClick={handleOpenNativeAndroidPicker}
+                  className="w-full min-h-[40px] rounded-xl gold-btn-3d text-[#0F172A] text-xs font-extrabold flex items-center justify-center gap-1.5 shrink-0"
+                >
+                  <Smartphone className="w-4 h-4" />
+                  <span>فتح منتقي جهات اتصال الهاتف الرسمي</span>
+                </button>
+              )}
+
+              {/* Source Filter Tabs when both Phonebook & App Directory exist */}
+              {!unauthenticated && phonebookContacts.length > 0 && (
+                <div className="grid grid-cols-3 gap-1.5 p-1 rounded-xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shrink-0">
+                  {(
+                    [
+                      { id: 'all', label: 'الكل' },
+                      { id: 'phone', label: `الهاتف (${phonebookContacts.length})` },
+                      { id: 'app', label: 'التطبيق' },
+                    ] as const
+                  ).map((tab) => (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      onClick={() => setActiveTab(tab.id)}
+                      className={`min-h-[32px] rounded-lg text-[11px] font-extrabold transition-colors ${
+                        activeTab === tab.id
+                          ? 'bg-[#1A365D] text-[#FDE68A] shadow-sm'
+                          : 'text-slate-700 dark:text-slate-300'
+                      }`}
+                    >
+                      {tab.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* Search Input */}
+              <div className="relative shrink-0">
+                <Search className="w-4 h-4 text-slate-500 dark:text-slate-400 absolute right-3 top-1/2 -translate-y-1/2" />
                 <input
                   type="text"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
-                  placeholder="بحث بالاسم أو رقم الهاتف..."
-                  className="w-full min-h-[40px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 pr-9 pl-3 text-xs font-bold focus:border-[#D4AF37] focus:outline-none"
+                  placeholder="ابحث بالاسم أو رقم الهاتف..."
+                  className="w-full min-h-[42px] rounded-xl border-2 border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 pr-9 pl-3 text-xs font-bold text-slate-900 dark:text-white focus:border-[#D4AF37] focus:outline-none"
                 />
               </div>
 
-              {directoryContacts.length === 0 ? (
-                <div className="rounded-2xl bg-slate-50 dark:bg-slate-800 p-5 text-center text-xs font-bold text-slate-500 dark:text-slate-400 leading-relaxed">
+              {/* Contacts List */}
+              {loadingPhonebook ? (
+                <div className="py-10 flex flex-col items-center justify-center gap-2 text-[#1A365D] dark:text-[#FDE68A]">
+                  <Loader2 className="w-6 h-6 animate-spin" />
+                  <span className="text-xs font-extrabold">جاري جلب سجل أسماء الهاتف الرسمي...</span>
+                </div>
+              ) : directoryContacts.length === 0 ? (
+                <div className="rounded-2xl bg-slate-50 dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 p-5 text-center text-xs font-bold text-slate-700 dark:text-slate-300 leading-relaxed">
                   لا توجد جهات اتصال مطابقة حالياً.
                   <br />
-                  عند استخدام تطبيق أندرويد (APK) أو متصفح الهاتف يتم فتح دليل جهات اتصال الهاتف مباشرة بضغطة واحدة.
+                  عند استخدام تطبيق أندرويد (APK) يتم جلب كامل سجل أسماء الهاتف الرسمي تلقائياً بعد السماح بالصلاحية.
                 </div>
               ) : (
-                <div className="space-y-1.5 max-h-72 overflow-y-auto">
-                  {directoryContacts.map((c, idx) => (
+                <div className="space-y-1.5 flex-1 overflow-y-auto taibah-scroll pl-0.5">
+                  {directoryContacts.slice(0, 250).map((c, idx) => (
                     <button
-                      key={`${c.phone}_${idx}`}
+                      key={`${c.source}_${c.phone}_${idx}`}
                       type="button"
                       onClick={() => handleFinishPick({ name: c.name, phone: c.phone })}
-                      className="w-full rounded-xl border border-slate-200 dark:border-slate-700 hover:border-[#D4AF37] bg-slate-50 dark:bg-slate-800/80 p-2.5 flex items-center justify-between gap-2 text-right transition-colors"
+                      className="w-full rounded-xl border-2 border-slate-200 dark:border-slate-700 hover:border-[#D4AF37] bg-slate-50 dark:bg-slate-800/90 p-2.5 flex items-center justify-between gap-2 text-right transition-colors shadow-xs"
                     >
-                      <div className="flex items-center gap-2 min-w-0">
-                        <span className="w-8 h-8 rounded-full bg-[#1A365D] text-[#FDE68A] flex items-center justify-center shrink-0">
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <span
+                          className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 border ${
+                            c.source === 'phone'
+                              ? 'bg-emerald-700 text-white border-emerald-400'
+                              : 'bg-[#1A365D] text-[#FDE68A] border-[#D4AF37]'
+                          }`}
+                        >
                           <User className="w-4 h-4" />
                         </span>
                         <div className="min-w-0">
                           <div className="text-xs font-extrabold text-slate-900 dark:text-white truncate">
                             {c.name}
                           </div>
-                          <div className="text-[11px] font-bold text-slate-500 dark:text-slate-400 tabular-nums">
+                          <div className="text-[11px] font-bold text-slate-600 dark:text-slate-300 tabular-nums">
                             {c.phone || 'بدون رقم'}
                           </div>
                         </div>
                       </div>
-                      <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-md bg-amber-100 dark:bg-amber-900/40 text-[#1A365D] dark:text-[#FDE68A] shrink-0">
+                      <span
+                        className={`text-[10px] font-extrabold px-2 py-0.5 rounded-md shrink-0 border ${
+                          c.source === 'phone'
+                            ? 'bg-emerald-50 dark:bg-emerald-950/50 border-emerald-300 dark:border-emerald-700 text-emerald-800 dark:text-emerald-300'
+                            : 'bg-amber-50 dark:bg-amber-900/40 border-[#D4AF37]/60 text-[#1A365D] dark:text-[#FDE68A]'
+                        }`}
+                      >
                         {c.tag}
                       </span>
                     </button>
                   ))}
+                  {directoryContacts.length > 250 && (
+                    <p className="text-center text-[11px] font-bold text-slate-500 py-2">
+                      يتم عرض أول 250 نتيجة — استخدم مربع البحث للوصول السريع لأي اسم من أصل{' '}
+                      {directoryContacts.length}
+                    </p>
+                  )}
                 </div>
               )}
             </div>

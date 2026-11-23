@@ -291,11 +291,13 @@ export const CustomersLedgerScreen: React.FC<CustomersLedgerScreenProps> = ({ hi
             </p>
           </div>
         </div>
-        <img
-          src={TAIBAH_ASSETS.logo}
-          alt="شعار طيبة نت"
-          className="w-11 h-11 rounded-full object-contain bg-white p-0.5 border-2 border-[#D4AF37] shrink-0"
-        />
+        <div className="w-11 h-11 rounded-full bg-[#061124] p-0.5 border-2 border-[#D4AF37] shrink-0 overflow-hidden shadow">
+          <img
+            src={TAIBAH_ASSETS.logo}
+            alt="شعار طيبة نت"
+            className="w-full h-full rounded-full object-contain"
+          />
+        </div>
       </div>
 
       {/* Add New Account CTA */}
@@ -477,11 +479,13 @@ export const CustomersLedgerScreen: React.FC<CustomersLedgerScreenProps> = ({ hi
           <div className="w-full max-w-xl rounded-3xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] shadow-2xl overflow-hidden my-auto max-h-[93dvh] flex flex-col">
             <div className="royal-header-3d px-4 py-3 flex items-center justify-between">
               <div className="flex items-center gap-2.5 min-w-0">
-                <img
-                  src={TAIBAH_ASSETS.logo}
-                  alt="طيبة نت"
-                  className="w-9 h-9 rounded-full object-contain bg-white p-0.5 border border-[#D4AF37] shrink-0"
-                />
+                <div className="w-9 h-9 rounded-full bg-[#061124] p-0.5 border-2 border-[#D4AF37] shrink-0 overflow-hidden">
+                  <img
+                    src={TAIBAH_ASSETS.logo}
+                    alt="طيبة نت"
+                    className="w-full h-full rounded-full object-contain"
+                  />
+                </div>
                 <div className="min-w-0">
                   <h3 className="text-sm font-extrabold text-white truncate">{selectedCustomer.name}</h3>
                   <p className="text-[11px] font-bold text-[#FDE68A] tabular-nums">
