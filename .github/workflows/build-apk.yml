@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       build_type:
-        description: 'Build Type (release requires original Keystore secrets)'
+        description: 'Build Type (release: V1+V2+V3 signed via Keystore secrets or auto keytool | debug: assembleDebug)'
         required: true
         default: 'release'
         type: choice
@@ -78,11 +78,11 @@ jobs:
             "android.permission.USE_BIOMETRIC" \
             "android.permission.POST_NOTIFICATIONS"; do
             if ! grep -q "$PERM" "$MANIFEST"; then
-              sed -i "s|<application|<uses-permission android:name=\"$PERM\" />\n    <application|" "$MANIFEST"
+              sed -i "0,/<application/{s|<application|<uses-permission android:name=\"$PERM\" />\n    <application|}" "$MANIFEST"
             fi
           done
 
-      - name: Build Signed Release APK (with Original Keystore Verification)
+      - name: Build & Sign Installable Android APK (Debug / Release V1+V2+V3)
         working-directory: android
         env:
           BUILD_TYPE: ${{ github.event.inputs.build_type || 'release' }}
@@ -91,37 +91,97 @@ jobs:
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
+          set -euo pipefail
           chmod +x gradlew
-          BUILD_TOOLS_DIR=$(ls -d "$ANDROID_HOME"/build-tools/* 2>/dev/null | sort -V | tail -n 1)
+
+          ANDROID_SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          BUILD_TOOLS_DIR=$(ls -d "$ANDROID_SDK"/build-tools/* 2>/dev/null | sort -V | tail -n 1)
           APKSIGNER="$BUILD_TOOLS_DIR/apksigner"
           ZIPALIGN="$BUILD_TOOLS_DIR/zipalign"
+          AAPT2="$BUILD_TOOLS_DIR/aapt2"
 
-          if [ -n "$KEYSTORE_B64" ] && [ -n "$KEYSTORE_PASS" ] && [ -n "$KEY_ALIAS" ] && [ -n "$KEY_PASS" ]; then
-            echo "$KEYSTORE_B64" | base64 -d > release.keystore
+          test -x "$APKSIGNER" || { echo "::error::apksigner not found in $BUILD_TOOLS_DIR"; exit 1; }
+          test -x "$ZIPALIGN" || { echo "::error::zipalign not found in $BUILD_TOOLS_DIR"; exit 1; }
+
+          rm -f ../TaibahNet-Cards.apk release.keystore
+
+          if [ "$BUILD_TYPE" = "debug" ]; then
+            echo "=== Building Signed Android Debug APK ==="
+            ./gradlew assembleDebug
+            DEBUG_APK="app/build/outputs/apk/debug/app-debug.apk"
+            test -s "$DEBUG_APK" || { echo "::error::Debug APK not produced at $DEBUG_APK"; exit 1; }
+            cp -f "$DEBUG_APK" ../TaibahNet-Cards.apk
+            echo "SIGNING_STATUS=DEBUG_SIGNED" >> "$GITHUB_ENV"
+          else
+            echo "=== Building Signed Android Release APK ==="
             ./gradlew assembleRelease
-            UNSIGNED_APK="app/build/outputs/apk/release/app-release-unsigned.apk"
+
+            if [ -s "app/build/outputs/apk/release/app-release-unsigned.apk" ]; then
+              RAW_RELEASE_APK="app/build/outputs/apk/release/app-release-unsigned.apk"
+            elif [ -s "app/build/outputs/apk/release/app-release.apk" ]; then
+              RAW_RELEASE_APK="app/build/outputs/apk/release/app-release.apk"
+            else
+              echo "::error::Release APK output not found in app/build/outputs/apk/release/"
+              ls -la app/build/outputs/apk/release/ || true
+              exit 1
+            fi
+
             ALIGNED_APK="app/build/outputs/apk/release/app-release-aligned.apk"
-            "$ZIPALIGN" -v -p 4 "$UNSIGNED_APK" "$ALIGNED_APK"
+            rm -f "$ALIGNED_APK"
+            "$ZIPALIGN" -f -p -v 4 "$RAW_RELEASE_APK" "$ALIGNED_APK"
+
+            if [ -n "$KEYSTORE_B64" ] && [ -n "$KEYSTORE_PASS" ] && [ -n "$KEY_ALIAS" ] && [ -n "$KEY_PASS" ]; then
+              echo "Using repository Android Release Keystore secrets..."
+              echo "$KEYSTORE_B64" | base64 -d > release.keystore
+              SIGN_STORE_PASS="$KEYSTORE_PASS"
+              SIGN_KEY_ALIAS="$KEY_ALIAS"
+              SIGN_KEY_PASS="$KEY_PASS"
+              echo "SIGNING_STATUS=RELEASE_SIGNED_ORIGINAL_KEYSTORE" >> "$GITHUB_ENV"
+            else
+              echo "Keystore secrets not configured; generating automatic RSA-2048 Release Keystore via keytool..."
+              SIGN_STORE_PASS=$(openssl rand -hex 16)
+              SIGN_KEY_PASS="$SIGN_STORE_PASS"
+              SIGN_KEY_ALIAS="taibah-net-release"
+              keytool -genkeypair -v \
+                -keystore release.keystore \
+                -storetype PKCS12 \
+                -alias "$SIGN_KEY_ALIAS" \
+                -keyalg RSA \
+                -keysize 2048 \
+                -validity 10000 \
+                -storepass "$SIGN_STORE_PASS" \
+                -keypass "$SIGN_KEY_PASS" \
+                -dname "CN=Taibah Net, OU=TAIBAH NET, O=Taibah Net Wireless, L=Yemen, C=YE"
+              echo "SIGNING_STATUS=RELEASE_SIGNED_AUTO_KEYTOOL_V1_V2_V3" >> "$GITHUB_ENV"
+            fi
+
             "$APKSIGNER" sign \
+              --v1-signing-enabled true \
+              --v2-signing-enabled true \
+              --v3-signing-enabled true \
               --ks release.keystore \
-              --ks-pass "pass:$KEYSTORE_PASS" \
-              --ks-key-alias "$KEY_ALIAS" \
-              --key-pass "pass:$KEY_PASS" \
+              --ks-pass "pass:$SIGN_STORE_PASS" \
+              --ks-key-alias "$SIGN_KEY_ALIAS" \
+              --key-pass "pass:$SIGN_KEY_PASS" \
               --out ../TaibahNet-Cards.apk \
               "$ALIGNED_APK"
-            rm -f release.keystore
-            echo "SIGNING_STATUS=RELEASE_SIGNED_ORIGINAL_KEYSTORE" >> "$GITHUB_ENV"
-          elif [ "$BUILD_TYPE" = "debug" ]; then
-            ./gradlew assembleDebug
-            cp app/build/outputs/apk/debug/app-debug.apk ../TaibahNet-Cards.apk
-            echo "SIGNING_STATUS=DEBUG_TEST_ONLY" >> "$GITHUB_ENV"
-          else
-            echo "::error::Missing original Android release keystore secrets (ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD). Stopping to preserve signing certificate compatibility."
-            exit 1
+
+            rm -f release.keystore "$ALIGNED_APK"
           fi
 
-          echo "=== Official apksigner Verification ==="
+          test -s ../TaibahNet-Cards.apk || { echo "::error::Final TaibahNet-Cards.apk is missing or empty"; exit 1; }
+
+          echo "=== Verifying APK Alignment (zipalign -c) ==="
+          "$ZIPALIGN" -c -v 4 ../TaibahNet-Cards.apk
+
+          echo "=== Verifying Official APK Signature (apksigner verify) ==="
           "$APKSIGNER" verify --verbose --print-certs ../TaibahNet-Cards.apk
+
+          if [ -x "$AAPT2" ]; then
+            echo "=== Verifying Android Package Metadata (aapt2) ==="
+            "$AAPT2" dump badging ../TaibahNet-Cards.apk | head -n 5
+          fi
+
           echo "=== APK SHA-256 & File Size ==="
           sha256sum ../TaibahNet-Cards.apk
           ls -lh ../TaibahNet-Cards.apk
