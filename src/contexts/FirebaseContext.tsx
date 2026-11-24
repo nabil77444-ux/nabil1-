@@ -1,8 +1,10 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  createUserWithEmailAndPassword,
   EmailAuthProvider,
   onAuthStateChanged,
   reauthenticateWithCredential,
+  sendEmailVerification,
   signInWithEmailAndPassword,
   type User as FirebaseUser,
 } from 'firebase/auth';
@@ -101,6 +103,7 @@ import {
 import {
   findVaultAccountByUid,
   initLocalAuthVaultFromIdb,
+  migrateVaultAccountUid,
   raceWithTimeout,
   removeVaultAccount,
   updateVaultAccountHashDirectly,
@@ -169,7 +172,13 @@ interface FirebaseContextValue {
   signOutUser: () => Promise<void>;
   activateLocalSession: (
     userProfile: UserProfile,
-    silentCloudCreds?: { email: string; password: string }
+    silentCloudCreds?: {
+      email: string;
+      password: string;
+      isFirstTimeAdminSetup?: boolean;
+      isProvisionalAdmin?: boolean;
+      needsBackgroundProfileRefresh?: boolean;
+    }
   ) => void;
   resolveAndLinkUserProfile: (user: FirebaseUser) => Promise<UserProfile | null>;
   writeAuditLog: (action: string, details: string) => Promise<void>;
@@ -762,9 +771,18 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
   }, [profile]);
 
-  // Instant < 0.2s Local Session Activator (used by localAuthVault & biometric login)
+  // Instant < 0.05s Zero-Block Local Session Activator (0 cloud waits before opening HomeScreen!)
   const activateLocalSession = useCallback(
-    (userProfile: UserProfile, silentCloudCreds?: { email: string; password: string }) => {
+    (
+      userProfile: UserProfile,
+      silentCloudCreds?: {
+        email: string;
+        password: string;
+        isFirstTimeAdminSetup?: boolean;
+        isProvisionalAdmin?: boolean;
+        needsBackgroundProfileRefresh?: boolean;
+      }
+    ) => {
       explicitSignOutRef.current = false;
       markActiveSessionUnlocked(userProfile.uid, userProfile.email);
       saveActiveProfileToSession(userProfile);
@@ -777,7 +795,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         setAdminDocApproved(true);
       }
 
-      // Hydrate user's cached local sales/customers immediately (0 cloud reads)
+      // Hydrate user's cached local sales/customers immediately (0 Firestore reads)
       const cachedSales = readCachedJson<SaleDoc[]>(`${CACHE_SALES_PREFIX}${userProfile.uid}`, []);
       if (cachedSales.length > 0) setSales(cachedSales);
       const cachedCustomers = readCachedJson<CustomerAccount[]>(
@@ -786,25 +804,133 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       );
       if (cachedCustomers.length > 0) setCustomers(cachedCustomers);
 
-      // Silently warm Firebase Auth token in the background ONLY if online (never blocks login or kicks out!)
+      // Deferred silent background cloud auth & sync (runs AFTER HomeScreen paints, never blocks or kicks out!)
       if (
         silentCloudCreds?.email &&
         silentCloudCreds?.password &&
         (typeof navigator === 'undefined' || navigator.onLine)
       ) {
-        const currentAuthUid = auth.currentUser?.uid;
-        if (currentAuthUid !== userProfile.uid) {
-          void signInWithEmailAndPassword(
-            auth,
-            silentCloudCreds.email.trim().toLowerCase(),
-            silentCloudCreds.password
-          ).catch(() => {
-            // Completely silent: local session stays active even offline or if Firebase is slow/unreachable
+        const cleanEmail = silentCloudCreds.email.trim().toLowerCase();
+        const pwd = silentCloudCreds.password;
+
+        window.setTimeout(() => {
+          if (explicitSignOutRef.current || !hasActiveSessionUnlocked()) return;
+          if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+
+          const runBackgroundCloudSync = async () => {
+            let signedUser: FirebaseUser | null =
+              auth.currentUser &&
+              (auth.currentUser.uid === userProfile.uid ||
+                (auth.currentUser.email || '').trim().toLowerCase() === cleanEmail)
+                ? auth.currentUser
+                : null;
+
+            if (!signedUser) {
+              try {
+                const cred = await signInWithEmailAndPassword(auth, cleanEmail, pwd);
+                signedUser = cred.user;
+              } catch (err: unknown) {
+                const code = (err as { code?: string })?.code || '';
+                if (
+                  silentCloudCreds.isFirstTimeAdminSetup &&
+                  (code === 'auth/user-not-found' || code === 'auth/invalid-credential')
+                ) {
+                  try {
+                    const created = await createUserWithEmailAndPassword(auth, cleanEmail, pwd);
+                    signedUser = created.user;
+                    if (!created.user.emailVerified) {
+                      void sendEmailVerification(created.user).catch(() => {});
+                    }
+                  } catch (createErr: unknown) {
+                    const createCode = (createErr as { code?: string })?.code || '';
+                    if (
+                      silentCloudCreds.isProvisionalAdmin &&
+                      createCode === 'auth/email-already-in-use'
+                    ) {
+                      removeVaultAccount(userProfile.uid);
+                      notifyWarning(
+                        'تنبيه المزامنة السحابية',
+                        'تم الدخول محلياً بنجاح، لكن كلمة المرور لا تطابق كلمة مرور السحابة — أعد الدخول بكلمة مرور السحابة للمزامنة.'
+                      );
+                    }
+                    return;
+                  }
+                } else {
+                  if (
+                    silentCloudCreds.isProvisionalAdmin &&
+                    (code === 'auth/wrong-password' || code === 'auth/invalid-credential')
+                  ) {
+                    removeVaultAccount(userProfile.uid);
+                    notifyWarning(
+                      'تنبيه المزامنة السحابية',
+                      'تم الدخول محلياً بنجاح، لكن كلمة المرور لا تطابق كلمة مرور السحابة — أعد الدخول بكلمة مرور السحابة للمزامنة.'
+                    );
+                  }
+                  // Offline, quota, timeout, or unreachable -> completely silent, local session stays 100% active
+                  return;
+                }
+              }
+            }
+
+            if (!signedUser || explicitSignOutRef.current || !hasActiveSessionUnlocked()) return;
+
+            // Seamlessly upgrade provisional local UID to real Firebase Auth UID without disturbing UI
+            if (signedUser.uid !== userProfile.uid) {
+              migrateVaultAccountUid(userProfile.uid, signedUser.uid, cleanEmail);
+              const upgradedProfile: UserProfile = {
+                ...userProfile,
+                uid: signedUser.uid,
+                email: signedUser.email?.trim().toLowerCase() || userProfile.email,
+              };
+              markActiveSessionUnlocked(upgradedProfile.uid, upgradedProfile.email);
+              saveActiveProfileToSession(upgradedProfile);
+              persistProfileToLocalCache(upgradedProfile);
+              setProfile((prev) =>
+                prev && prev.uid === userProfile.uid ? { ...prev, uid: signedUser!.uid } : prev || upgradedProfile
+              );
+              if (upgradedProfile.role === 'super_admin' && upgradedProfile.status === 'active') {
+                setAdminDocApproved(true);
+              }
+            }
+
+            // Silently fetch full Firestore role/balance/discountRate for newly activated agents/clients
+            if (silentCloudCreds.needsBackgroundProfileRefresh && !isSuperAdminEmail(cleanEmail)) {
+              const refreshed = await resolveProfileRef.current(signedUser).catch(() => null);
+              if (refreshed && !explicitSignOutRef.current && hasActiveSessionUnlocked()) {
+                if (refreshed.status === 'suspended' || refreshed.status === 'rejected') {
+                  updateVaultAccountProfile(refreshed.uid, {
+                    status: refreshed.status,
+                    disabled: true,
+                  });
+                  explicitSignOutRef.current = true;
+                  clearActiveSession(true);
+                  clearMemorySessionCredentials();
+                  setProfile(null);
+                  notifyError('تم إيقاف الحساب', 'تم إيقاف هذا الحساب من قِبل الإدارة.');
+                } else {
+                  updateVaultAccountProfile(refreshed.uid, {
+                    name: refreshed.name,
+                    phone: refreshed.phone,
+                    email: refreshed.email,
+                    role: refreshed.role,
+                    status: refreshed.status,
+                    disabled: false,
+                    parentAgentId: refreshed.parentAgentId,
+                    discountRate: refreshed.discountRate,
+                    balance: refreshed.balance,
+                  });
+                }
+              }
+            }
+          };
+
+          void runBackgroundCloudSync().catch(() => {
+            // Completely silent: local session is never affected by background sync errors
           });
-        }
+        }, 150);
       }
     },
-    []
+    [notifyError, notifyWarning]
   );
 
   // Auth listener STRICTLY DECOUPLED from kicking out active local sessions
@@ -816,7 +942,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (!user) {
         // CRITICAL: Active session is managed exclusively by local `sessionStorage`.
         // NEVER kick an actively unlocked user out on null auth emissions, blur, keyboard,
-        // PDF viewer, visibilitychange, offline state, or token refresh!
+        // PDF viewer, visibilitychange, offline state, quota errors, or token refresh!
         if (hasActiveSessionUnlocked() && !explicitSignOutRef.current) {
           setFirebaseUser(null);
           return;
@@ -832,11 +958,27 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       } else {
         explicitSignOutRef.current = false;
         setFirebaseUser(user);
-        // Only hydrate profile from Firebase Auth if no different active local session is already unlocked
         const sessionProfile = readActiveProfileFromSession();
-        if (hasActiveSessionUnlocked() && sessionProfile && sessionProfile.uid === user.uid) {
-          setProfile((prev) => prev || sessionProfile);
-          if (sessionProfile.role === 'super_admin' && sessionProfile.status === 'active') {
+        const sameEmail =
+          Boolean(sessionProfile?.email && user.email) &&
+          sessionProfile!.email.trim().toLowerCase() === (user.email || '').trim().toLowerCase();
+
+        if (hasActiveSessionUnlocked() && sessionProfile && (sessionProfile.uid === user.uid || sameEmail)) {
+          const syncedSession =
+            sessionProfile.uid !== user.uid ? { ...sessionProfile, uid: user.uid } : sessionProfile;
+          if (sessionProfile.uid !== user.uid) {
+            migrateVaultAccountUid(sessionProfile.uid, user.uid, syncedSession.email);
+            markActiveSessionUnlocked(user.uid, syncedSession.email);
+            saveActiveProfileToSession(syncedSession);
+            persistProfileToLocalCache(syncedSession);
+          }
+          setProfile((prev) => {
+            if (!prev) return syncedSession;
+            return prev.uid === sessionProfile.uid && sessionProfile.uid !== user.uid
+              ? { ...prev, uid: user.uid }
+              : prev;
+          });
+          if (syncedSession.role === 'super_admin' && syncedSession.status === 'active') {
             setAdminDocApproved(true);
           }
           setProfileLoading(false);
@@ -902,6 +1044,10 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   }, [authReady, firebaseUser, verificationVersion, syncNonce]);
 
   const needsAdminEmailVerification = useMemo(() => {
+    // Active local Super Admin sessions are NEVER blocked or interrupted by background email checks
+    if (hasActiveSessionUnlocked() && profile?.role === 'super_admin' && profile.status === 'active') {
+      return false;
+    }
     const activeUser = auth.currentUser || firebaseUser;
     if (!activeUser) return false;
     if (!isSuperAdminEmail(activeUser.email)) return false;

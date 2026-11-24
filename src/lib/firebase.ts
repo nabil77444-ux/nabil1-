@@ -25,14 +25,14 @@ import { SUPER_ADMIN_CONFIG } from '../types/taibah';
 const app = initializeApp(firebaseConfig);
 
 // CRITICAL: Connect to the provisioned Enterprise Firestore database ID using
-// `experimentalAutoDetectLongPolling: true` + `persistentLocalCache(...)` inside safe `try/catch`
-// to prevent WebSocket/WebChannel stalls behind VPNs, mobile networks, and browser previews.
+// `experimentalForceLongPolling: true` + `persistentLocalCache(...)` inside safe `try/catch`
+// to prevent WebSocket/WebChannel stalls on Android WebView (minSdk 23), VPNs, and browser previews.
 function createOfflineFirstFirestore(): Firestore {
   try {
     return initializeFirestore(
       app,
       {
-        experimentalAutoDetectLongPolling: true,
+        experimentalForceLongPolling: true,
         localCache: persistentLocalCache({
           tabManager: persistentMultipleTabManager(),
           cacheSizeBytes: CACHE_SIZE_UNLIMITED,
@@ -45,7 +45,7 @@ function createOfflineFirstFirestore(): Firestore {
       return initializeFirestore(
         app,
         {
-          experimentalAutoDetectLongPolling: true,
+          experimentalForceLongPolling: true,
           localCache: persistentLocalCache({
             tabManager: persistentSingleTabManager({}),
             cacheSizeBytes: CACHE_SIZE_UNLIMITED,
@@ -58,7 +58,7 @@ function createOfflineFirstFirestore(): Firestore {
         return initializeFirestore(
           app,
           {
-            experimentalAutoDetectLongPolling: true,
+            experimentalForceLongPolling: true,
             localCache: memoryLocalCache(),
           },
           firebaseConfig.firestoreDatabaseId
