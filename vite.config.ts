@@ -86,7 +86,9 @@ export default defineConfig(() => {
           ],
         },
         devOptions: {
-          enabled: true,
+          // vite-plugin-pwa dev SW registration relies on Vite HMR (`import.meta.hot.send`),
+          // so only enable devOptions when HMR is active; production builds always include full PWA.
+          enabled: process.env.DISABLE_HMR !== 'true',
           type: 'module',
         },
       }),

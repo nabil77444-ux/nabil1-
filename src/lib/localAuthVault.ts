@@ -515,8 +515,104 @@ export function vaultAccountToUserProfile(acc: LocalVaultAccount): UserProfile {
 }
 
 /**
- * Enforce a hard timeout (default 3 seconds) on first-time cloud activation calls
- * so login never hangs on slow or blocked connections.
+ * Look up any previously cached user metadata on this device (`taibah_cached_profile_v2`,
+ * `taibah_cached_users_list_v1`, `taibah_auto_backup_v1`) by UID, email, or phone.
+ * Used strictly as profile metadata enrichment / phone->email resolution (NEVER bypasses password check!).
+ */
+export function findCachedLocalUserHint(
+  rawIdentifier?: string,
+  uid?: string
+): Partial<UserProfile> | null {
+  try {
+    const { email, phone } = normalizeAuthIdentifier(rawIdentifier || '');
+    const targetEmail = email.toLowerCase();
+    const targetPhone = phone.replace(/[^\d]/g, '').replace(/^00967|^967/, '');
+
+    const candidates: Array<Record<string, unknown>> = [];
+
+    const readJson = (key: string): unknown => {
+      try {
+        const raw = localStorage.getItem(key);
+        return raw ? JSON.parse(raw) : null;
+      } catch {
+        return null;
+      }
+    };
+
+    const cachedProfile = readJson('taibah_cached_profile_v2');
+    if (cachedProfile && typeof cachedProfile === 'object') {
+      candidates.push(cachedProfile as Record<string, unknown>);
+    }
+
+    const cachedUsers = readJson('taibah_cached_users_list_v1');
+    if (Array.isArray(cachedUsers)) {
+      for (const u of cachedUsers) {
+        if (u && typeof u === 'object') candidates.push(u as Record<string, unknown>);
+      }
+    }
+
+    const autoBackup = readJson('taibah_auto_backup_v1') as {
+      users?: unknown[];
+      clients?: unknown[];
+    } | null;
+    if (autoBackup && typeof autoBackup === 'object') {
+      for (const arr of [autoBackup.users, autoBackup.clients]) {
+        if (Array.isArray(arr)) {
+          for (const u of arr) {
+            if (u && typeof u === 'object') candidates.push(u as Record<string, unknown>);
+          }
+        }
+      }
+    }
+
+    for (const item of candidates) {
+      const itemUid = typeof item.uid === 'string' ? item.uid.trim() : '';
+      const itemEmail = typeof item.email === 'string' ? item.email.trim().toLowerCase() : '';
+      const itemPhone = normalizeDigits(typeof item.phone === 'string' ? item.phone : '')
+        .replace(/[^\d]/g, '')
+        .replace(/^00967|^967/, '');
+
+      const matched =
+        (uid && itemUid === uid) ||
+        (targetEmail && itemEmail === targetEmail) ||
+        (targetPhone && targetPhone.length >= 7 && itemPhone === targetPhone);
+
+      if (matched) {
+        const role: UserRole =
+          item.role === 'super_admin' || item.role === 'agent' || item.role === 'client'
+            ? item.role
+            : isSuperAdminEmail(itemEmail)
+              ? 'super_admin'
+              : 'client';
+        const status: UserStatus =
+          item.status === 'active' ||
+          item.status === 'pending' ||
+          item.status === 'rejected' ||
+          item.status === 'suspended'
+            ? item.status
+            : 'active';
+        return {
+          uid: itemUid || uid || '',
+          name: typeof item.name === 'string' ? item.name : undefined,
+          phone: itemPhone || undefined,
+          email: itemEmail || undefined,
+          role,
+          status,
+          parentAgentId: typeof item.parentAgentId === 'string' ? item.parentAgentId : '',
+          discountRate: typeof item.discountRate === 'number' ? item.discountRate : undefined,
+          balance: typeof item.balance === 'number' ? item.balance : 0,
+        };
+      }
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return null;
+}
+
+/**
+ * Enforce a bounded timeout (default 15 seconds for first-time cloud activation over VPN/mobile)
+ * so login never hangs indefinitely while remaining reliable on slower connections.
  */
 export class CloudTimeoutError extends Error {
   code = 'cloud/timeout';
@@ -526,7 +622,7 @@ export class CloudTimeoutError extends Error {
   }
 }
 
-export function raceWithTimeout<T>(promise: Promise<T>, timeoutMs = 3000): Promise<T> {
+export function raceWithTimeout<T>(promise: Promise<T>, timeoutMs = 15000): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = window.setTimeout(() => {
       reject(new CloudTimeoutError(`Timed out after ${timeoutMs}ms`));

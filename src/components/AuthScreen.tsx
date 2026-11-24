@@ -5,7 +5,7 @@ import {
   sendPasswordResetEmail,
   signInWithEmailAndPassword,
 } from 'firebase/auth';
-import { doc, serverTimestamp, setDoc } from 'firebase/firestore';
+import { collection, doc, getDocs, limit, query, serverTimestamp, setDoc, where } from 'firebase/firestore';
 import {
   AlertCircle,
   Clock,
@@ -42,6 +42,7 @@ import {
 import {
   getBiometricMethodStatus,
   isBiometricHardwareAvailable,
+  readBiometricVaultCredentials,
   rememberSessionCredentialInMemory,
   syncBiometricVaultOnPasswordLogin,
   verifyDeviceBiometric,
@@ -50,6 +51,7 @@ import { useFeedback } from '../lib/feedback';
 import { useFirebase } from '../contexts/FirebaseContext';
 import {
   CloudTimeoutError,
+  findCachedLocalUserHint,
   findVaultAccountByIdentifier,
   raceWithTimeout,
   saveAccountToLocalVault,
@@ -138,6 +140,38 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
     }
   }, [sessionUnlocked, firebaseUser, profileLoading, profile, needsAdminEmailVerification, syncNow]);
 
+  const buildVerifiedProfileFallback = (
+    uid: string,
+    email: string,
+    phone: string,
+    displayName?: string | null
+  ): UserProfile => {
+    const cachedHint = findCachedLocalUserHint(phone || email, uid);
+    const isAdmin = isSuperAdminEmail(email) || cachedHint?.role === 'super_admin';
+    const role = isAdmin ? 'super_admin' : cachedHint?.role || 'client';
+    return {
+      uid,
+      name: isAdmin
+        ? cachedHint?.name || SUPER_ADMIN_CONFIG.name
+        : cachedHint?.name || displayName?.trim() || (phone ? `حساب ${phone}` : 'مستخدم طيبة نت'),
+      phone: isAdmin ? SUPER_ADMIN_CONFIG.phone : cachedHint?.phone || phone || '770000000',
+      email: (email || cachedHint?.email || `${phone || '770000000'}@taibah.net`).toLowerCase(),
+      role,
+      status: cachedHint?.status && cachedHint.status !== 'pending' ? cachedHint.status : 'active',
+      parentAgentId: cachedHint?.parentAgentId || '',
+      discountRate:
+        typeof cachedHint?.discountRate === 'number'
+          ? cachedHint.discountRate
+          : role === 'super_admin'
+            ? 100
+            : role === 'agent'
+              ? 70
+              : 80,
+      balance: typeof cachedHint?.balance === 'number' ? cachedHint.balance : 0,
+      fcmTokens: [],
+    };
+  };
+
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!identifier.trim() || !password) {
@@ -147,6 +181,8 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
 
     setSubmitting(true);
     setEmailAuthDisabledError(false);
+
+    const { email: normalizedEmail, phone: normalizedPhone, isPhoneLogin } = normalizeAuthIdentifier(identifier);
 
     try {
       try {
@@ -160,7 +196,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
       }
 
       // =========================================================================
-      // STEP 1: LOCAL-FIRST VERIFICATION (< 0.2s, 0 Firestore reads, works 100% offline!)
+      // STEP 1A: LOCAL-FIRST VERIFICATION VIA `localAuthVault` (< 0.2s, 0 cloud reads!)
       // =========================================================================
       const localCheck = await verifyLocalVaultPassword(identifier, password);
 
@@ -170,7 +206,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
       }
 
       if (localCheck.status === 'wrong_password') {
-        notifyError('بيانات الدخول غير صحيحة', 'كلمة المرور غير صحيحة — تأكد من البيانات المدخلة.');
+        notifyError('كلمة المرور غير صحيحة', 'تأكد من كلمة المرور المدخلة وحاول مجدداً.');
         return;
       }
 
@@ -190,8 +226,40 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
       }
 
       // =========================================================================
-      // STEP 2: ONE-TIME CLOUD ACTIVATION (Strict 3-second Promise.race timeout)
-      // Triggered ONLY when this account has not been activated on this device yet.
+      // STEP 1B: LEGACY LOCAL MIGRATION (if device already has encrypted biometric vault + cached user)
+      // Strictly verifies exact email + password match — ZERO bypass!
+      // =========================================================================
+      try {
+        const legacyBioCreds = await readBiometricVaultCredentials();
+        const cachedHint = findCachedLocalUserHint(identifier);
+        const matchesLegacyEmail =
+          legacyBioCreds?.email &&
+          (legacyBioCreds.email.toLowerCase() === normalizedEmail.toLowerCase() ||
+            (cachedHint?.email && legacyBioCreds.email.toLowerCase() === cachedHint.email.toLowerCase()));
+        if (matchesLegacyEmail && legacyBioCreds?.password === password && cachedHint?.uid) {
+          if (cachedHint.status === 'suspended') {
+            notifyError('تم إيقاف الحساب', 'تم إيقاف هذا الحساب من قِبل الإدارة.');
+            return;
+          }
+          const migratedProfile = buildVerifiedProfileFallback(
+            cachedHint.uid,
+            legacyBioCreds.email,
+            normalizedPhone || cachedHint.phone || '',
+            cachedHint.name
+          );
+          await saveAccountToLocalVault(migratedProfile, password, identifier.trim());
+          activateLocalSession(migratedProfile, { email: legacyBioCreds.email, password });
+          onUnlockSession(migratedProfile.uid, migratedProfile.email);
+          notifySuccess('مرحباً بك في كروت طيبة نت — تم تسجيل الدخول بنجاح ✅');
+          return;
+        }
+      } catch {
+        // Continue to first-time cloud activation
+      }
+
+      // =========================================================================
+      // STEP 2: FIRST-TIME CLOUD ACTIVATION (15s timeout for VPN / mobile networks)
+      // Separates fast Firebase Auth REST sign-in from Firestore profile reads (4s cap).
       // =========================================================================
       if (typeof navigator !== 'undefined' && !navigator.onLine) {
         notifyError(
@@ -202,29 +270,76 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
       }
 
       await applyAuthPersistence(true);
-      const { email, phone } = normalizeAuthIdentifier(identifier);
-      const cred = await raceWithTimeout(signInWithEmailAndPassword(auth, email, password), 3000);
 
-      // Resolve profile within 3s cap (falls back cleanly to Super Admin / active client profile)
-      let resolvedProfile = await raceWithTimeout(resolveAndLinkUserProfile(cred.user), 3000).catch(
+      // Determine target Auth email (check local cached user hint for phone -> real email mapping first)
+      let authEmailToUse = normalizedEmail;
+      if (isPhoneLogin && !isSuperAdminEmail(normalizedEmail)) {
+        const cachedByPhone = findCachedLocalUserHint(normalizedPhone);
+        if (cachedByPhone?.email && cachedByPhone.email.includes('@')) {
+          authEmailToUse = cachedByPhone.email.toLowerCase();
+        }
+      }
+
+      let cred: Awaited<ReturnType<typeof signInWithEmailAndPassword>>;
+      try {
+        cred = await raceWithTimeout(signInWithEmailAndPassword(auth, authEmailToUse, password), 15000);
+      } catch (firstErr: unknown) {
+        const firstCode = (firstErr as { code?: string })?.code || '';
+        const shouldLookupPhoneEmail =
+          isPhoneLogin &&
+          normalizedPhone.length >= 7 &&
+          (firstCode === 'auth/user-not-found' || firstCode === 'auth/invalid-credential');
+
+        if (!shouldLookupPhoneEmail) {
+          throw firstErr;
+        }
+
+        // Phone login fallback: search Firestore (`users` then `clients`) by phone with 15s timeout
+        let discoveredEmail: string | null = null;
+        try {
+          const lookupPromise = (async (): Promise<string | null> => {
+            for (const colName of ['users', 'clients'] as const) {
+              try {
+                const snap = await getDocs(
+                  query(collection(db, colName), where('phone', '==', normalizedPhone), limit(1))
+                );
+                if (!snap.empty) {
+                  const rawEmail = String(snap.docs[0].data()?.email || '').trim().toLowerCase();
+                  if (rawEmail && rawEmail.includes('@') && rawEmail !== authEmailToUse) {
+                    return rawEmail;
+                  }
+                }
+              } catch {
+                // ignore collection-level errors and try next
+              }
+            }
+            return null;
+          })();
+          discoveredEmail = await raceWithTimeout(lookupPromise, 15000);
+        } catch {
+          discoveredEmail = null;
+        }
+
+        if (!discoveredEmail) {
+          throw firstErr;
+        }
+
+        authEmailToUse = discoveredEmail;
+        cred = await raceWithTimeout(signInWithEmailAndPassword(auth, authEmailToUse, password), 15000);
+      }
+
+      // Firebase Auth verified the real password! NEVER fail login if Firestore is slow or quota-limited.
+      // Give Firestore profile lookup a bounded 4-second window, then fall back seamlessly to verified data.
+      let resolvedProfile = await raceWithTimeout(resolveAndLinkUserProfile(cred.user), 4000).catch(
         () => null
       );
       if (!resolvedProfile) {
-        const isAdmin = isSuperAdminEmail(email);
-        resolvedProfile = {
-          uid: cred.user.uid,
-          name: isAdmin
-            ? SUPER_ADMIN_CONFIG.name
-            : cred.user.displayName?.trim() || (phone ? `حساب ${phone}` : 'مستخدم طيبة نت'),
-          phone: isAdmin ? SUPER_ADMIN_CONFIG.phone : phone || '770000000',
-          email,
-          role: isAdmin ? 'super_admin' : 'client',
-          status: 'active',
-          parentAgentId: '',
-          discountRate: isAdmin ? 100 : 80,
-          balance: 0,
-          fcmTokens: [],
-        } as UserProfile;
+        resolvedProfile = buildVerifiedProfileFallback(
+          cred.user.uid,
+          cred.user.email || authEmailToUse,
+          normalizedPhone,
+          cred.user.displayName
+        );
       }
 
       if (resolvedProfile.status === 'suspended') {
@@ -232,10 +347,10 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
         return;
       }
 
-      // Save salted SHA-256 hash into `localAuthVault` so every future login is <0.2s & 100% local!
+      // Persist salted SHA-256 hash into `localAuthVault` so every future login is < 0.2s & 100% local!
       await saveAccountToLocalVault(resolvedProfile, password, identifier.trim());
-      await syncBiometricVaultOnPasswordLogin(
-        email,
+      void syncBiometricVaultOnPasswordLogin(
+        resolvedProfile.email,
         password,
         identifier.trim(),
         resolvedProfile.name
@@ -243,13 +358,13 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
       setBioStatus(getBiometricMethodStatus());
 
       activateLocalSession(resolvedProfile);
-      onUnlockSession(cred.user.uid, email);
+      onUnlockSession(cred.user.uid, resolvedProfile.email);
       notifySuccess('تم تفعيل الحساب على هذا الجهاز وتسجيل الدخول بنجاح ✅');
     } catch (err: unknown) {
       if (err instanceof CloudTimeoutError || (err as { code?: string })?.code === 'cloud/timeout') {
         notifyError(
-          'انتهت مهلة التفعيل السحابي (3 ثوانٍ)',
-          'الاتصال بالسحابة بطيء حالياً — تحقق من الإنترنت وحاول مجدداً لإتمام التفعيل لأول مرة.'
+          'انتهت مهلة التفعيل السحابي (15 ثانية)',
+          'الشبكة بطيئة جداً أو محجوبة — تحقق من اتصال الإنترنت أو الـ VPN وحاول مجدداً.'
         );
         return;
       }
@@ -257,24 +372,37 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
       if (code === 'auth/operation-not-allowed' || code === 'auth/configuration-not-found') {
         setEmailAuthDisabledError(true);
         notifyError('تفعيل مزود الدخول مطلوب', 'يرجى تفعيل Email/Password من لوحة Firebase Console.');
-      } else if (
-        code === 'auth/invalid-credential' ||
-        code === 'auth/user-not-found' ||
-        code === 'auth/wrong-password'
-      ) {
-        const { email } = normalizeAuthIdentifier(identifier);
-        if (isSuperAdminEmail(email)) {
+      } else if (code === 'auth/wrong-password') {
+        notifyError('كلمة المرور غير صحيحة', 'تأكد من كلمة المرور المدخلة وحاول مجدداً.');
+      } else if (code === 'auth/user-not-found') {
+        if (isSuperAdminEmail(normalizedEmail)) {
           notifyWarning(
-            'حساب المدير غير مُنشأ بعد أو كلمة المرور خاطئة',
-            'إذا كانت هذه أول مرة تدخل فيها كمدير، اضغط "تفعيل حساب الإدارة الآن".'
+            'حساب المدير غير مُنشأ بعد',
+            'اضغط زر «أول دخول للمدير الأساسي؟ تفعيل حساب الإدارة الآن» بالأسفل.'
           );
         } else {
-          notifyError('بيانات الدخول غير صحيحة', 'تأكد من البريد الإلكتروني / رقم الهاتف وكلمة المرور.');
+          notifyError('الحساب غير مسجل', 'البريد الإلكتروني أو رقم الهاتف غير مسجل في النظام.');
         }
+      } else if (code === 'auth/invalid-credential') {
+        if (isSuperAdminEmail(normalizedEmail)) {
+          notifyWarning(
+            'كلمة المرور غير صحيحة أو حساب المدير غير مُنشأ بعد',
+            'تأكد من كلمة المرور، أو اضغط «تفعيل حساب الإدارة الآن» إذا كانت هذه أول مرة.'
+          );
+        } else {
+          notifyError('كلمة المرور غير صحيحة', 'تأكد من البريد الإلكتروني / رقم الهاتف وكلمة المرور.');
+        }
+      } else if (code === 'auth/invalid-email') {
+        notifyError('صيغة البريد غير صحيحة', 'يرجى إدخال بريد إلكتروني صحيح أو رقم هاتف صالح.');
       } else if (code === 'auth/too-many-requests') {
-        notifyError('محاولات كثيرة', 'يرجى الانتظار قليلاً ثم المحاولة مرة أخرى.');
+        notifyError('محاولات كثيرة', 'تم إيقاف المحاولات مؤقتاً لكثرة الإدخالات الخاطئة — انتظر قليلاً ثم أعد المحاولة.');
+      } else if (code === 'auth/network-request-failed') {
+        notifyError(
+          'تعذر الاتصال بالشبكة',
+          'تحقق من اتصال الإنترنت أو إعدادات الـ VPN ثم أعد المحاولة.'
+        );
       } else {
-        notifyError('تعذر تسجيل الدخول', 'يرجى التحقق من الاتصال بالإنترنت والبيانات المدخلة.');
+        notifyError('تعذر تسجيل الدخول', 'يرجى التحقق من البيانات المدخلة واتصال الإنترنت.');
       }
     } finally {
       setSubmitting(false);
@@ -296,7 +424,22 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
     setEmailAuthDisabledError(false);
     try {
       await applyAuthPersistence(true);
-      const cred = await raceWithTimeout(createUserWithEmailAndPassword(auth, email, password), 3000);
+      let cred: Awaited<ReturnType<typeof createUserWithEmailAndPassword>>;
+      let alreadyExisted = false;
+
+      try {
+        cred = await raceWithTimeout(createUserWithEmailAndPassword(auth, email, password), 15000);
+      } catch (createErr: unknown) {
+        const createCode = (createErr as { code?: string })?.code || '';
+        if (createCode === 'auth/email-already-in-use') {
+          // Account already exists in Firebase Auth — verify real password and activate locally seamlessly!
+          alreadyExisted = true;
+          cred = await raceWithTimeout(signInWithEmailAndPassword(auth, email, password), 15000);
+        } else {
+          throw createErr;
+        }
+      }
+
       rememberSessionCredentialInMemory(email, password);
       const adminProfile: UserProfile = {
         uid: cred.user.uid,
@@ -310,20 +453,47 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
         balance: 0,
         fcmTokens: [],
       };
+
+      // Save salted SHA-256 hash into `localAuthVault` immediately and sync cloud in background
       await saveAccountToLocalVault(adminProfile, password, identifier.trim() || SUPER_ADMIN_CONFIG.phone);
-      await sendEmailVerification(cred.user).catch(() => {});
+      void syncBiometricVaultOnPasswordLogin(
+        email,
+        password,
+        identifier.trim() || SUPER_ADMIN_CONFIG.phone,
+        SUPER_ADMIN_CONFIG.name
+      );
+      if (!alreadyExisted && !cred.user.emailVerified) {
+        void sendEmailVerification(cred.user).catch(() => {});
+      }
+
       activateLocalSession(adminProfile);
       onUnlockSession(cred.user.uid, email);
-      notifySuccess('تم إنشاء حساب المدير الأساسي وإرسال رابط التحقق إلى بريدك الإلكتروني');
+      notifySuccess(
+        alreadyExisted
+          ? 'تم تفعيل حساب المدير العام على هذا الجهاز بنجاح ✅'
+          : 'تم إنشاء وتفعيل حساب المدير الأساسي بنجاح ✅'
+      );
     } catch (err: unknown) {
+      if (err instanceof CloudTimeoutError || (err as { code?: string })?.code === 'cloud/timeout') {
+        notifyError(
+          'انتهت مهلة التفعيل السحابي (15 ثانية)',
+          'تحقق من سرعة الإنترنت أو الـ VPN وحاول مجدداً.'
+        );
+        return;
+      }
       const code = (err as { code?: string })?.code || '';
-      if (code === 'cloud/timeout') {
-        notifyError('انتهت مهلة الاتصال', 'يرجى التحقق من سرعة الإنترنت والمحاولة مجدداً.');
-      } else if (code === 'auth/operation-not-allowed' || code === 'auth/configuration-not-found') {
+      if (code === 'auth/operation-not-allowed' || code === 'auth/configuration-not-found') {
         setEmailAuthDisabledError(true);
         notifyError('تفعيل مزود الدخول مطلوب', 'يرجى تفعيل Email/Password في Firebase Console أولاً.');
-      } else if (code === 'auth/email-already-in-use') {
-        notifyInfo('الحساب موجود مسبقاً', 'استخدم زر تسجيل الدخول بكلمة المرور الصحيحة.');
+      } else if (code === 'auth/wrong-password' || code === 'auth/invalid-credential') {
+        notifyError(
+          'كلمة المرور غير صحيحة',
+          'حساب المدير مسجّل مسبقاً بكلمة مرور مختلفة — أدخل كلمة المرور الصحيحة.'
+        );
+      } else if (code === 'auth/too-many-requests') {
+        notifyError('محاولات كثيرة', 'يرجى الانتظار قليلاً ثم المحاولة مجدداً.');
+      } else if (code === 'auth/network-request-failed') {
+        notifyError('تعذر الاتصال بالشبكة', 'تحقق من اتصال الإنترنت أو الـ VPN وحاول مجدداً.');
       } else {
         notifyError('تعذر تفعيل حساب المدير', 'تأكد من كلمة المرور واتصال الإنترنت.');
       }
@@ -377,22 +547,16 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
       await applyAuthPersistence(true);
       const cred = await raceWithTimeout(
         signInWithEmailAndPassword(auth, credentials.email, credentials.password),
-        3000
+        15000
       );
       const resolved =
-        (await raceWithTimeout(resolveAndLinkUserProfile(cred.user), 3000).catch(() => null)) ||
-        ({
-          uid: cred.user.uid,
-          name: displayName || SUPER_ADMIN_CONFIG.name,
-          phone: isSuperAdminEmail(credentials.email) ? SUPER_ADMIN_CONFIG.phone : savedIdentifier,
-          email: credentials.email,
-          role: isSuperAdminEmail(credentials.email) ? 'super_admin' : 'client',
-          status: 'active',
-          parentAgentId: '',
-          discountRate: isSuperAdminEmail(credentials.email) ? 100 : 80,
-          balance: 0,
-          fcmTokens: [],
-        } as UserProfile);
+        (await raceWithTimeout(resolveAndLinkUserProfile(cred.user), 4000).catch(() => null)) ||
+        buildVerifiedProfileFallback(
+          cred.user.uid,
+          credentials.email,
+          isSuperAdminEmail(credentials.email) ? SUPER_ADMIN_CONFIG.phone : savedIdentifier,
+          displayName || cred.user.displayName
+        );
 
       if (resolved.status === 'suspended') {
         notifyError('تم إيقاف الحساب', 'تم إيقاف هذا الحساب من قِبل الإدارة.');
