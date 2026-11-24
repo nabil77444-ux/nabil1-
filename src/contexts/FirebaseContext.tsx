@@ -49,7 +49,12 @@ import { useOnlineStatus } from '../hooks/useOnlineStatus';
 import {
   DEFAULT_APP_SETTINGS,
   EXCLUSIVE_PACKAGES,
+  formatYER,
   SUPER_ADMIN_CONFIG,
+  type AgentCardInventoryReport,
+  type AgentPackageCardSummary,
+  type AgentRemainingCardRecord,
+  type AgentSoldCardRecord,
   type AppRoute,
   type AppSettingsDoc,
   type AuditLogDoc,
@@ -59,6 +64,8 @@ import {
   type NotificationDoc,
   type PackageDoc,
   type PasswordResetRequest,
+  type RecallCardsInput,
+  type RecallCardsResult,
   type RegistrationRequest,
   type SaleDoc,
   type SaleLineItem,
@@ -263,6 +270,12 @@ interface FirebaseContextValue {
   transferClientsToAgent: (clientUids: string[], targetAgentId: string) => Promise<void>;
   deleteManagedUser: (user: UserProfile) => Promise<void>;
   resolvePasswordReset: (req: PasswordResetRequest, status: 'approved' | 'rejected') => Promise<void>;
+  // Agent/Client Card Inventory Tracking & Super Admin Exclusive Card Recall
+  fetchUserCardInventory: (
+    targetUser: UserProfile,
+    forceRefresh?: boolean
+  ) => Promise<AgentCardInventoryReport>;
+  recallCardsFromUser: (input: RecallCardsInput) => Promise<RecallCardsResult>;
   // Push, Backup, Account Recovery & Super Admin Reset
   enablePushNotifications: () => Promise<boolean>;
   exportCloudBackup: () => Promise<void>;
@@ -3312,7 +3325,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             type BatchOp = (b: ReturnType<typeof writeBatch>) => void;
             const ops: BatchOp[] = [];
 
-            // 4A. Card document status / ownership updates
+            // 4A. Card document status / ownership updates (with full buyer metadata for zero-loss audit)
             if (isElectronic && allPulledDocIds.length > 0) {
               const soldToValue = (cleanBuyerPhone || cleanBuyerName).slice(0, 128);
               for (const cardDocId of allPulledDocIds) {
@@ -3323,6 +3336,9 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                       status: 'available',
                       ownerId: cleanBuyerId,
                       soldTo: soldToValue,
+                      soldToName: cleanBuyerName.slice(0, 128),
+                      soldToPhone: cleanBuyerPhone.slice(0, 32),
+                      saleType: input.saleType,
                       saleId,
                       updatedAt: serverTimestamp(),
                     })
@@ -3332,6 +3348,9 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                     b.update(cardRef, {
                       status: 'sold',
                       soldTo: soldToValue,
+                      soldToName: cleanBuyerName.slice(0, 128),
+                      soldToPhone: cleanBuyerPhone.slice(0, 32),
+                      saleType: input.saleType,
                       saleId,
                       updatedAt: serverTimestamp(),
                     })
@@ -3505,6 +3524,9 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           batch.update(d.ref, {
             status: 'sold',
             soldTo: (sale.buyerPhone || sale.buyerName).slice(0, 128),
+            soldToName: (sale.buyerName || '').slice(0, 128),
+            soldToPhone: (sale.buyerPhone || '').slice(0, 32),
+            saleType: sale.saleType,
             saleId: sale.id,
             updatedAt: serverTimestamp(),
           });
@@ -5698,6 +5720,725 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     [firebaseUser, notifyError, notifySuccess, profile, writeAuditLog]
   );
 
+  // =========================================================================
+  // AGENT / CLIENT CARD INVENTORY & SALES TRACKING ("كم استلم، كم باع، كم باقي، ولمن باع")
+  // =========================================================================
+  const fetchUserCardInventory = useCallback(
+    async (targetUser: UserProfile, forceRefresh = false): Promise<AgentCardInventoryReport> => {
+      const targetUid = targetUser.uid;
+      const cacheKey = `taibah_agent_cards_cache_v1_${targetUid}`;
+      const pkgMap = new Map<string, PackageDoc>();
+      for (const p of packages.length > 0 ? packages : (EXCLUSIVE_PACKAGES as PackageDoc[])) {
+        pkgMap.set(p.id, p);
+      }
+
+      // Check fresh local cache first (0 Firestore reads if recent & not forced)
+      if (!forceRefresh) {
+        try {
+          const raw = localStorage.getItem(cacheKey);
+          if (raw) {
+            const parsed = JSON.parse(raw) as AgentCardInventoryReport;
+            if (parsed && parsed.targetUid === targetUid && Date.now() - parsed.loadedAtMs < 60_000) {
+              return { ...parsed, fromCache: true };
+            }
+          }
+        } catch {
+          // ignore cache parse issues
+        }
+      }
+
+      const remainingCards: AgentRemainingCardRecord[] = [];
+      const soldCardsMap = new Map<string, AgentSoldCardRecord>();
+      const recalledByPkg = new Map<string, number>();
+      const receivedFromWholesaleByPkg = new Map<string, number>();
+      const soldCountExtraByPkg = new Map<string, number>();
+
+      // Helper to extract sales timestamps safely
+      const getSaleMs = (s: SaleDoc): number => {
+        try {
+          const ts = s.createdAt as unknown as { toMillis?: () => number; seconds?: number } | undefined;
+          if (ts && typeof ts.toMillis === 'function') return ts.toMillis();
+          if (ts && typeof ts.seconds === 'number') return ts.seconds * 1000;
+        } catch {
+          // ignore
+        }
+        return Date.now();
+      };
+
+      // 1. Collect all relevant sales from in-memory state first (0 reads)
+      const allRelevantSalesMap = new Map<string, SaleDoc>();
+      for (const s of mergedSales) {
+        if (s.sellerId === targetUid || s.buyerId === targetUid) {
+          allRelevantSalesMap.set(s.id, s);
+        }
+      }
+
+      // 2. Query Firestore on-demand for remaining cards + sales + recalled cards (cache-first when offline)
+      const isOnlineNow = typeof navigator === 'undefined' ? true : navigator.onLine;
+      const runQuerySafe = async (q: ReturnType<typeof query>) => {
+        if (!isOnlineNow) {
+          try {
+            return await getDocsFromCache(q);
+          } catch {
+            return null;
+          }
+        }
+        try {
+          return await getDocs(q);
+        } catch {
+          try {
+            return await getDocsFromCache(q);
+          } catch {
+            return null;
+          }
+        }
+      };
+
+      try {
+        const [ownedCardsSnap, sellerSalesSnap, buyerSalesSnap, recalledSnap] = await Promise.all([
+          runQuerySafe(
+            query(collection(db, 'cards'), where('ownerId', '==', targetUid), limit(2500))
+          ),
+          runQuerySafe(
+            query(collection(db, 'sales'), where('sellerId', '==', targetUid), limit(500))
+          ),
+          runQuerySafe(
+            query(collection(db, 'sales'), where('buyerId', '==', targetUid), limit(500))
+          ),
+          profile?.role === 'super_admin'
+            ? runQuerySafe(
+                query(collection(db, 'cards'), where('recalledFrom', '==', targetUid), limit(1500))
+              )
+            : Promise.resolve(null),
+        ]);
+
+        if (sellerSalesSnap) {
+          for (const d of sellerSalesSnap.docs) {
+            allRelevantSalesMap.set(d.id, { id: d.id, ...(d.data() as Omit<SaleDoc, 'id'>) });
+          }
+        }
+        if (buyerSalesSnap) {
+          for (const d of buyerSalesSnap.docs) {
+            allRelevantSalesMap.set(d.id, { id: d.id, ...(d.data() as Omit<SaleDoc, 'id'>) });
+          }
+        }
+
+        if (ownedCardsSnap) {
+          for (const d of ownedCardsSnap.docs) {
+            const c = d.data() as CardDoc;
+            const pkg = pkgMap.get(c.packageId);
+            const price = pkg?.price || 0;
+            const label = pkg ? `باقة ${pkg.price} ر.ي (${pkg.dataLabel})` : c.packageId;
+            if (c.status === 'available' || c.status === 'assigned_to_agent') {
+              remainingCards.push({
+                id: d.id,
+                cardNumber: c.cardNumber,
+                packageId: c.packageId,
+                packagePrice: price,
+                packageLabel: label,
+                ownerId: c.ownerId,
+                status: c.status,
+              });
+            } else if (c.status === 'sold') {
+              const linkedSale = c.saleId ? allRelevantSalesMap.get(c.saleId) : undefined;
+              soldCardsMap.set(c.cardNumber, {
+                cardNumber: c.cardNumber,
+                packageId: c.packageId,
+                packagePrice: price,
+                packageLabel: label,
+                buyerName: c.soldToName || linkedSale?.buyerName || c.soldTo || 'زبون مباشر',
+                buyerPhone: c.soldToPhone || linkedSale?.buyerPhone || '',
+                soldAtMs: linkedSale ? getSaleMs(linkedSale) : Date.now(),
+                saleType: (c.saleType || linkedSale?.saleType || 'direct') as
+                  | 'direct'
+                  | 'electronic_wholesale'
+                  | 'paper_invoice',
+                saleId: c.saleId || '',
+                invoiceNumber: linkedSale?.invoiceNumber || '',
+                unitPrice:
+                  linkedSale?.items?.find((it) => it.packageId === c.packageId)?.unitPrice || price,
+              });
+            }
+          }
+        } else {
+          // Fallback to local cached pool when offline and IndexedDB has no query index
+          const localCached = getCachedAvailableCards(targetUid);
+          for (const c of localCached) {
+            const pkg = pkgMap.get(c.packageId);
+            remainingCards.push({
+              id: c.id,
+              cardNumber: c.cardNumber,
+              packageId: c.packageId,
+              packagePrice: pkg?.price || 0,
+              packageLabel: pkg ? `باقة ${pkg.price} ر.ي (${pkg.dataLabel})` : c.packageId,
+              ownerId: c.ownerId,
+              status: 'available',
+            });
+          }
+        }
+
+        if (recalledSnap) {
+          for (const d of recalledSnap.docs) {
+            const c = d.data() as CardDoc;
+            if (c.ownerId !== targetUid) {
+              recalledByPkg.set(c.packageId, (recalledByPkg.get(c.packageId) || 0) + 1);
+            }
+          }
+        }
+      } catch {
+        // Fallback gracefully to in-memory sales + local card pool
+      }
+
+      // 3. Cross-reference sales records for "كم استلم" and exact "لمن باع"
+      for (const s of allRelevantSalesMap.values()) {
+        if (s.status === 'cancelled') continue;
+        const saleMs = getSaleMs(s);
+
+        // Cards received by this Agent/Client from Super Admin or Parent Agent
+        if (s.buyerId === targetUid && s.sellerId !== targetUid) {
+          for (const item of s.items || []) {
+            const netDelivered = Math.max(0, (item.delivered || item.quantity || 0) - (item.returned || 0));
+            receivedFromWholesaleByPkg.set(
+              item.packageId,
+              (receivedFromWholesaleByPkg.get(item.packageId) || 0) + netDelivered
+            );
+          }
+        }
+
+        // Cards sold BY this Agent/Client to end-customers or sub-clients
+        if (s.sellerId === targetUid) {
+          for (const item of s.items || []) {
+            const pkg = pkgMap.get(item.packageId);
+            const price = item.price || pkg?.price || 0;
+            const label = item.packageLabel || (pkg ? `باقة ${pkg.price} ر.ي (${pkg.dataLabel})` : item.packageId);
+            const itemNumbers = Array.isArray(item.cardNumbers) ? item.cardNumbers : [];
+            const netSold = Math.max(0, (item.delivered || item.quantity || 0) - (item.returned || 0));
+
+            for (const num of itemNumbers) {
+              if (!num) continue;
+              soldCardsMap.set(num, {
+                cardNumber: num,
+                packageId: item.packageId,
+                packagePrice: price,
+                packageLabel: label,
+                buyerName: s.buyerName || 'زبون مباشر',
+                buyerPhone: s.buyerPhone || '',
+                soldAtMs: saleMs,
+                saleType: s.saleType,
+                saleId: s.id,
+                invoiceNumber: s.invoiceNumber || '',
+                unitPrice: item.unitPrice || price,
+              });
+            }
+
+            if (netSold > itemNumbers.length) {
+              soldCountExtraByPkg.set(
+                item.packageId,
+                (soldCountExtraByPkg.get(item.packageId) || 0) + (netSold - itemNumbers.length)
+              );
+            }
+          }
+        }
+      }
+
+      const soldCards = Array.from(soldCardsMap.values()).sort((a, b) => b.soldAtMs - a.soldAtMs);
+      remainingCards.sort((a, b) => a.packagePrice - b.packagePrice || a.cardNumber.localeCompare(b.cardNumber));
+
+      // 4. Build exact 8-package summary
+      const byPackage: AgentPackageCardSummary[] = EXCLUSIVE_PACKAGES.map((basePkg) => {
+        const pkg = pkgMap.get(basePkg.id) || (basePkg as PackageDoc);
+        const remCount = remainingCards.filter((c) => c.packageId === pkg.id).length;
+        const trackedSold = soldCards.filter((c) => c.packageId === pkg.id).length;
+        const extraSold = soldCountExtraByPkg.get(pkg.id) || 0;
+        const soldCount = trackedSold + extraSold;
+        const recalledCount = recalledByPkg.get(pkg.id) || 0;
+        const receivedWholesale = receivedFromWholesaleByPkg.get(pkg.id) || 0;
+        const receivedCount = Math.max(receivedWholesale, remCount + soldCount + recalledCount);
+        return {
+          packageId: pkg.id,
+          price: pkg.price,
+          dataLabel: pkg.dataLabel,
+          receivedCount,
+          soldCount,
+          remainingCount: remCount,
+          recalledCount,
+        };
+      });
+
+      const report: AgentCardInventoryReport = {
+        targetUid,
+        targetName: targetUser.name,
+        targetPhone: targetUser.phone,
+        targetRole: targetUser.role,
+        discountRate:
+          targetUser.discountRate ||
+          (targetUser.role === 'agent' ? 70 : targetUser.role === 'client' ? 80 : 100),
+        totalReceived: byPackage.reduce((s, r) => s + r.receivedCount, 0),
+        totalSold: byPackage.reduce((s, r) => s + r.soldCount, 0),
+        totalRemaining: byPackage.reduce((s, r) => s + r.remainingCount, 0),
+        totalRecalled: byPackage.reduce((s, r) => s + r.recalledCount, 0),
+        byPackage,
+        soldCards,
+        remainingCards,
+        loadedAtMs: Date.now(),
+        fromCache: false,
+      };
+
+      try {
+        localStorage.setItem(cacheKey, JSON.stringify(report));
+      } catch {
+        // ignore storage quota
+      }
+
+      return report;
+    },
+    [mergedSales, packages, profile?.role]
+  );
+
+  // =========================================================================
+  // SUPER ADMIN EXCLUSIVE: RECALL UNSOLD CARDS FROM AGENT / CLIENT
+  // Atomic return to Main Inventory + Exact Credit Deduction + Ledger Entry
+  // =========================================================================
+  const recallCardsFromUser = useCallback(
+    async (input: RecallCardsInput): Promise<RecallCardsResult> => {
+      const emptyFail = (error: string): RecallCardsResult => ({
+        ok: false,
+        error,
+        recalledCount: 0,
+        creditAmount: 0,
+        discountRateApplied: 100,
+        previousBalance: Number(input.targetUser?.balance) || 0,
+        newBalance: Number(input.targetUser?.balance) || 0,
+        recalledNumbers: [],
+        byPackage: [],
+        notificationMessage: '',
+      });
+
+      // STRICT AUTHORIZATION GUARD: Super Admin ONLY!
+      const activeUser = auth.currentUser || firebaseUser;
+      if (!profile || profile.role !== 'super_admin' || !activeUser) {
+        notifyError('صلاحية مرفوضة', 'ميزة سحب الكروت مخصصة للمدير العام فقط.');
+        return emptyFail('ميزة سحب الكروت مخصصة للمدير العام فقط.');
+      }
+
+      const targetUser = input.targetUser;
+      if (!targetUser?.uid || targetUser.uid === activeUser.uid || targetUser.role === 'super_admin') {
+        return emptyFail('لا يمكن سحب الكروت من هذا الحساب.');
+      }
+
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        notifyError('يلزم اتصال بالإنترنت', 'يتطلب سحب الكروت اتصالاً بالسحابة لضمان التطابق الفوري وعدم ضياع أي كرت.');
+        return emptyFail('يلزم اتصال بالإنترنت لإتمام عملية سحب الكروت بأمان.');
+      }
+
+      const opKey = `recall_${targetUser.uid}`;
+      if (inFlightOpsRef.current.has(opKey)) {
+        return emptyFail('توجد عملية سحب جارية بالفعل لهذا الحساب، يرجى الانتظار لحظة.');
+      }
+      inFlightOpsRef.current.add(opKey);
+
+      try {
+        // 1. Fetch fresh cards owned by targetUser directly from Firestore (NEVER recall sold cards!)
+        const snap = await getDocs(
+          query(collection(db, 'cards'), where('ownerId', '==', targetUser.uid), limit(2500))
+        );
+
+        const unsoldDocs = snap.docs
+          .map((d) => ({ id: d.id, ref: d.ref, data: d.data() as CardDoc }))
+          .filter(
+            (item) =>
+              item.data.ownerId === targetUser.uid &&
+              item.data.status !== 'sold' &&
+              (item.data.status === 'available' || item.data.status === 'assigned_to_agent')
+          );
+
+        if (unsoldDocs.length === 0) {
+          return emptyFail('لا توجد أي كروت متبقية (غير مباعة) لدى هذا الحساب لسحبها.');
+        }
+
+        // 2. Select target cards strictly according to mode
+        let toRecall = unsoldDocs;
+        if (input.mode === 'by_package_qty') {
+          const pkgId = input.packageId || '';
+          const qty = Math.max(0, Math.floor(Number(input.quantity) || 0));
+          if (!pkgId || qty <= 0) {
+            return emptyFail('يرجى تحديد الباقة والكمية المطلوب سحبها.');
+          }
+          const pkgPool = unsoldDocs.filter((c) => c.data.packageId === pkgId);
+          if (pkgPool.length === 0) {
+            return emptyFail('لا توجد كروت متبقية غير مباعة في هذه الباقة لدى الحساب.');
+          }
+          toRecall = pkgPool.slice(0, Math.min(qty, pkgPool.length));
+        } else if (input.mode === 'specific_cards') {
+          const idSet = new Set(input.selectedCardIds || []);
+          if (idSet.size === 0) {
+            return emptyFail('يرجى تحديد كرت واحد على الأقل للسحب.');
+          }
+          toRecall = unsoldDocs.filter(
+            (c) => idSet.has(c.id) || idSet.has(c.data.cardNumber)
+          );
+          if (toRecall.length === 0) {
+            return emptyFail('الكروت المحددة غير متوفرة للسحب أو تم بيعها بالفعل.');
+          }
+        }
+
+        // 3. Calculate exact credit value at the user's real pricing rate
+        const discountRateApplied =
+          typeof targetUser.discountRate === 'number' && targetUser.discountRate > 0
+            ? targetUser.discountRate
+            : targetUser.role === 'agent'
+              ? 70
+              : targetUser.role === 'client'
+                ? 80
+                : 100;
+
+        const pkgMap = new Map<string, PackageDoc>();
+        for (const p of packages.length > 0 ? packages : (EXCLUSIVE_PACKAGES as PackageDoc[])) {
+          pkgMap.set(p.id, p);
+        }
+
+        const countByPkg = new Map<string, number>();
+        const creditByPkg = new Map<string, number>();
+        let totalCreditAmount = 0;
+
+        for (const item of toRecall) {
+          const pkg = pkgMap.get(item.data.packageId);
+          const pkgPrice = pkg?.price || 0;
+          const unitCredit = Math.round((pkgPrice * discountRateApplied) / 100);
+          countByPkg.set(item.data.packageId, (countByPkg.get(item.data.packageId) || 0) + 1);
+          creditByPkg.set(
+            item.data.packageId,
+            (creditByPkg.get(item.data.packageId) || 0) + unitCredit
+          );
+          totalCreditAmount += unitCredit;
+        }
+
+        const byPackageSummary = Array.from(countByPkg.entries())
+          .map(([pkgId, count]) => ({
+            packageId: pkgId,
+            price: pkgMap.get(pkgId)?.price || 0,
+            count,
+            creditValue: creditByPkg.get(pkgId) || 0,
+          }))
+          .sort((a, b) => a.price - b.price);
+
+        // 4. Read fresh user balance & matching customer ledger account
+        const userRef = doc(db, 'users', targetUser.uid);
+        const userSnap = await getDoc(userRef);
+        const previousBalance = userSnap.exists()
+          ? Number((userSnap.data() as UserProfile).balance) || 0
+          : Number(targetUser.balance) || 0;
+        const newBalance = previousBalance - totalCreditAmount;
+
+        // Find or create matching CustomerAccount in `customers` so financial statement updates cleanly
+        const normalizedTargetPhone = normalizeDigits(targetUser.phone || '').replace(/[^\d]/g, '');
+        let matchedCustomer = customers.find(
+          (c) =>
+            c.id === `acct_${targetUser.uid}` ||
+            (normalizedTargetPhone.length >= 7 &&
+              normalizeDigits(c.phone || '').replace(/[^\d]/g, '') === normalizedTargetPhone) ||
+            c.name.trim() === targetUser.name.trim()
+        );
+
+        let customerId = matchedCustomer?.id || `acct_${targetUser.uid}`;
+        let customerExists = Boolean(matchedCustomer);
+        if (!customerExists) {
+          try {
+            const custSnap = await getDoc(doc(db, 'customers', customerId));
+            if (custSnap.exists()) {
+              customerExists = true;
+              matchedCustomer = {
+                id: custSnap.id,
+                ...(custSnap.data() as Omit<CustomerAccount, 'id'>),
+              };
+            }
+          } catch {
+            // create below
+          }
+        }
+
+        const pkgBreakdownText = byPackageSummary
+          .map((b) => `فئة ${b.price}×${b.count}`)
+          .join('، ');
+        const cleanReason = (input.reason || '').trim();
+        const ledgerDescription = (
+          `سحب / مرتجع كروت (له) — ${toRecall.length} كرت (${pkgBreakdownText}) بسعر ${discountRateApplied}%` +
+          (cleanReason ? ` • ${cleanReason}` : '')
+        ).slice(0, 300);
+
+        // 5. Build atomic chunked writeBatch operations (<= 400 ops per batch)
+        type BatchOp = (b: ReturnType<typeof writeBatch>) => void;
+        const ops: BatchOp[] = [];
+
+        // 5A. Return all recalled cards to Super Admin's Main Inventory (exact real card numbers preserved!)
+        for (const item of toRecall) {
+          ops.push((b) =>
+            b.update(item.ref, {
+              ownerId: activeUser.uid,
+              status: 'available',
+              soldTo: '',
+              soldToName: '',
+              soldToPhone: '',
+              saleType: '',
+              saleId: '',
+              recalledFrom: targetUser.uid,
+              previousOwnerId: targetUser.uid,
+              updatedAt: serverTimestamp(),
+            })
+          );
+        }
+
+        // 5B. Update affected central `packages` counters safely
+        const touchedPkgIds = Array.from(countByPkg.keys());
+        const pkgSnaps = await Promise.all(
+          touchedPkgIds.map((pkgId) => getDoc(doc(db, 'packages', pkgId)))
+        );
+        for (const pSnap of pkgSnaps) {
+          if (!pSnap.exists()) continue;
+          const pData = pSnap.data() as PackageDoc;
+          const addQty = countByPkg.get(pSnap.id) || 0;
+          if (addQty <= 0) continue;
+          ops.push((b) =>
+            b.update(doc(db, 'packages', pSnap.id), {
+              availableCount: (Number(pData.availableCount) || 0) + addQty,
+              soldCount: Math.max(0, (Number(pData.soldCount) || 0) - addQty),
+              updatedAt: serverTimestamp(),
+            })
+          );
+        }
+
+        // 5C. Deduct recalled value from user's balance (`users` & `clients` mirror)
+        if (userSnap.exists()) {
+          ops.push((b) =>
+            b.update(userRef, {
+              balance: newBalance,
+              updatedAt: serverTimestamp(),
+            })
+          );
+        }
+        const clientMirrorRef = doc(db, 'clients', targetUser.uid);
+        const clientMirrorSnap = await getDoc(clientMirrorRef).catch(() => null);
+        if (clientMirrorSnap?.exists()) {
+          ops.push((b) =>
+            b.update(clientMirrorRef, {
+              balance: newBalance,
+              updatedAt: serverTimestamp(),
+            })
+          );
+        }
+
+        // 5D. Create or update customer ledger account + add automatic credit entry "سحب / مرتجع كروت (له)"
+        const customerRef = doc(db, 'customers', customerId);
+        const prevDebit = Number(matchedCustomer?.totalDebit) || Math.max(0, previousBalance);
+        const prevCredit = Number(matchedCustomer?.totalCredit) || Math.max(0, -previousBalance);
+        const nextCredit = prevCredit + totalCreditAmount;
+        const nextCustBalance = prevDebit - nextCredit;
+
+        if (customerExists) {
+          ops.push((b) =>
+            b.update(customerRef, {
+              totalCredit: nextCredit,
+              balance: nextCustBalance,
+              updatedAt: serverTimestamp(),
+            })
+          );
+        } else {
+          ops.push((b) =>
+            b.set(customerRef, {
+              ownerId: activeUser.uid,
+              name: targetUser.name.slice(0, 100),
+              phone: (targetUser.phone || '').slice(0, 20),
+              category: targetUser.role === 'agent' ? 'وكيل معتمد' : 'عميل / نقطة بيع',
+              totalDebit: prevDebit,
+              totalCredit: nextCredit,
+              balance: nextCustBalance,
+              notes: 'حساب مالي مرتبط تلقائياً بحركات الكروت والمرتجعات',
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            })
+          );
+        }
+
+        const ledgerEntryId = generateSafeDocId('rec');
+        ops.push((b) =>
+          b.set(doc(db, 'ledgerEntries', ledgerEntryId), {
+            ownerId: activeUser.uid,
+            customerId,
+            entryType: 'credit',
+            amount: totalCreditAmount,
+            description: ledgerDescription,
+            createdAt: serverTimestamp(),
+          })
+        );
+
+        // Commit chunks sequentially (ensures customer doc exists if ledger entry lands in later chunk)
+        const CHUNK_SIZE = 400;
+        for (let i = 0; i < ops.length; i += CHUNK_SIZE) {
+          const b = writeBatch(db);
+          for (const applyOp of ops.slice(i, i + CHUNK_SIZE)) {
+            applyOp(b);
+          }
+          await b.commit();
+        }
+
+        // 6. Update atomic lightweight stats documents (`stats/summary` + `stats/user_{targetUid}`)
+        const adminDeltas: Record<string, { available: number; sold: number }> = {};
+        const targetDeltas: Record<string, { available: number }> = {};
+        for (const [pkgId, qty] of countByPkg.entries()) {
+          adminDeltas[pkgId] = { available: qty, sold: -qty };
+          targetDeltas[pkgId] = { available: -qty };
+        }
+        void applyStatsSummaryDelta('summary', activeUser.uid, adminDeltas);
+        void applyStatsSummaryDelta(`user_${targetUser.uid}`, targetUser.uid, targetDeltas);
+
+        // 7. Update local caches & React state immediately (Zero lag across all 10 reports!)
+        const recalledCardObjs: CachedAvailableCard[] = toRecall.map((item) => ({
+          id: item.id,
+          packageId: item.data.packageId,
+          cardNumber: item.data.cardNumber,
+          ownerId: activeUser.uid,
+        }));
+        const recalledNumbers = recalledCardObjs.map((c) => c.cardNumber);
+        releaseCardLocksLocally(recalledNumbers);
+        appendCachedAvailableCards(activeUser.uid, recalledCardObjs);
+        removeCardsFromCache(targetUser.uid, recalledNumbers);
+
+        try {
+          localStorage.removeItem(`taibah_agent_cards_cache_v1_${targetUser.uid}`);
+        } catch {
+          // ignore
+        }
+
+        setRawPackages((prev) =>
+          prev.map((pkg) => {
+            const addQty = countByPkg.get(pkg.id) || 0;
+            if (!addQty) return pkg;
+            return {
+              ...pkg,
+              availableCount: (Number(pkg.availableCount) || 0) + addQty,
+              soldCount: Math.max(0, (Number(pkg.soldCount) || 0) - addQty),
+            };
+          })
+        );
+
+        setManagedUsers((prev) =>
+          prev.map((u) => (u.uid === targetUser.uid ? { ...u, balance: newBalance } : u))
+        );
+
+        const nowFakeTs = {
+          toDate: () => new Date(),
+          toMillis: () => Date.now(),
+          seconds: Math.floor(Date.now() / 1000),
+          nanoseconds: 0,
+        } as unknown as Timestamp;
+
+        setCustomers((prev) => {
+          const existsInState = prev.some((c) => c.id === customerId);
+          if (existsInState) {
+            return prev.map((c) =>
+              c.id === customerId
+                ? { ...c, totalCredit: nextCredit, balance: nextCustBalance, updatedAt: nowFakeTs }
+                : c
+            );
+          }
+          return [
+            {
+              id: customerId,
+              ownerId: activeUser.uid,
+              name: targetUser.name,
+              phone: targetUser.phone,
+              category: targetUser.role === 'agent' ? 'وكيل معتمد' : 'عميل / نقطة بيع',
+              totalDebit: prevDebit,
+              totalCredit: nextCredit,
+              balance: nextCustBalance,
+              notes: 'حساب مالي مرتبط تلقائياً بحركات الكروت والمرتجعات',
+              createdAt: nowFakeTs,
+              updatedAt: nowFakeTs,
+            },
+            ...prev,
+          ];
+        });
+
+        setLedgerEntries((prev) => [
+          {
+            id: ledgerEntryId,
+            ownerId: activeUser.uid,
+            customerId,
+            entryType: 'credit',
+            amount: totalCreditAmount,
+            description: ledgerDescription,
+            createdAt: nowFakeTs,
+          },
+          ...prev,
+        ]);
+
+        // 8. Audit log + Cloud notification to Agent/Client
+        const notificationMessage = [
+          '🌐 *شبكة طيبة نت اللاسلكية — TAIBAH NET*',
+          '📋 *إشعار سحب / مرتجع كروت وتحديث الرصيد*',
+          '━━━━━━━━━━━━━━━━━━',
+          `👤 *الحساب:* ${targetUser.name} (${targetUser.role === 'agent' ? 'وكيل معتمد' : 'عميل'})`,
+          `📦 *عدد الكروت المسحوبة:* ${toRecall.length} كرت`,
+          `🗂️ *التفصيل:* ${pkgBreakdownText}`,
+          `💰 *القيمة المخصومة من الرصيد (له):* ${formatYER(totalCreditAmount)}`,
+          `📊 *الرصيد السابق:* ${formatYER(previousBalance)}`,
+          `✅ *الرصيد الحالي بعد السحب:* ${formatYER(newBalance)}`,
+          cleanReason ? `📝 *السبب:* ${cleanReason}` : '',
+          '━━━━━━━━━━━━━━━━━━',
+          `📞 *الإدارة:* ${SUPER_ADMIN_CONFIG.name} (${SUPER_ADMIN_CONFIG.phone})`,
+        ]
+          .filter(Boolean)
+          .join('\n');
+
+        writeAuditLog(
+          'سحب كروت من وكيل / عميل',
+          `سحب ${toRecall.length} كرت (${pkgBreakdownText}) من ${targetUser.name} وإعادتها للمخزون الرئيسي بقيمة ${formatYER(totalCreditAmount)}`
+        ).catch(() => {});
+
+        sendCloudNotification({
+          recipientId: targetUser.uid,
+          title: `إشعار سحب / مرتجع كروت (${toRecall.length} كرت)`,
+          body: `تم سحب ${toRecall.length} كرت غير مباع (${pkgBreakdownText}) وخصم ${formatYER(totalCreditAmount)} من رصيدك. الرصيد الحالي: ${formatYER(newBalance)}`,
+          category: 'inventory',
+          targetRoute: 'reports',
+        }).catch(() => {});
+
+        notifySuccess(
+          `تم سحب ${toRecall.length} كرت بنجاح — أُعيدت الكروت للمخزون الرئيسي وخُصم ${formatYER(totalCreditAmount)} من حساب ${targetUser.name}.`
+        );
+
+        return {
+          ok: true,
+          recalledCount: toRecall.length,
+          creditAmount: totalCreditAmount,
+          discountRateApplied,
+          previousBalance,
+          newBalance,
+          recalledNumbers,
+          byPackage: byPackageSummary,
+          notificationMessage,
+        };
+      } catch (err) {
+        handleFirestoreError(err, OperationType.WRITE, `cards/recall/${targetUser.uid}`);
+        const errMsg = err instanceof Error ? err.message : 'تعذر تنفيذ عملية سحب الكروت.';
+        notifyError('تعذر سحب الكروت', errMsg);
+        return emptyFail(errMsg);
+      } finally {
+        inFlightOpsRef.current.delete(opKey);
+      }
+    },
+    [
+      customers,
+      firebaseUser,
+      notifyError,
+      notifySuccess,
+      packages,
+      profile,
+      sendCloudNotification,
+      writeAuditLog,
+    ]
+  );
+
   const value = useMemo<FirebaseContextValue>(
     () => ({
       authReady,
@@ -5763,6 +6504,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       transferClientsToAgent,
       deleteManagedUser,
       resolvePasswordReset,
+      fetchUserCardInventory,
+      recallCardsFromUser,
       enablePushNotifications,
       exportCloudBackup,
       restoreDeletedAgentsAndClients,
@@ -5831,6 +6574,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       transferClientsToAgent,
       deleteManagedUser,
       resolvePasswordReset,
+      fetchUserCardInventory,
+      recallCardsFromUser,
       enablePushNotifications,
       exportCloudBackup,
       restoreDeletedAgentsAndClients,

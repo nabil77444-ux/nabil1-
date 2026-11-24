@@ -231,14 +231,22 @@ service cloud.firestore {
 
     function isValidCardDoc(data) {
       return data.keys().hasAll(['packageId', 'cardNumber', 'status', 'ownerId', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['packageId', 'cardNumber', 'status', 'ownerId', 'soldTo', 'saleId', 'batchId', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'packageId', 'cardNumber', 'status', 'ownerId', 'soldTo', 'soldToName', 'soldToPhone',
+          'saleType', 'saleId', 'batchId', 'recalledFrom', 'previousOwnerId', 'createdAt', 'updatedAt'
+        ]) &&
         isValidString(data.packageId, 1, 64) &&
         data.cardNumber is string && data.cardNumber.size() >= 10 && data.cardNumber.size() <= 11 && data.cardNumber.matches('^[0-9]{10,11}$') &&
-        data.status in ['available', 'sold', 'returned', 'injected'] &&
+        data.status in ['available', 'assigned_to_agent', 'sold', 'returned', 'recalled', 'injected'] &&
         isValidId(data.ownerId) &&
         (!('soldTo' in data) || isValidString(data.soldTo, 0, 128)) &&
+        (!('soldToName' in data) || isValidString(data.soldToName, 0, 128)) &&
+        (!('soldToPhone' in data) || isValidString(data.soldToPhone, 0, 32)) &&
+        (!('saleType' in data) || data.saleType in ['direct', 'electronic_wholesale', 'paper_invoice', '']) &&
         (!('saleId' in data) || isValidString(data.saleId, 0, 128)) &&
         (!('batchId' in data) || isValidString(data.batchId, 0, 128)) &&
+        (!('recalledFrom' in data) || isValidString(data.recalledFrom, 0, 128)) &&
+        (!('previousOwnerId' in data) || isValidString(data.previousOwnerId, 0, 128)) &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
     }
@@ -630,7 +638,10 @@ service cloud.firestore {
           (
             incoming().createdAt == existing().createdAt &&
             existing().ownerId == request.auth.uid &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'ownerId', 'soldTo', 'saleId', 'updatedAt'])
+            incoming().status in ['available', 'assigned_to_agent', 'sold', 'returned'] &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'status', 'ownerId', 'soldTo', 'soldToName', 'soldToPhone', 'saleType', 'saleId', 'updatedAt'
+            ])
           )
         );
       allow delete: if isValidId(cardId) && isSuperAdmin();
@@ -700,7 +711,7 @@ service cloud.firestore {
       allow create: if isValidId(entryId) && isSignedIn() && isValidLedgerEntry(incoming()) &&
         incoming().ownerId == request.auth.uid &&
         incoming().createdAt == request.time &&
-        exists(/databases/$(database)/documents/customers/$(incoming().customerId));
+        existsAfter(/databases/$(database)/documents/customers/$(incoming().customerId));
       allow update: if isValidId(entryId) && isValidLedgerEntry(incoming()) && isSignedIn() && (
         isSuperAdmin() ||
         (

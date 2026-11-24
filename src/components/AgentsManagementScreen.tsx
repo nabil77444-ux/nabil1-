@@ -3,6 +3,7 @@ import {
   ArrowLeftRight,
   ArrowUpDown,
   Check,
+  CreditCard,
   Edit3,
   KeyRound,
   Loader2,
@@ -16,6 +17,7 @@ import {
 } from 'lucide-react';
 import { useFirebase } from '../contexts/FirebaseContext';
 import { ContactPickerButton } from './ContactPickerButton';
+import { AgentCardAuditModal } from './AgentCardAuditModal';
 import {
   formatCount,
   formatDateTimeAr,
@@ -56,6 +58,7 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
   const [showAddModal, setShowAddModal] = useState(false);
   const [showTransferModal, setShowTransferModal] = useState(false);
   const [managingUser, setManagingUser] = useState<UserProfile | null>(null);
+  const [auditTargetUser, setAuditTargetUser] = useState<UserProfile | null>(null);
   const [rejectTarget, setRejectTarget] = useState<RegistrationRequest | null>(null);
   const [rejectReason, setRejectReason] = useState('');
   const [busy, setBusy] = useState(false);
@@ -495,17 +498,27 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
                         {agent.phone} · نسبة التسعير {agent.discountRate || appSettings.agentDiscountPercent}% · التابعون ({subClients.length})
                       </div>
                     </div>
-                    <div className="text-left shrink-0">
+                    <div className="text-left shrink-0 flex flex-col items-end gap-1">
                       <div className="text-xs font-extrabold text-[#FDE68A] tabular-nums">
                         {formatYER(agent.balance || 0, hideNumbers)}
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => openManageModal(agent)}
-                        className="mt-1.5 min-h-[32px] px-3 rounded-lg bg-white/15 hover:bg-white/25 border border-[#D4AF37] text-[11px] font-extrabold text-white"
-                      >
-                        إدارة الحساب
-                      </button>
+                      <div className="flex items-center gap-1 flex-wrap justify-end">
+                        <button
+                          type="button"
+                          onClick={() => setAuditTargetUser(agent)}
+                          className="min-h-[30px] px-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 border border-[#FDE68A]/70 text-[10.5px] font-extrabold text-white flex items-center gap-1"
+                        >
+                          <CreditCard className="w-3 h-3" />
+                          <span>كشف الكروت</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => openManageModal(agent)}
+                          className="min-h-[30px] px-2.5 rounded-lg bg-white/15 hover:bg-white/25 border border-[#D4AF37] text-[10.5px] font-extrabold text-white"
+                        >
+                          إدارة الحساب
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -529,13 +542,23 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
                             </div>
                           </div>
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => openManageModal(sub)}
-                          className="min-h-[32px] px-2.5 rounded-lg bg-slate-100 dark:bg-slate-800 border border-[#D4AF37]/50 text-[#1A365D] dark:text-[#FDE68A] text-[11px] font-extrabold shrink-0"
-                        >
-                          إدارة الحساب
-                        </button>
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => setAuditTargetUser(sub)}
+                            className="min-h-[30px] px-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[10.5px] font-extrabold flex items-center gap-1"
+                          >
+                            <CreditCard className="w-3 h-3" />
+                            <span>الكروت</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => openManageModal(sub)}
+                            className="min-h-[30px] px-2 rounded-lg bg-slate-100 dark:bg-slate-800 border border-[#D4AF37]/50 text-[#1A365D] dark:text-[#FDE68A] text-[10.5px] font-extrabold"
+                          >
+                            إدارة
+                          </button>
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -580,17 +603,27 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
                     </div>
                   </div>
                 </div>
-                <div className="text-left shrink-0">
+                <div className="text-left shrink-0 flex flex-col items-end gap-1">
                   <div className="text-xs font-extrabold text-[#1A365D] dark:text-[#FDE68A] tabular-nums">
                     {formatYER(client.balance || 0, hideNumbers)}
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => openManageModal(client)}
-                    className="mt-1 min-h-[32px] px-3 rounded-lg bg-[#1A365D] text-white text-[11px] font-extrabold"
-                  >
-                    إدارة الحساب
-                  </button>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => setAuditTargetUser(client)}
+                      className="min-h-[30px] px-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[10.5px] font-extrabold flex items-center gap-1"
+                    >
+                      <CreditCard className="w-3 h-3" />
+                      <span>كشف الكروت</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => openManageModal(client)}
+                      className="min-h-[30px] px-2.5 rounded-lg bg-[#1A365D] text-white text-[10.5px] font-extrabold"
+                    >
+                      إدارة الحساب
+                    </button>
+                  </div>
                 </div>
               </div>
             ))}
@@ -728,6 +761,20 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
                 <X className="w-4 h-4" />
               </button>
             </div>
+
+            {/* Instant Card Inventory & "Who-Bought-What" Audit Button */}
+            <button
+              type="button"
+              onClick={() => {
+                const target = managingUser;
+                setManagingUser(null);
+                setAuditTargetUser(target);
+              }}
+              className="w-full min-h-[40px] rounded-xl bg-emerald-600 hover:bg-emerald-700 border border-[#D4AF37] text-white text-xs font-extrabold flex items-center justify-center gap-2 shadow"
+            >
+              <CreditCard className="w-4 h-4" />
+              <span>كشف الكروت والمبيعات (كم استلم • كم باع • كم باقي • لمن باع)</span>
+            </button>
 
             {/* Instant Upgrade / Demote Button (Update 10) */}
             {isAdmin && (
@@ -949,6 +996,15 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
             </button>
           </div>
         </div>
+      )}
+      {/* MODAL 4: DETAILED AGENT/CLIENT CARD INVENTORY & "WHO-BOUGHT-WHAT" AUDIT */}
+      {auditTargetUser && (
+        <AgentCardAuditModal
+          targetUser={auditTargetUser}
+          hideNumbers={hideNumbers}
+          mode="modal"
+          onClose={() => setAuditTargetUser(null)}
+        />
       )}
     </div>
   );

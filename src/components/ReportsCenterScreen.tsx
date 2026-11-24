@@ -1,13 +1,15 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   ArrowRight,
   BarChart3,
   BookOpen,
   Calendar,
+  CheckCircle2,
   CreditCard,
   FileDown,
   FileSpreadsheet,
   FileText,
+  Filter,
   ImageDown,
   Layers,
   MessageSquare,
@@ -23,6 +25,8 @@ import {
 } from 'lucide-react';
 import { useFirebase } from '../contexts/FirebaseContext';
 import { useFeedback } from '../lib/feedback';
+import { useDebounce } from '../hooks/useDebounce';
+import { normalizeDigits } from '../lib/firebase';
 import {
   exportAsArabicPDF,
   exportAsExcel,
@@ -34,15 +38,18 @@ import {
   type PrintableDocumentPayload,
 } from '../lib/exportUtils';
 import { ExportPreviewModal } from './ExportPreviewModal';
+import { AgentCardAuditModal } from './AgentCardAuditModal';
 import {
   EXCLUSIVE_PACKAGES,
   formatCount,
   formatDateDDMMYYYY,
   formatDateTimeAr,
+  formatYER,
   getRoleArabicLabel,
   SUPER_ADMIN_CONFIG,
   TAIBAH_ASSETS,
   type PackageDoc,
+  type UserProfile,
 } from '../types/taibah';
 import {
   buildSalesListDenominationBreakdown,
@@ -116,8 +123,33 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
   const [showStockMonitor, setShowStockMonitor] = useState(false);
   const [exportPreview, setExportPreview] = useState<ExportShareResult | null>(null);
   const [search, setSearch] = useState('');
+  const debouncedSearch = useDebounce(search, 180);
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
+  const [visibleRowsCount, setVisibleRowsCount] = useState(50);
+
+  // Unified Agent/Client Filter persisting across ALL 10 reports!
+  const [selectedEntityUid, setSelectedEntityUid] = useState<string>('all');
+  const [auditModalUser, setAuditModalUser] = useState<UserProfile | null>(null);
+
+  const selectableAccounts = useMemo(() => {
+    if (!isAdmin && !isAgent) return [] as UserProfile[];
+    return (managedUsers || [])
+      .filter((u) => u.role === 'agent' || u.role === 'client')
+      .sort((a, b) => a.name.localeCompare(b.name, 'ar'));
+  }, [isAdmin, isAgent, managedUsers]);
+
+  const selectedAccount = useMemo<UserProfile | null>(
+    () =>
+      selectedEntityUid !== 'all'
+        ? selectableAccounts.find((u) => u.uid === selectedEntityUid) || null
+        : null,
+    [selectableAccounts, selectedEntityUid]
+  );
+
+  useEffect(() => {
+    setVisibleRowsCount(50);
+  }, [activeReportId, debouncedSearch, fromDate, toDate, selectedEntityUid]);
 
   const formatInputDateDisplay = (isoDate: string) => {
     if (!isoDate) return '';
@@ -125,7 +157,7 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
     return dd && mm && yyyy ? `${dd}/${mm}/${yyyy}` : isoDate;
   };
 
-  // Build strict role-isolated data for the selected report
+  // Build strict role-isolated + unified Agent/Client filtered data for ALL 10 reports
   const reportData = useMemo(() => {
     if (!activeReportId) return null;
 
@@ -136,9 +168,35 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
       return true;
     };
     const matchSearch = (fields: string[]) => {
-      if (!search.trim()) return true;
-      const q = search.trim().toLowerCase();
+      if (!debouncedSearch.trim()) return true;
+      const q = debouncedSearch.trim().toLowerCase();
       return fields.some((f) => f.toLowerCase().includes(q));
+    };
+
+    const normPhone = (p?: string) => normalizeDigits(p || '').replace(/[^\d]/g, '');
+    const selectedPhone = selectedAccount ? normPhone(selectedAccount.phone) : '';
+    const selectedNameLower = selectedAccount ? selectedAccount.name.trim().toLowerCase() : '';
+    const scopeSuffix = selectedAccount ? ` — (${selectedAccount.name})` : '';
+
+    const matchSelectedSale = (s: (typeof sales)[number]) => {
+      if (!selectedAccount) return true;
+      if (s.sellerId === selectedAccount.uid || s.buyerId === selectedAccount.uid) return true;
+      if (selectedPhone.length >= 7 && normPhone(s.buyerPhone) === selectedPhone) return true;
+      if (selectedNameLower && (s.buyerName || '').trim().toLowerCase() === selectedNameLower) return true;
+      return false;
+    };
+
+    const matchSelectedCustomer = (c: (typeof customers)[number]) => {
+      if (!selectedAccount) return true;
+      if (c.id === `acct_${selectedAccount.uid}`) return true;
+      if (selectedPhone.length >= 7 && normPhone(c.phone) === selectedPhone) return true;
+      if (selectedNameLower && (c.name || '').trim().toLowerCase() === selectedNameLower) return true;
+      return false;
+    };
+
+    const matchSelectedTopup = (t: (typeof topupRequests)[number]) => {
+      if (!selectedAccount) return true;
+      return t.requesterId === selectedAccount.uid || t.targetId === selectedAccount.uid;
     };
 
     switch (activeReportId) {
@@ -146,6 +204,7 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
         const list = sales.filter(
           (s) =>
             s.saleType === 'direct' &&
+            matchSelectedSale(s) &&
             inDateRange(s.createdAt?.toMillis?.()) &&
             matchSearch([s.buyerName, s.buyerPhone || '', s.invoiceNumber || ''])
         );
@@ -153,7 +212,7 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
         const cards = list.reduce((a, b) => a + b.totalCards, 0);
         const breakdown = buildSalesListDenominationBreakdown(list, appSettings);
         return {
-          title: 'تقرير المبيعات المباشرة (100%)',
+          title: `تقرير المبيعات المباشرة (100%)${scopeSuffix}`,
           headers: ['رقم الفاتورة', 'الزبون', 'الكروت', 'الإجمالي', 'التاريخ'],
           rows: list.map((s) => [
             s.invoiceNumber || s.id.slice(-6),
@@ -176,6 +235,7 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
         const list = sales.filter(
           (s) =>
             s.saleType === 'electronic_wholesale' &&
+            matchSelectedSale(s) &&
             inDateRange(s.createdAt?.toMillis?.()) &&
             matchSearch([s.buyerName, s.buyerPhone || '', s.invoiceNumber || ''])
         );
@@ -184,7 +244,7 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
         const cards = list.reduce((a, b) => a + b.totalCards, 0);
         const breakdown = buildSalesListDenominationBreakdown(list, appSettings);
         return {
-          title: 'تقرير بيع الجملة الإلكتروني',
+          title: `تقرير بيع الجملة الإلكتروني${scopeSuffix}`,
           headers: ['الفاتورة', 'المستلم', 'نوع الحساب', 'الكروت', 'المُسلّم', 'الإجمالي', 'المتبقي'],
           rows: list.map((s) => [
             s.invoiceNumber || s.id.slice(-6),
@@ -209,6 +269,7 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
         const list = sales.filter(
           (s) =>
             s.saleType === 'paper_invoice' &&
+            matchSelectedSale(s) &&
             inDateRange(s.createdAt?.toMillis?.()) &&
             matchSearch([s.buyerName, s.buyerPhone || '', s.invoiceNumber || ''])
         );
@@ -216,7 +277,7 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
         const rem = list.reduce((a, b) => a + b.remainingAmount, 0);
         const breakdown = buildSalesListDenominationBreakdown(list, appSettings);
         return {
-          title: 'تقرير الفواتير والكروت الورقية',
+          title: `تقرير الفواتير والكروت الورقية${scopeSuffix}`,
           headers: ['الفاتورة', 'العميل', 'نوع الحساب', 'الكروت', 'الإجمالي', 'المدفوع', 'المتبقي'],
           rows: list.map((s) => [
             s.invoiceNumber || s.id.slice(-6),
@@ -238,26 +299,35 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
       }
 
       case 'customers_ledger': {
-        const list = (customers || []).filter((c) => matchSearch([c?.name || '', c?.phone || '', c?.category || '']));
+        const list = (customers || []).filter(
+          (c) =>
+            matchSelectedCustomer(c) &&
+            matchSearch([c?.name || '', c?.phone || '', c?.category || ''])
+        );
         const debit = list.reduce((a, c) => a + (c?.totalDebit || 0), 0);
         const credit = list.reduce((a, c) => a + (c?.totalCredit || 0), 0);
         return {
-          title: 'تقرير الدفتر المحاسبي العام وحسابات العملاء',
+          title: `تقرير الدفتر المحاسبي العام وحسابات العملاء${scopeSuffix}`,
           headers: ['العميل', 'التصنيف', 'عليه (مدين)', 'له (دائن)', 'الصافي'],
           rows: list.map((c) => {
             const bal = c?.balance ?? 0;
             return [
               c?.name || '-',
               c?.category || 'عميل شبكة',
-              `${c?.totalDebit ?? 0} ر.ي`,
-              `${c?.totalCredit ?? 0} ر.ي`,
-              bal > 0 ? `عليه ${bal}` : bal < 0 ? `له ${Math.abs(bal)}` : '0',
+              `${formatNumEn(c?.totalDebit ?? 0)} ر.ي`,
+              `${formatNumEn(c?.totalCredit ?? 0)} ر.ي`,
+              bal > 0 ? `عليه ${formatNumEn(bal)}` : bal < 0 ? `له ${formatNumEn(Math.abs(bal))}` : '0',
             ];
           }),
+          financialEquation: {
+            debit,
+            credit,
+            balance: debit - credit,
+          },
           summary: [
-            { label: 'إجمالي المدين', value: `${debit} ر.ي` },
-            { label: 'إجمالي الدائن', value: `${credit} ر.ي` },
-            { label: 'صافي الدفتر العام', value: `${debit - credit} ر.ي`, highlight: true },
+            { label: 'إجمالي المشتريات/الإضافات (عليه)', value: `${formatNumEn(debit)} ر.ي` },
+            { label: 'إجمالي المدفوعات/المرتجعات (له)', value: `${formatNumEn(credit)} ر.ي` },
+            { label: 'الرصيد الحالي الصافي', value: `${formatNumEn(debit - credit)} ر.ي`, highlight: true },
           ],
           fileName: 'تقرير_الدفتر_المحاسبي',
         };
@@ -267,26 +337,30 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
         const saleDebts = (sales || []).filter(
           (s) =>
             (s?.remainingAmount ?? 0) > 0 &&
+            matchSelectedSale(s) &&
             inDateRange(s?.createdAt?.toMillis?.()) &&
             matchSearch([s?.buyerName || '', s?.buyerPhone || ''])
         );
         const custDebts = (customers || []).filter(
-          (c) => (c?.balance ?? 0) > 0 && matchSearch([c?.name || '', c?.phone || ''])
+          (c) =>
+            (c?.balance ?? 0) > 0 &&
+            matchSelectedCustomer(c) &&
+            matchSearch([c?.name || '', c?.phone || ''])
         );
         const rows = [
-          ...saleDebts.map((s) => [s?.buyerName || '-', 'فاتورة آجلة', s?.buyerPhone || '-', `${s?.remainingAmount ?? 0} ر.ي`]),
-          ...custDebts.map((c) => [c?.name || '-', `دفتر (${c?.category || 'عميل'})`, c?.phone || '-', `${c?.balance ?? 0} ر.ي`]),
+          ...saleDebts.map((s) => [s?.buyerName || '-', 'فاتورة آجلة', s?.buyerPhone || '-', `${formatNumEn(s?.remainingAmount ?? 0)} ر.ي`]),
+          ...custDebts.map((c) => [c?.name || '-', `دفتر (${c?.category || 'عميل'})`, c?.phone || '-', `${formatNumEn(c?.balance ?? 0)} ر.ي`]),
         ];
         const totalDebts =
           saleDebts.reduce((a, s) => a + (s?.remainingAmount ?? 0), 0) +
           custDebts.reduce((a, c) => a + (c?.balance ?? 0), 0);
         return {
-          title: 'تقرير الديون والمبالغ المتبقية للتحصيل',
+          title: `تقرير الديون والمبالغ المتبقية للتحصيل${scopeSuffix}`,
           headers: ['الاسم', 'المصدر', 'الهاتف', 'المبلغ المستحق'],
           rows,
           summary: [
-            { label: 'عدد الذمم المفتوحة', value: String(rows.length) },
-            { label: 'إجمالي الديون المستحقة', value: `${totalDebts} ر.ي`, highlight: true },
+            { label: 'عدد الذمم المفتوحة', value: formatNumEn(rows.length) },
+            { label: 'إجمالي الديون المستحقة', value: `${formatNumEn(totalDebts)} ر.ي`, highlight: true },
           ],
           fileName: 'تقرير_الديون_والمتبقي',
         };
@@ -294,13 +368,16 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
 
       case 'profits_analysis': {
         const list = (sales || []).filter(
-          (s) => inDateRange(s?.createdAt?.toMillis?.()) && matchSearch([s?.buyerName || '', s?.invoiceNumber || ''])
+          (s) =>
+            matchSelectedSale(s) &&
+            inDateRange(s?.createdAt?.toMillis?.()) &&
+            matchSearch([s?.buyerName || '', s?.invoiceNumber || ''])
         );
         const expected = list.reduce((a, s) => a + (s?.expectedProfit || 0), 0);
         const realized = list.reduce((a, s) => a + (s?.realizedProfit || 0), 0);
         const breakdown = buildSalesListDenominationBreakdown(list, appSettings);
         return {
-          title: 'تقرير الأرباح المتوقعة والمحققة فعلياً',
+          title: `تقرير الأرباح المتوقعة والمحققة فعلياً${scopeSuffix}`,
           headers: ['الفاتورة', 'العميل', 'نوع الحساب', 'الإجمالي', 'الربح المتوقع', 'الربح المحقق'],
           rows: list.map((s) => [
             s?.invoiceNumber || (s?.id || '').slice(-6),
@@ -321,22 +398,25 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
 
       case 'agents_performance': {
         const list = (managedUsers || []).filter(
-          (u) => u?.role !== 'super_admin' && matchSearch([u?.name || '', u?.phone || ''])
+          (u) =>
+            u?.role !== 'super_admin' &&
+            (!selectedAccount || u.uid === selectedAccount.uid) &&
+            matchSearch([u?.name || '', u?.phone || ''])
         );
         const totalBal = list.reduce((a, u) => a + (u?.balance || 0), 0);
         return {
-          title: 'تقرير الوكلاء ونقاط البيع والعملاء',
+          title: `تقرير الوكلاء ونقاط البيع والعملاء${scopeSuffix}`,
           headers: ['الاسم', 'الدور', 'الهاتف', 'النسبة', 'الرصيد'],
           rows: list.map((u) => [
             u?.name || '-',
             getRoleArabicLabel(u?.role),
             u?.phone || '-',
             `${u?.discountRate || 80}%`,
-            `${u?.balance || 0} ر.ي`,
+            `${formatNumEn(u?.balance || 0)} ر.ي`,
           ]),
           summary: [
-            { label: 'إجمالي الحسابات', value: String(list.length) },
-            { label: 'مجموع الأرصدة', value: `${totalBal} ر.ي`, highlight: true },
+            { label: 'إجمالي الحسابات', value: formatNumEn(list.length) },
+            { label: 'مجموع الأرصدة', value: `${formatNumEn(totalBal)} ر.ي`, highlight: true },
           ],
           fileName: 'تقرير_الوكلاء_والعملاء',
         };
@@ -345,23 +425,24 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
       case 'topup_requests': {
         const list = (topupRequests || []).filter(
           (t) =>
+            matchSelectedTopup(t) &&
             inDateRange(t?.createdAt?.toMillis?.()) &&
             matchSearch([t?.requesterName || '', t?.targetName || ''])
         );
         const total = list.reduce((a, t) => a + (t?.totalAmount ?? 0), 0);
         return {
-          title: 'تقرير طلبات التغذية (ثنائي المستوى)',
+          title: `تقرير طلبات التغذية (ثنائي المستوى)${scopeSuffix}`,
           headers: ['مقدم الطلب', 'الموجّه إليه', 'الكروت', 'المبلغ', 'الحالة'],
           rows: list.map((t) => [
             t?.requesterName || '-',
             t?.targetName || SUPER_ADMIN_CONFIG.name,
-            String(t?.totalCards ?? 0),
-            `${t?.totalAmount ?? 0} ر.ي`,
+            formatNumEn(t?.totalCards ?? 0),
+            `${formatNumEn(t?.totalAmount ?? 0)} ر.ي`,
             t?.status === 'approved' ? 'مُنفّذ ✅' : t?.status === 'pending' ? 'معلق' : 'مرفوض',
           ]),
           summary: [
-            { label: 'عدد الطلبات', value: String(list.length) },
-            { label: 'إجمالي قيمة التغذيات', value: `${total} ر.ي`, highlight: true },
+            { label: 'عدد الطلبات', value: formatNumEn(list.length) },
+            { label: 'إجمالي قيمة التغذيات', value: `${formatNumEn(total)} ر.ي`, highlight: true },
           ],
           fileName: 'تقرير_طلبات_التغذية',
         };
@@ -371,18 +452,25 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
         const list = (displayPackages || []).filter((p) => matchSearch([String(p?.price ?? ''), p?.dataLabel || '']));
         const avail = list.reduce((a, p) => a + (p?.availableCount ?? 0), 0);
         const sold = list.reduce((a, p) => a + (p?.soldCount ?? 0), 0);
+        const returnedTotal = (sales || []).reduce((a, s) => a + (s?.returnedCards ?? 0), 0);
         if (!isAdmin) {
           return {
-            title: 'تقرير جرد الباقات المتاحة بحسابك',
+            title: `تقرير جرد الباقات المتاحة بحسابك${scopeSuffix}`,
             headers: ['الباقة', 'الكروت المتاحة', 'الكروت المباعة'],
             rows: list.map((p) => [
               `${p?.price ?? 0} ر.ي (${p?.dataLabel || ''})`,
-              String(p?.availableCount ?? 0),
-              String(p?.soldCount ?? 0),
+              formatNumEn(p?.availableCount ?? 0),
+              formatNumEn(p?.soldCount ?? 0),
             ]),
+            inventoryEquation: {
+              uploaded: avail + sold,
+              available: avail,
+              soldOrAssigned: sold,
+              returned: returnedTotal,
+            },
             summary: [
-              { label: 'إجمالي المباعة', value: `${sold} كرت` },
-              { label: 'إجمالي المتاح بحسابك', value: `${avail} كرت`, highlight: true },
+              { label: 'إجمالي المباعة', value: `${formatNumEn(sold)} كرت` },
+              { label: 'إجمالي المتاح بحسابك', value: `${formatNumEn(avail)} كرت`, highlight: true },
             ],
             fileName: 'تقرير_جرد_مخزوني',
           };
@@ -390,54 +478,84 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
         const uploaded = list.reduce((a, p) => a + (p?.uploadedCount ?? 0), 0);
         const injected = list.reduce((a, p) => a + (p?.injectedCount ?? 0), 0);
         return {
-          title: 'تقرير جرد الباقات الثماني والمخزون',
-          headers: ['الباقة', 'المرفوعة', 'المتاحة', 'المباعة', 'المحقونة'],
+          title: `تقرير جرد الباقات الثماني والمخزون${scopeSuffix}`,
+          headers: ['الباقة', 'المرفوعة', 'المتاحة', 'المباعة/المسلّمة', 'المحقونة'],
           rows: list.map((p) => [
             `${p?.price ?? 0} ر.ي (${p?.dataLabel || ''})`,
-            String(p?.uploadedCount ?? 0),
-            String(p?.availableCount ?? 0),
-            String(p?.soldCount ?? 0),
-            String(p?.injectedCount ?? 0),
+            formatNumEn(p?.uploadedCount ?? 0),
+            formatNumEn(p?.availableCount ?? 0),
+            formatNumEn(p?.soldCount ?? 0),
+            formatNumEn(p?.injectedCount ?? 0),
           ]),
+          inventoryEquation: {
+            uploaded: Math.max(uploaded, avail + sold + injected),
+            available: avail,
+            soldOrAssigned: sold + injected,
+            returned: returnedTotal,
+          },
           summary: [
-            { label: 'إجمالي المرفوعة', value: `${uploaded} كرت` },
-            { label: 'إجمالي المباعة', value: `${sold} كرت` },
-            { label: 'إجمالي المحقونة', value: `${injected} كرت` },
-            { label: 'إجمالي المتاح حالياً', value: `${avail} كرت`, highlight: true },
+            { label: 'إجمالي المستورد/المرفوع', value: `${formatNumEn(uploaded)} كرت` },
+            { label: 'المباع والمسلّم للوكلاء', value: `${formatNumEn(sold)} كرت` },
+            { label: 'إجمالي المحقونة', value: `${formatNumEn(injected)} كرت` },
+            { label: 'المتاح بالمخزن حالياً', value: `${formatNumEn(avail)} كرت`, highlight: true },
           ],
           fileName: 'تقرير_جرد_الباقات',
         };
       }
 
       default: {
-        const filteredAllSales = (sales || []).filter((s) => inDateRange(s?.createdAt?.toMillis?.()));
+        const filteredAllSales = (sales || []).filter(
+          (s) => matchSelectedSale(s) && inDateRange(s?.createdAt?.toMillis?.())
+        );
+        const filteredCustomers = (customers || []).filter(matchSelectedCustomer);
+        const filteredTopups = (topupRequests || []).filter(matchSelectedTopup);
         const totalSalesAmt = filteredAllSales.reduce((a, s) => a + (s?.totalAmount ?? 0), 0);
         const totalPaidAmt = filteredAllSales.reduce((a, s) => a + (s?.paidAmount ?? 0), 0);
         const totalRemAmt = filteredAllSales.reduce((a, s) => a + (s?.remainingAmount ?? 0), 0);
         const totalCardsSold = filteredAllSales.reduce((a, s) => a + (s?.totalCards ?? 0), 0);
+        const totalReturnedCards = filteredAllSales.reduce((a, s) => a + (s?.returnedCards ?? 0), 0);
         const totalAvail = (displayPackages || []).reduce((a, p) => a + (p?.availableCount ?? 0), 0);
+        const totalUploaded = (displayPackages || []).reduce((a, p) => a + (p?.uploadedCount ?? 0), 0);
+        const totalDebit = filteredCustomers.reduce((a, c) => a + (c?.totalDebit ?? 0), 0);
+        const totalCredit = filteredCustomers.reduce((a, c) => a + (c?.totalCredit ?? 0), 0);
         const breakdown = buildSalesListDenominationBreakdown(filteredAllSales, appSettings);
         const rows: string[][] = [
           ['إجمالي عمليات البيع المسجلة', `${formatNumEn(filteredAllSales.length)} عملية`],
-          ['إجمالي الكروت المباعة', `${formatNumEn(totalCardsSold)} كرت`],
+          ['إجمالي الكروت المباعة / المسلّمة', `${formatNumEn(totalCardsSold)} كرت`],
+          ['إجمالي الكروت المرتجعة', `${formatNumEn(totalReturnedCards)} كرت`],
           ['إجمالي قيمة المبيعات', `${formatNumEn(totalSalesAmt)} ر.ي`],
           ['إجمالي التحصيل النقدي الفوري', `${formatNumEn(totalPaidAmt)} ر.ي`],
           ['إجمالي الآجل / المتبقي', `${formatNumEn(totalRemAmt)} ر.ي`],
           [isAdmin ? 'إجمالي الكروت المتاحة بالمخزون' : 'الكروت المتاحة بحسابك', `${formatNumEn(totalAvail)} كرت`],
-          ['عدد حسابات الدفتر العام', `${formatNumEn(customers.length)} حساب`],
-          ['عدد طلبات التغذية المسجلة', `${formatNumEn(topupRequests.length)} طلب`],
+          ['عدد حسابات الدفتر العام', `${formatNumEn(filteredCustomers.length)} حساب`],
+          ['عدد طلبات التغذية المسجلة', `${formatNumEn(filteredTopups.length)} طلب`],
         ];
         if (isAdmin || isAgent) {
           rows.push([
             'عدد الوكلاء ونقاط البيع',
-            `${formatNumEn(managedUsers.filter((u) => u.role !== 'super_admin').length)} حساب`,
+            `${formatNumEn(
+              selectedAccount
+                ? 1
+                : managedUsers.filter((u) => u.role !== 'super_admin').length
+            )} حساب`,
           ]);
         }
         return {
-          title: 'التقرير المالي الشامل — شبكة طيبة نت',
+          title: `التقرير المالي الشامل — شبكة طيبة نت${scopeSuffix}`,
           headers: ['البند المالي / التشغيلي', 'القيمة الحية'],
           rows,
           breakdown,
+          inventoryEquation: {
+            uploaded: Math.max(totalUploaded, totalAvail + totalCardsSold),
+            available: totalAvail,
+            soldOrAssigned: totalCardsSold,
+            returned: totalReturnedCards,
+          },
+          financialEquation: {
+            debit: totalDebit + totalSalesAmt,
+            credit: totalCredit + totalPaidAmt,
+            balance: (totalDebit + totalSalesAmt) - (totalCredit + totalPaidAmt),
+          },
           summary: [
             { label: 'التحصيل النقدي', value: `${formatNumEn(totalPaidAmt)} ر.ي` },
             { label: 'إجمالي المبيعات', value: `${formatNumEn(totalSalesAmt)} ر.ي`, highlight: true },
@@ -446,7 +564,21 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
         };
       }
     }
-  }, [activeReportId, sales, customers, managedUsers, topupRequests, displayPackages, search, fromDate, toDate, isAdmin, isAgent, appSettings]);
+  }, [
+    activeReportId,
+    sales,
+    customers,
+    managedUsers,
+    topupRequests,
+    displayPackages,
+    debouncedSearch,
+    fromDate,
+    toDate,
+    isAdmin,
+    isAgent,
+    appSettings,
+    selectedAccount,
+  ]);
 
   const getBreakdownList = (data: NonNullable<typeof reportData>): DenominationLineBreakdown[] =>
     'breakdown' in data && Array.isArray(data.breakdown) ? data.breakdown : [];
@@ -521,8 +653,38 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
           </div>
         </div>
 
-        {/* Date Range + Search Filters */}
+        {/* Unified Agent/Client Filter + Date Range + Search Bar */}
         <div className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] p-3 space-y-2 shadow-sm">
+          {(isAdmin || isAgent) && selectableAccounts.length > 0 && (
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <div className="flex-1 min-w-[180px] flex items-center gap-1.5">
+                <Filter className="w-4 h-4 text-[#1A365D] dark:text-[#FDE68A] shrink-0" />
+                <select
+                  value={selectedEntityUid}
+                  onChange={(e) => setSelectedEntityUid(e.target.value)}
+                  className="flex-1 min-h-[38px] rounded-xl border-2 border-[#D4AF37]/80 bg-slate-50 dark:bg-slate-800 px-2.5 text-xs font-extrabold text-[#1A365D] dark:text-[#FDE68A] focus:outline-none"
+                >
+                  <option value="all">الكل (تقرير عام لجميع الحسابات)</option>
+                  {selectableAccounts.map((u) => (
+                    <option key={u.uid} value={u.uid}>
+                      {u.name} ({getRoleArabicLabel(u.role)}) — {u.phone}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {selectedAccount && (
+                <button
+                  type="button"
+                  onClick={() => setAuditModalUser(selectedAccount)}
+                  className="min-h-[38px] px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-extrabold flex items-center gap-1 shrink-0 shadow"
+                >
+                  <CreditCard className="w-3.5 h-3.5" />
+                  <span>كشف كروت ولمن باع</span>
+                </button>
+              )}
+            </div>
+          )}
+
           <div className="relative">
             <Search className="w-4 h-4 text-[#1A365D] dark:text-[#FDE68A] absolute right-3 top-1/2 -translate-y-1/2" />
             <input
@@ -696,7 +858,49 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
           </div>
         )}
 
-        {/* Report Table */}
+        {/* Transparent Inventory Reconciliation Equation (Zero Lost Cards) */}
+        {'inventoryEquation' in reportData && reportData.inventoryEquation && (
+          <div className="rounded-2xl bg-emerald-50 dark:bg-emerald-950/35 border-2 border-emerald-500/70 p-3 text-xs font-extrabold text-emerald-900 dark:text-emerald-200 space-y-1">
+            <div className="flex items-center gap-1.5">
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+              <span>معادلة مطابقة الجرد (ضمان صفر كروت ضائعة):</span>
+            </div>
+            <p className="text-[11px] font-bold leading-relaxed tabular-nums">
+              إجمالي المستورد/المرفوع ({hideNumbers ? '••' : formatNumEn(reportData.inventoryEquation.uploaded)}) =
+              المتاح بالمخزن ({hideNumbers ? '••' : formatNumEn(reportData.inventoryEquation.available)}) +
+              المسلّم للوكلاء والمباع ({hideNumbers ? '••' : formatNumEn(reportData.inventoryEquation.soldOrAssigned)})
+              {reportData.inventoryEquation.returned > 0
+                ? ` • المرتجع/المسحوب (${hideNumbers ? '••' : formatNumEn(reportData.inventoryEquation.returned)})`
+                : ''}
+            </p>
+          </div>
+        )}
+
+        {/* Transparent Financial Statement Equation */}
+        {'financialEquation' in reportData && reportData.financialEquation && (
+          <div className="rounded-2xl bg-blue-50 dark:bg-blue-950/35 border-2 border-blue-500/70 p-3 text-xs font-extrabold text-[#1A365D] dark:text-blue-200 space-y-1">
+            <div className="flex items-center gap-1.5">
+              <CheckCircle2 className="w-4 h-4 text-blue-600 shrink-0" />
+              <span>معادلة كشف الحساب المالي المطابق:</span>
+            </div>
+            <p className="text-[11px] font-bold leading-relaxed tabular-nums">
+              المشتريات/الإضافات ({hideNumbers ? '••' : formatYER(reportData.financialEquation.debit)}) −
+              المدفوعات/المرتجعات والسحب ({hideNumbers ? '••' : formatYER(reportData.financialEquation.credit)}) =
+              الرصيد الحالي الصافي ({hideNumbers ? '••' : formatYER(reportData.financialEquation.balance)})
+            </p>
+          </div>
+        )}
+
+        {/* Embedded Detailed Card Inventory & "Who-Bought-What" Audit when viewing an Agent/Client */}
+        {selectedAccount && (activeReportId === 'agents_performance' || activeReportId === 'packages_inventory') && (
+          <AgentCardAuditModal
+            targetUser={selectedAccount}
+            hideNumbers={hideNumbers}
+            mode="inline"
+          />
+        )}
+
+        {/* Report Table (Paginated 50 rows/page for Zero Lag on older Android devices) */}
         <div className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37]/70 overflow-hidden shadow-md">
           <div className="overflow-x-auto">
             <table className="w-full text-right text-xs">
@@ -717,7 +921,7 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
                     </td>
                   </tr>
                 ) : (
-                  reportData.rows.map((row, rIdx) => (
+                  reportData.rows.slice(0, visibleRowsCount).map((row, rIdx) => (
                     <tr
                       key={rIdx}
                       className="border-b border-slate-100 dark:border-slate-800 odd:bg-white dark:odd:bg-slate-900 even:bg-slate-50 dark:even:bg-slate-800/40"
@@ -733,9 +937,28 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
               </tbody>
             </table>
           </div>
+          {reportData.rows.length > visibleRowsCount && (
+            <div className="p-2.5 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50">
+              <button
+                type="button"
+                onClick={() => setVisibleRowsCount((c) => c + 50)}
+                className="w-full min-h-[38px] rounded-xl bg-[#1A365D] text-[#FDE68A] text-xs font-extrabold"
+              >
+                عرض المزيد ({formatNumEn(Math.min(50, reportData.rows.length - visibleRowsCount))} سجل إضافي من أصل {formatNumEn(reportData.rows.length)})
+              </button>
+            </div>
+          )}
         </div>
 
         <ExportPreviewModal result={exportPreview} onClose={() => setExportPreview(null)} />
+        {auditModalUser && (
+          <AgentCardAuditModal
+            targetUser={auditModalUser}
+            hideNumbers={hideNumbers}
+            mode="modal"
+            onClose={() => setAuditModalUser(null)}
+          />
+        )}
       </div>
     );
   }
@@ -753,7 +976,9 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
             مركز التقارير الشامل ({visibleReports.length} تقارير مستقلة)
           </h2>
           <p className="text-[10px] sm:text-[11px] font-bold text-[#FDE68A] truncate">
-            تصدير ومشاركة فورية: PDF • صورة HD • Excel • واتساب • SMS
+            {selectedAccount
+              ? `مفلتر لحساب: ${selectedAccount.name} (${getRoleArabicLabel(selectedAccount.role)})`
+              : 'تصدير ومشاركة فورية: PDF • صورة HD • Excel • واتساب • SMS'}
           </p>
         </div>
         <div className="w-9 h-9 rounded-full p-0.5 bg-gradient-to-tr from-[#B4860B] via-[#FDE68A] to-[#D4AF37] shrink-0 shadow">
@@ -763,19 +988,65 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
         </div>
       </div>
 
-      {/* Compact Stock Monitor Trigger */}
-      <button
-        type="button"
-        onClick={() => setShowStockMonitor(true)}
-        className="shrink-0 w-full h-10 rounded-xl bg-gradient-to-l from-[#0F172A] via-[#1A365D] to-[#1E3A8A] border-2 border-[#D4AF37] px-3 text-[#FDE68A] font-extrabold text-[11px] sm:text-xs shadow flex items-center justify-center gap-1.5 active:scale-[0.99] transition-transform"
-      >
-        <Layers className="w-4 h-4 shrink-0" />
-        <span className="truncate">
-          {isAdmin
-            ? 'مراقبة مخزون الكروت والمبيعات (المرفوعة • المتاحة • المباعة • المحقونة)'
-            : 'مراقبة مخزون كروت حسابك والمبيعات الفورية'}
-        </span>
-      </button>
+      {/* Unified Fixed Agent/Client Selector Bar (Filters ALL 10 Reports + Instant Card Audit) */}
+      <div className="shrink-0 flex items-center gap-1.5">
+        {(isAdmin || isAgent) && selectableAccounts.length > 0 ? (
+          <>
+            <select
+              value={selectedEntityUid}
+              onChange={(e) => setSelectedEntityUid(e.target.value)}
+              className="flex-1 min-w-0 h-9 rounded-xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] px-2.5 text-[11px] font-extrabold text-[#1A365D] dark:text-[#FDE68A] shadow-sm focus:outline-none"
+            >
+              <option value="all">الكل (تقرير عام لجميع الحسابات)</option>
+              {selectableAccounts.map((u) => (
+                <option key={u.uid} value={u.uid}>
+                  {u.name} ({getRoleArabicLabel(u.role)}) — {u.phone}
+                </option>
+              ))}
+            </select>
+            {selectedAccount ? (
+              <button
+                type="button"
+                onClick={() => setAuditModalUser(selectedAccount)}
+                className="shrink-0 h-9 px-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 border-2 border-[#D4AF37] text-white text-[10.5px] font-extrabold flex items-center gap-1 shadow"
+              >
+                <CreditCard className="w-3.5 h-3.5" />
+                <span>كشف الكروت</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setShowStockMonitor(true)}
+                className="shrink-0 h-9 px-2.5 rounded-xl bg-gradient-to-l from-[#0F172A] to-[#1A365D] border-2 border-[#D4AF37] text-[#FDE68A] text-[10.5px] font-extrabold flex items-center gap-1 shadow"
+              >
+                <Layers className="w-3.5 h-3.5" />
+                <span>جرد المخزون</span>
+              </button>
+            )}
+          </>
+        ) : (
+          <div className="w-full flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => setShowStockMonitor(true)}
+              className="flex-1 h-9 rounded-xl bg-gradient-to-l from-[#0F172A] via-[#1A365D] to-[#1E3A8A] border-2 border-[#D4AF37] px-2.5 text-[#FDE68A] font-extrabold text-[11px] shadow flex items-center justify-center gap-1.5"
+            >
+              <Layers className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">مراقبة مخزون حسابك</span>
+            </button>
+            {profile && (
+              <button
+                type="button"
+                onClick={() => setAuditModalUser(profile)}
+                className="shrink-0 h-9 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 border-2 border-[#D4AF37] text-white font-extrabold text-[11px] shadow flex items-center gap-1"
+              >
+                <CreditCard className="w-3.5 h-3.5" />
+                <span>كشف كروتي ومبيعاتي</span>
+              </button>
+            )}
+          </div>
+        )}
+      </div>
 
       {/* Fixed Single-Viewport Grid (2×5 Mobile, 5×2 Desktop — ZERO SCROLL!) */}
       <div className="flex-1 min-h-0 grid grid-cols-2 md:grid-cols-5 auto-rows-fr gap-2 py-0.5 px-0.5 overflow-hidden">
@@ -881,6 +1152,14 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
             </div>
           </div>
         </div>
+      )}
+      {auditModalUser && (
+        <AgentCardAuditModal
+          targetUser={auditModalUser}
+          hideNumbers={hideNumbers}
+          mode="modal"
+          onClose={() => setAuditModalUser(null)}
+        />
       )}
     </div>
   );

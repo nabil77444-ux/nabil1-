@@ -119,11 +119,16 @@
       "properties": {
         "packageId": { "type": "string", "maxLength": 64 },
         "cardNumber": { "type": "string", "minLength": 10, "maxLength": 11, "pattern": "^[0-9]{10,11}$" },
-        "status": { "type": "string", "enum": ["available", "sold", "returned", "injected"] },
+        "status": { "type": "string", "enum": ["available", "assigned_to_agent", "sold", "returned", "recalled", "injected"] },
         "ownerId": { "type": "string", "maxLength": 128 },
         "soldTo": { "type": "string", "maxLength": 128 },
+        "soldToName": { "type": "string", "maxLength": 128 },
+        "soldToPhone": { "type": "string", "maxLength": 32 },
+        "saleType": { "type": "string", "enum": ["direct", "electronic_wholesale", "paper_invoice", ""] },
         "saleId": { "type": "string", "maxLength": 128 },
         "batchId": { "type": "string", "maxLength": 128 },
+        "recalledFrom": { "type": "string", "maxLength": 128 },
+        "previousOwnerId": { "type": "string", "maxLength": 128 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },

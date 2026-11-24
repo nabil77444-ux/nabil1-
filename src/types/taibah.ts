@@ -99,13 +99,91 @@ export interface CardDoc {
   id: string;
   packageId: string;
   cardNumber: string;
-  status: 'available' | 'sold' | 'returned' | 'injected';
+  status: 'available' | 'assigned_to_agent' | 'sold' | 'returned' | 'recalled' | 'injected';
   ownerId: string;
   soldTo?: string;
+  soldToName?: string;
+  soldToPhone?: string;
+  saleType?: 'direct' | 'electronic_wholesale' | 'paper_invoice' | '';
   saleId?: string;
   batchId?: string;
+  recalledFrom?: string;
+  previousOwnerId?: string;
   createdAt?: Timestamp;
   updatedAt?: Timestamp;
+}
+
+export interface AgentPackageCardSummary {
+  packageId: string;
+  price: number;
+  dataLabel: string;
+  receivedCount: number;
+  soldCount: number;
+  remainingCount: number;
+  recalledCount: number;
+}
+
+export interface AgentSoldCardRecord {
+  cardNumber: string;
+  packageId: string;
+  packagePrice: number;
+  packageLabel: string;
+  buyerName: string;
+  buyerPhone: string;
+  soldAtMs: number;
+  saleType: 'direct' | 'electronic_wholesale' | 'paper_invoice';
+  saleId: string;
+  invoiceNumber: string;
+  unitPrice: number;
+}
+
+export interface AgentRemainingCardRecord {
+  id: string;
+  cardNumber: string;
+  packageId: string;
+  packagePrice: number;
+  packageLabel: string;
+  ownerId: string;
+  status: CardDoc['status'];
+}
+
+export interface AgentCardInventoryReport {
+  targetUid: string;
+  targetName: string;
+  targetPhone: string;
+  targetRole: UserRole;
+  discountRate: number;
+  totalReceived: number;
+  totalSold: number;
+  totalRemaining: number;
+  totalRecalled: number;
+  byPackage: AgentPackageCardSummary[];
+  soldCards: AgentSoldCardRecord[];
+  remainingCards: AgentRemainingCardRecord[];
+  loadedAtMs: number;
+  fromCache: boolean;
+}
+
+export interface RecallCardsInput {
+  targetUser: UserProfile;
+  mode: 'all' | 'by_package_qty' | 'specific_cards';
+  packageId?: string;
+  quantity?: number;
+  selectedCardIds?: string[];
+  reason?: string;
+}
+
+export interface RecallCardsResult {
+  ok: boolean;
+  error?: string;
+  recalledCount: number;
+  creditAmount: number;
+  discountRateApplied: number;
+  previousBalance: number;
+  newBalance: number;
+  recalledNumbers: string[];
+  byPackage: Array<{ packageId: string; price: number; count: number; creditValue: number }>;
+  notificationMessage: string;
 }
 
 export interface SaleLineItem {

@@ -35,8 +35,14 @@ import {
   enrollDeviceBiometric,
   getBiometricMethodStatus,
   getMemorySessionCredentials,
+  resetBiometricPromptLock,
   type BiometricMethod,
 } from '../lib/biometric';
+import {
+  findVaultAccountByIdentifier,
+  setVaultAccountBiometricEnabled,
+} from '../lib/localAuthVault';
+import { useDebounce } from '../hooks/useDebounce';
 import { getInstalledAppVersion } from '../services/updaterService';
 import { DirectSaleScreen } from './DirectSaleScreen';
 import { ErrorBoundary } from './ErrorBoundary';
@@ -68,6 +74,8 @@ const loadAgentsManagement = () =>
   import('./AgentsManagementScreen').then((m) => ({ default: m.AgentsManagementScreen }));
 const loadReportsCenter = () =>
   import('./ReportsCenterScreen').then((m) => ({ default: m.ReportsCenterScreen }));
+const loadRecallCardsPanel = () =>
+  import('./RecallCardsPanel').then((m) => ({ default: m.RecallCardsPanel }));
 
 const SalesListScreen = lazy(loadSalesList);
 const WholesaleCardsScreen = lazy(loadWholesaleCards);
@@ -76,6 +84,7 @@ const PackagesImportScreen = lazy(loadPackagesImport);
 const TopupRequestsScreen = lazy(loadTopupRequests);
 const AgentsManagementScreen = lazy(loadAgentsManagement);
 const ReportsCenterScreen = lazy(loadReportsCenter);
+const RecallCardsPanel = lazy(loadRecallCardsPanel);
 
 let preloadedOnce = false;
 export function preloadCoreSubScreens(): void {
@@ -322,6 +331,19 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
 
   const [bioStatus, setBioStatus] = useState(() => getBiometricMethodStatus());
   const [auditSearch, setAuditSearch] = useState('');
+  const debouncedAuditSearch = useDebounce(auditSearch, 180);
+  const [auditVisibleCount, setAuditVisibleCount] = useState(50);
+
+  useEffect(() => {
+    resetBiometricPromptLock();
+    return () => {
+      resetBiometricPromptLock();
+    };
+  }, [route]);
+
+  useEffect(() => {
+    setAuditVisibleCount(50);
+  }, [debouncedAuditSearch]);
 
   const isAdmin = profile?.role === 'super_admin';
   const isAgent = profile?.role === 'agent';
@@ -651,15 +673,21 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                 type="button"
                 disabled={enrollingSettingsBio}
                 onClick={async () => {
+                  if (enrollingSettingsBio || !profile) return;
                   if (bioStatus.hasAnyEnabled) {
                     clearBiometricEnrollment();
+                    setVaultAccountBiometricEnabled(profile.uid || profile.email || profile.phone, false);
                     setBioStatus(getBiometricMethodStatus());
                     notifySuccess('تم إيقاف الدخول الحيوي (البصمة / الوجه / رمز الجهاز) على هذا الهاتف');
                     return;
                   }
-                  if (!profile) return;
                   const mem = getMemorySessionCredentials();
-                  if (!mem?.password && !bioStatus.hasVault) {
+                  const hasLocalVaultAccount = Boolean(
+                    findVaultAccountByIdentifier(profile.email) ||
+                      findVaultAccountByIdentifier(profile.phone) ||
+                      findVaultAccountByIdentifier(profile.uid)
+                  );
+                  if (!mem?.password && !bioStatus.hasVault && !hasLocalVaultAccount) {
                     setSettingsBioPass('');
                     setPendingBioMethod('unified');
                     return;
@@ -678,39 +706,50 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                     );
                     setBioStatus(getBiometricMethodStatus());
                     if (result.success) {
+                      setVaultAccountBiometricEnabled(profile.uid || profile.email || profile.phone, true);
                       notifySuccess('تم تفعيل الدخول الحيوي الموحد (البصمة / الوجه / رمز الجهاز) بنجاح ✅');
-                    } else {
-                      notifyError(
-                        'تعذر تفعيل الدخول الحيوي',
-                        result.errorMessage || 'تأكد من إعداد البصمة أو الوجه في أمان الهاتف.'
-                      );
+                    } else if (result.errorMessage) {
+                      notifyError('تعذر تفعيل الدخول الحيوي', result.errorMessage);
                     }
                   } finally {
                     setEnrollingSettingsBio(false);
                   }
                 }}
-                className={`min-h-[48px] rounded-xl border-2 px-3.5 flex items-center justify-between gap-2 text-xs font-extrabold transition-colors ${
+                className={`min-h-[52px] rounded-xl border-2 px-3 py-2 flex items-center justify-between gap-2 text-xs font-extrabold transition-colors disabled:opacity-65 ${
                   bioStatus.hasAnyEnabled
                     ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-900 dark:text-emerald-200'
                     : 'border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white'
                 }`}
               >
-                <span className="flex items-center gap-2 min-w-0">
+                <span className="flex items-center gap-2 min-w-0 flex-1 text-right">
                   <Fingerprint className="w-4 h-4 text-[#D4AF37] shrink-0" />
-                  <span className="truncate">الدخول الحيوي الموحد (البصمة / الوجه / رمز الجهاز)</span>
+                  <span className="leading-snug break-words">
+                    الدخول الحيوي الموحد (البصمة / الوجه / رمز الجهاز)
+                  </span>
                 </span>
                 <span
-                  className={`shrink-0 px-2.5 py-1 rounded-lg text-[11px] font-extrabold ${
+                  className={`shrink-0 px-2.5 py-1 rounded-lg text-[11px] font-extrabold whitespace-nowrap ${
                     bioStatus.hasAnyEnabled
                       ? 'bg-emerald-600 text-white'
                       : 'bg-[#1A365D] text-[#FDE68A] border border-[#D4AF37]'
                   }`}
                 >
-                  {bioStatus.hasAnyEnabled ? 'مُفعّل ✅' : 'تفعيل'}
+                  {enrollingSettingsBio
+                    ? 'جاري التحقق...'
+                    : bioStatus.hasAnyEnabled
+                      ? 'مُفعّل ✅'
+                      : 'تفعيل'}
                 </span>
               </button>
             </div>
           </div>
+
+          {/* Super Admin EXCLUSIVE: Recall Unsold Cards From Agent / Client */}
+          {isAdmin && (
+            <Suspense fallback={<LazyFallback />}>
+              <RecallCardsPanel />
+            </Suspense>
+          )}
 
           {/* App Updates Section (Visible to ALL users: Admin, Agent, Client) */}
           <div className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] p-3.5 shadow-md space-y-2.5">
@@ -1441,13 +1480,15 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
   // AUDIT LOG (Super Admin Only)
   // =========================================================================
   if (route === 'audit_logs') {
+    const q = debouncedAuditSearch.trim().toLowerCase();
     const filteredLogs = (auditLogs || []).filter(
       (l) =>
-        !auditSearch.trim() ||
-        (l?.action || '').includes(auditSearch.trim()) ||
-        (l?.details || '').includes(auditSearch.trim()) ||
-        (l?.actorName || '').includes(auditSearch.trim())
+        !q ||
+        (l?.action || '').toLowerCase().includes(q) ||
+        (l?.details || '').toLowerCase().includes(q) ||
+        (l?.actorName || '').toLowerCase().includes(q)
     );
+    const visibleLogs = filteredLogs.slice(0, auditVisibleCount);
     return (
       <SubScreenShell
         title="سجل العمليات الرقابي (Audit Log)"
@@ -1472,7 +1513,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
           </div>
         ) : (
           <div className="space-y-2">
-            {filteredLogs.map((log) => (
+            {visibleLogs.map((log) => (
               <div
                 key={log.id}
                 className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37]/60 dark:border-[#D4AF37]/50 hover:border-[#D4AF37] p-3.5 shadow-sm transition-colors"
@@ -1489,13 +1530,23 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
               </div>
             ))}
 
-            {hasMoreAuditLogs && (
+            {filteredLogs.length > auditVisibleCount && (
+              <button
+                type="button"
+                onClick={() => setAuditVisibleCount((c) => c + 50)}
+                className="w-full min-h-[44px] rounded-2xl bg-slate-100 dark:bg-slate-800 border-2 border-[#D4AF37]/60 text-[#1A365D] dark:text-[#FDE68A] text-xs font-extrabold shadow-sm"
+              >
+                عرض المزيد (50 سجل إضافي من أصل {formatCount(filteredLogs.length)})
+              </button>
+            )}
+
+            {hasMoreAuditLogs && filteredLogs.length <= auditVisibleCount && (
               <button
                 type="button"
                 onClick={loadMoreAuditLogs}
                 className="w-full min-h-[44px] rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] text-[#1A365D] dark:text-[#FDE68A] text-xs font-extrabold shadow-sm hover:bg-amber-50 dark:hover:bg-slate-800 transition-colors"
               >
-                تحميل المزيد من سجلات العمليات...
+                تحميل المزيد من السحابة...
               </button>
             )}
           </div>

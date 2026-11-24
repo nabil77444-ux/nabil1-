@@ -38,6 +38,7 @@ export interface LocalVaultAccount {
   passwordHash: string;
   hashRounds?: number;
   passwordVersion?: string;
+  biometricEnabled?: boolean;
   activatedAt: number;
   lastLoginAt: number;
   updatedAt: number;
@@ -760,3 +761,66 @@ export function raceWithTimeout<T>(promise: Promise<T>, timeoutMs = 4000): Promi
     );
   });
 }
+
+/**
+ * Immediately persist biometric enrollment status (`biometricEnabled`) on the active
+ * account inside `localAuthVault` (synchronous localStorage + async IndexedDB mirror).
+ */
+export function setVaultAccountBiometricEnabled(
+  uidOrIdentifier: string,
+  enabled: boolean
+): void {
+  const key = uidOrIdentifier.trim();
+  if (!key) return;
+  const accounts = readVaultRecords();
+  if (accounts.length === 0) return;
+
+  const { email, phone } = normalizeAuthIdentifier(key);
+  const lowerKey = key.toLowerCase();
+  const normPhone = (p: string) =>
+    normalizeDigits(p || '').replace(/[^\d]/g, '').replace(/^00967|^967/, '');
+  const targetPhone = normPhone(phone);
+  let changed = false;
+  const now = Date.now();
+
+  const updated = accounts.map((acc) => {
+    const matches =
+      acc.uid === key ||
+      acc.email.toLowerCase() === lowerKey ||
+      acc.email.toLowerCase() === email.toLowerCase() ||
+      (targetPhone.length >= 7 && normPhone(acc.phone) === targetPhone);
+
+    if (!matches) return acc;
+    changed = true;
+    return {
+      ...acc,
+      biometricEnabled: enabled,
+      updatedAt: now,
+    };
+  });
+
+  if (changed) {
+    writeVaultRecords(updated);
+  }
+}
+
+export function isVaultAccountBiometricEnabled(uidOrIdentifier?: string): boolean {
+  if (!uidOrIdentifier?.trim()) return false;
+  const key = uidOrIdentifier.trim();
+  const accounts = readVaultRecords();
+  const { email, phone } = normalizeAuthIdentifier(key);
+  const lowerKey = key.toLowerCase();
+  const normPhone = (p: string) =>
+    normalizeDigits(p || '').replace(/[^\d]/g, '').replace(/^00967|^967/, '');
+  const targetPhone = normPhone(phone);
+  const matched = accounts.find(
+    (acc) =>
+      acc.uid === key ||
+      acc.email.toLowerCase() === lowerKey ||
+      acc.email.toLowerCase() === email.toLowerCase() ||
+      (targetPhone.length >= 7 && normPhone(acc.phone) === targetPhone)
+  );
+  return Boolean(matched?.biometricEnabled);
+}
+
+

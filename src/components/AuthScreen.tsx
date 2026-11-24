@@ -45,6 +45,7 @@ import {
   isBiometricHardwareAvailable,
   readBiometricVaultCredentials,
   rememberSessionCredentialInMemory,
+  resetBiometricPromptLock,
   syncBiometricVaultOnPasswordLogin,
   verifyDeviceBiometric,
 } from '../lib/biometric';
@@ -124,13 +125,18 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
 
   // Unified BiometricPrompt status (Fingerprint + Face + Device PIN)
   const [bioStatus, setBioStatus] = useState(() => getBiometricMethodStatus());
+  const [bioBusy, setBioBusy] = useState(false);
   const [showPinModal, setShowPinModal] = useState(false);
   const [pinInput, setPinInput] = useState('');
 
   useEffect(() => {
+    resetBiometricPromptLock();
     void isBiometricHardwareAvailable().then(() => {
       setBioStatus(getBiometricMethodStatus());
     });
+    return () => {
+      resetBiometricPromptLock();
+    };
   }, []);
 
   // Auto-heal guard ONLY after user explicitly unlocked the current session
@@ -615,6 +621,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
   };
 
   const handleUnifiedBiometricLogin = async () => {
+    if (bioBusy || submitting) return;
     const currentStatus = getBiometricMethodStatus();
     setBioStatus(currentStatus);
 
@@ -626,24 +633,26 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
       return;
     }
 
-    const result = await verifyDeviceBiometric(undefined, 'unified');
-    if (result.requiresPin) {
-      setPinInput('');
-      setShowPinModal(true);
-      return;
-    }
+    setBioBusy(true);
+    try {
+      const result = await verifyDeviceBiometric(undefined, 'unified');
+      if (result.requiresPin) {
+        setPinInput('');
+        setShowPinModal(true);
+        return;
+      }
 
-    if (result.verified && result.enrollment) {
-      await completeUnifiedBiometricSignIn(
-        result.enrollment.displayName,
-        result.enrollment.identifier,
-        result.credentials
-      );
-    } else {
-      notifyWarning(
-        'لم يكتمل التحقق الحيوي',
-        result.errorMessage || 'أعد المحاولة أو استخدم كلمة المرور.'
-      );
+      if (result.verified && result.enrollment) {
+        await completeUnifiedBiometricSignIn(
+          result.enrollment.displayName,
+          result.enrollment.identifier,
+          result.credentials
+        );
+      } else if (result.errorMessage) {
+        notifyWarning('لم يكتمل التحقق الحيوي', result.errorMessage);
+      }
+    } finally {
+      setBioBusy(false);
     }
   };
 
@@ -1181,9 +1190,9 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
               {/* ONE Unified Native Android BiometricPrompt Button (Fingerprint + Face + Device PIN) */}
               <button
                 type="button"
-                disabled={submitting}
+                disabled={submitting || bioBusy}
                 onClick={() => void handleUnifiedBiometricLogin()}
-                className={`w-full min-h-[44px] rounded-xl px-3 text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2 transition-transform active:scale-[0.98] border-2 border-[#D4AF37] shadow-md ${
+                className={`w-full min-h-[44px] rounded-xl px-3 text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2 transition-transform active:scale-[0.98] border-2 border-[#D4AF37] shadow-md disabled:opacity-65 ${
                   bioStatus.hasAnyEnabled
                     ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
                     : 'gold-btn-3d text-[#0F172A]'
@@ -1191,7 +1200,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                 aria-label="الدخول بالبصمة أو الوجه أو رمز الجهاز"
               >
                 <Fingerprint className="w-4 h-4 shrink-0" />
-                <span>الدخول بالبصمة / الوجه / رمز الجهاز</span>
+                <span>{bioBusy ? 'جاري التحقق الحيوي...' : 'الدخول بالبصمة / الوجه / رمز الجهاز'}</span>
               </button>
 
               {isSuperAdminEmail(normalizeAuthIdentifier(identifier).email) && (
