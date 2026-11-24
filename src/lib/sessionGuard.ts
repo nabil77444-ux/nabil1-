@@ -105,12 +105,42 @@ export function readActiveRouteFromSession(): AppRoute | null {
   }
 }
 
+const BG_ADMIN_CHECK_PREFIX = 'taibah_bg_admin_check_v1_';
+
+export function hasBgAdminCheckDone(uid: string): boolean {
+  if (!uid) return true;
+  try {
+    return window.sessionStorage.getItem(`${BG_ADMIN_CHECK_PREFIX}${uid}`) === '1';
+  } catch {
+    return false;
+  }
+}
+
+export function markBgAdminCheckDone(uid: string): void {
+  if (!uid) return;
+  try {
+    window.sessionStorage.setItem(`${BG_ADMIN_CHECK_PREFIX}${uid}`, '1');
+  } catch {
+    // ignore storage restrictions
+  }
+}
+
 export function clearActiveSession(dispatchEvent = true): void {
   try {
     window.sessionStorage.removeItem(ACTIVE_SESSION_KEY);
     window.sessionStorage.removeItem(ACTIVE_PROFILE_SESSION_KEY);
     window.sessionStorage.removeItem(ACTIVE_ROUTE_SESSION_KEY);
     window.sessionStorage.removeItem(POST_RESET_UNLOCK_KEY);
+    const bgKeys: string[] = [];
+    for (let i = 0; i < window.sessionStorage.length; i++) {
+      const k = window.sessionStorage.key(i);
+      if (k && k.startsWith(BG_ADMIN_CHECK_PREFIX)) {
+        bgKeys.push(k);
+      }
+    }
+    for (const k of bgKeys) {
+      window.sessionStorage.removeItem(k);
+    }
   } catch {
     // ignore
   }

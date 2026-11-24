@@ -66,7 +66,6 @@ function getInitialRoute(): AppRoute {
 const TaibahAppShell: React.FC = () => {
   const {
     authReady,
-    firebaseUser,
     profile,
     needsAdminEmailVerification,
     appSettings,
@@ -287,8 +286,8 @@ const TaibahAppShell: React.FC = () => {
     />
   );
 
-  // 1. Brief Splash only while Auth boots (<650ms)
-  if (!authReady && !splashCapReached) {
+  // 1. Brief Splash only while Auth boots (<650ms) and no local session is already active
+  if (!authReady && !splashCapReached && !(sessionUnlocked && profile?.uid)) {
     return (
       <>
         <SplashScreen />
@@ -297,15 +296,14 @@ const TaibahAppShell: React.FC = () => {
     );
   }
 
-  // 2. Authentication Gate:
+  // 2. Local-First Authentication Gate:
   //    - Mandatory on fresh cold start (when sessionStorage is empty)
-  //    - Rock-solid during active session (never kicks out on blur/file picker/visibilitychange)
-  const hasAuthenticatedIdentity = Boolean(firebaseUser) || Boolean(profile?.uid);
+  //    - Managed exclusively by local `sessionStorage` + `profile` (never kicks out on
+  //      Firebase Auth fluctuations, blur, keyboard, PDF picker, or visibilitychange)
   const isFullyVerifiedSession =
     sessionUnlocked &&
-    hasAuthenticatedIdentity &&
+    Boolean(profile?.uid) &&
     !needsAdminEmailVerification &&
-    Boolean(profile) &&
     profile?.status === 'active';
 
   if (!isFullyVerifiedSession) {

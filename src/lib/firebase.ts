@@ -15,6 +15,7 @@ import {
   persistentLocalCache,
   persistentMultipleTabManager,
   persistentSingleTabManager,
+  setLogLevel,
   type Firestore,
 } from 'firebase/firestore';
 import { getMessaging, getToken, isSupported as isMessagingSupported } from 'firebase/messaging';
@@ -43,6 +44,7 @@ function createOfflineFirstFirestore(): Firestore {
       return initializeFirestore(
         app,
         {
+          experimentalAutoDetectLongPolling: true,
           localCache: persistentLocalCache({
             tabManager: persistentMultipleTabManager(),
             cacheSizeBytes: CACHE_SIZE_UNLIMITED,
@@ -55,6 +57,7 @@ function createOfflineFirstFirestore(): Firestore {
         return initializeFirestore(
           app,
           {
+            experimentalAutoDetectLongPolling: true,
             localCache: persistentLocalCache({
               tabManager: persistentSingleTabManager({}),
               cacheSizeBytes: CACHE_SIZE_UNLIMITED,
@@ -72,6 +75,7 @@ function createOfflineFirstFirestore(): Firestore {
     return initializeFirestore(
       app,
       {
+        experimentalAutoDetectLongPolling: true,
         localCache: memoryLocalCache(),
       },
       firebaseConfig.firestoreDatabaseId
@@ -79,6 +83,14 @@ function createOfflineFirstFirestore(): Firestore {
   } catch {
     return getFirestore(app, firebaseConfig.firestoreDatabaseId);
   }
+}
+
+// Prevent noisy SDK console errors (`Could not reach Cloud Firestore backend [code=unavailable]`)
+// while offline or inside sandboxed preview iframes; app handles offline/quota states explicitly.
+try {
+  setLogLevel('silent');
+} catch {
+  // ignore
 }
 
 export const db: Firestore = createOfflineFirstFirestore();
@@ -164,6 +176,13 @@ export function handleFirestoreError(
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('taibah:firestore-quota-exceeded'));
       }
+    }
+    return errInfo;
+  }
+
+  if (isFirestoreOfflineError(error)) {
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('taibah:firestore-offline'));
     }
     return errInfo;
   }

@@ -3,7 +3,7 @@ import {
   EmailAuthProvider,
   onAuthStateChanged,
   reauthenticateWithCredential,
-  signOut as firebaseSignOut,
+  signInWithEmailAndPassword,
   type User as FirebaseUser,
 } from 'firebase/auth';
 import {
@@ -13,6 +13,7 @@ import {
   doc,
   getDoc,
   getDocFromCache,
+  getDocFromServer,
   getDocs,
   getDocsFromCache,
   increment,
@@ -89,11 +90,22 @@ import { setGlobalShareTemplates } from '../utils/shareExport';
 import {
   clearActiveSession,
   hasActiveSessionUnlocked,
+  hasBgAdminCheckDone,
+  markActiveSessionUnlocked,
+  markBgAdminCheckDone,
   readActiveProfileFromSession,
   readActiveRouteFromSession,
   saveActiveProfileToSession,
   saveActiveRouteToSession,
 } from '../lib/sessionGuard';
+import {
+  findVaultAccountByUid,
+  initLocalAuthVaultFromIdb,
+  raceWithTimeout,
+  removeVaultAccount,
+  updateVaultAccountHashDirectly,
+  updateVaultAccountProfile,
+} from '../lib/localAuthVault';
 
 export interface SaleExecutionInput {
   saleType: 'direct' | 'electronic_wholesale' | 'paper_invoice';
@@ -155,6 +167,11 @@ interface FirebaseContextValue {
   refreshVerificationStatus: () => Promise<boolean>;
   syncNow: () => Promise<void>;
   signOutUser: () => Promise<void>;
+  activateLocalSession: (
+    userProfile: UserProfile,
+    silentCloudCreds?: { email: string; password: string }
+  ) => void;
+  resolveAndLinkUserProfile: (user: FirebaseUser) => Promise<UserProfile | null>;
   writeAuditLog: (action: string, details: string) => Promise<void>;
   sendCloudNotification: (params: {
     recipientId: string;
@@ -579,11 +596,11 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     []
   );
 
-  const [authReady, setAuthReady] = useState(false);
+  const [authReady, setAuthReady] = useState<boolean>(() => Boolean(hasActiveSessionUnlocked() && cachedProfileInitial));
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
   const [verificationVersion, setVerificationVersion] = useState(0);
   const [profile, setProfile] = useState<UserProfile | null>(cachedProfileInitial);
-  const [profileLoading, setProfileLoading] = useState(!cachedProfileInitial);
+  const [profileLoading, setProfileLoading] = useState(false);
   const [firestoreConnected, setFirestoreConnected] = useState(true);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncNonce, setSyncNonce] = useState(0);
@@ -648,51 +665,76 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setGlobalShareTemplates(appSettings);
   }, [appSettings]);
 
-  const userUid = firebaseUser?.uid || null;
+  const userUid = profile?.uid || firebaseUser?.uid || null;
 
-  // 1. Mount public settings/global listener ONCE (never tear down/resubscribe on online blips)
+  // 0. Hydrate localAuthVault mirror from IndexedDB on mount + ensure authReady never hangs offline
   useEffect(() => {
-    const unsubSettings = onSnapshot(
-      doc(db, 'settings', 'global'),
-      (snap) => {
-        if (!snap.metadata.fromCache) {
-          setFirestoreConnected(true);
+    void initLocalAuthVaultFromIdb();
+    const readyTimer = window.setTimeout(() => setAuthReady(true), 250);
+    return () => window.clearTimeout(readyTimer);
+  }, []);
+
+  // 1. Cache-First settings/global loader (ZERO open pre-login Firestore streams!)
+  useEffect(() => {
+    let cancelled = false;
+    const settingsRef = doc(db, 'settings', 'global');
+
+    const applySettingsData = (raw: AppSettingsDoc) => {
+      if (cancelled) return;
+      const merged: AppSettingsDoc = {
+        ...DEFAULT_APP_SETTINGS,
+        ...raw,
+      };
+      setAppSettings(merged);
+      writeCachedJson(CACHE_SETTINGS_KEY, {
+        newsTicker: merged.newsTicker,
+        newsTickerEnabled: merged.newsTickerEnabled,
+        newsTickerSpeed: merged.newsTickerSpeed,
+        sliderEnabled: merged.sliderEnabled,
+        sliderSpeed: merged.sliderSpeed,
+        sliderSlides: merged.sliderSlides,
+        lowStockThreshold: merged.lowStockThreshold,
+        agentDiscountPercent: merged.agentDiscountPercent,
+        clientDiscountPercent: merged.clientDiscountPercent,
+        directSaleMessageTemplate: merged.directSaleMessageTemplate,
+        smsMessageTemplate: merged.smsMessageTemplate,
+        whatsappMessageTemplate: merged.whatsappMessageTemplate,
+        pdfHeaderTitle: merged.pdfHeaderTitle,
+        pdfHeaderSubtitle: merged.pdfHeaderSubtitle,
+        pdfFooterText: merged.pdfFooterText,
+        appDescription: merged.appDescription,
+      });
+    };
+
+    void getDocFromCache(settingsRef)
+      .then((cSnap) => {
+        if (!cancelled && cSnap.exists()) {
+          applySettingsData(cSnap.data() as AppSettingsDoc);
         }
-        if (snap.exists()) {
-          const merged: AppSettingsDoc = {
-            ...DEFAULT_APP_SETTINGS,
-            ...(snap.data() as AppSettingsDoc),
-          };
-          setAppSettings(merged);
-          writeCachedJson(CACHE_SETTINGS_KEY, {
-            newsTicker: merged.newsTicker,
-            newsTickerEnabled: merged.newsTickerEnabled,
-            newsTickerSpeed: merged.newsTickerSpeed,
-            sliderEnabled: merged.sliderEnabled,
-            sliderSpeed: merged.sliderSpeed,
-            sliderSlides: merged.sliderSlides,
-            lowStockThreshold: merged.lowStockThreshold,
-            agentDiscountPercent: merged.agentDiscountPercent,
-            clientDiscountPercent: merged.clientDiscountPercent,
-            directSaleMessageTemplate: merged.directSaleMessageTemplate,
-            smsMessageTemplate: merged.smsMessageTemplate,
-            whatsappMessageTemplate: merged.whatsappMessageTemplate,
-            pdfHeaderTitle: merged.pdfHeaderTitle,
-            pdfHeaderSubtitle: merged.pdfHeaderSubtitle,
-            pdfFooterText: merged.pdfFooterText,
-            appDescription: merged.appDescription,
-          });
-        }
-      },
-      () => {
-        // Silently keep cached/default settings if unreachable prior to auth
-      }
-    );
+      })
+      .catch(() => {});
+
+    // Fetch fresh global settings at most once when online & unlocked (or on explicit syncNow)
+    if (
+      (typeof navigator === 'undefined' || navigator.onLine) &&
+      (hasActiveSessionUnlocked() || syncNonce > 0)
+    ) {
+      void getDoc(settingsRef)
+        .then((snap) => {
+          if (!cancelled && snap.exists()) {
+            setFirestoreConnected(true);
+            applySettingsData(snap.data() as AppSettingsDoc);
+          }
+        })
+        .catch(() => {
+          // Silently keep cached/default settings if offline or quota exhausted
+        });
+    }
 
     return () => {
-      unsubSettings();
+      cancelled = true;
     };
-  }, []);
+  }, [syncNonce, profile?.uid]);
 
   // 2. Silent connectivity & quota-exhaustion observer (Zero startup reads, zero warning banners!)
   useEffect(() => {
@@ -700,14 +742,16 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       setFirestoreConnected(false);
     }
 
-    const onQuotaExceeded = () => {
+    const onSilentDisconnect = () => {
       // Quietly switch indicator to local cache mode without intrusive banners or warnings
       setFirestoreConnected(false);
     };
-    window.addEventListener('taibah:firestore-quota-exceeded', onQuotaExceeded);
+    window.addEventListener('taibah:firestore-quota-exceeded', onSilentDisconnect);
+    window.addEventListener('taibah:firestore-offline', onSilentDisconnect);
 
     return () => {
-      window.removeEventListener('taibah:firestore-quota-exceeded', onQuotaExceeded);
+      window.removeEventListener('taibah:firestore-quota-exceeded', onSilentDisconnect);
+      window.removeEventListener('taibah:firestore-offline', onSilentDisconnect);
     };
   }, [isOnline]);
 
@@ -718,17 +762,63 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
   }, [profile]);
 
-  // Auth listener decoupled from kicking out active in-progress sessions
+  // Instant < 0.2s Local Session Activator (used by localAuthVault & biometric login)
+  const activateLocalSession = useCallback(
+    (userProfile: UserProfile, silentCloudCreds?: { email: string; password: string }) => {
+      explicitSignOutRef.current = false;
+      markActiveSessionUnlocked(userProfile.uid, userProfile.email);
+      saveActiveProfileToSession(userProfile);
+      persistProfileToLocalCache(userProfile);
+
+      setProfile(userProfile);
+      setProfileLoading(false);
+      setAuthReady(true);
+      if (userProfile.role === 'super_admin' && userProfile.status === 'active') {
+        setAdminDocApproved(true);
+      }
+
+      // Hydrate user's cached local sales/customers immediately (0 cloud reads)
+      const cachedSales = readCachedJson<SaleDoc[]>(`${CACHE_SALES_PREFIX}${userProfile.uid}`, []);
+      if (cachedSales.length > 0) setSales(cachedSales);
+      const cachedCustomers = readCachedJson<CustomerAccount[]>(
+        `${CACHE_CUSTOMERS_PREFIX}${userProfile.uid}`,
+        []
+      );
+      if (cachedCustomers.length > 0) setCustomers(cachedCustomers);
+
+      // Silently warm Firebase Auth token in the background ONLY if online (never blocks login or kicks out!)
+      if (
+        silentCloudCreds?.email &&
+        silentCloudCreds?.password &&
+        (typeof navigator === 'undefined' || navigator.onLine)
+      ) {
+        const currentAuthUid = auth.currentUser?.uid;
+        if (currentAuthUid !== userProfile.uid) {
+          void signInWithEmailAndPassword(
+            auth,
+            silentCloudCreds.email.trim().toLowerCase(),
+            silentCloudCreds.password
+          ).catch(() => {
+            // Completely silent: local session stays active even offline or if Firebase is slow/unreachable
+          });
+        }
+      }
+    },
+    []
+  );
+
+  // Auth listener STRICTLY DECOUPLED from kicking out active local sessions
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (user) => {
       setVerificationVersion((v) => v + 1);
       setAuthReady(true);
 
       if (!user) {
-        // CRITICAL: Never kick an actively unlocked user out on transient null auth emissions
-        // (e.g., Android file picker, keyboard focus, visibilitychange, blur, or token refresh).
-        // Only clear state on explicit manual sign-out or when no active session is unlocked.
+        // CRITICAL: Active session is managed exclusively by local `sessionStorage`.
+        // NEVER kick an actively unlocked user out on null auth emissions, blur, keyboard,
+        // PDF viewer, visibilitychange, offline state, or token refresh!
         if (hasActiveSessionUnlocked() && !explicitSignOutRef.current) {
+          setFirebaseUser(null);
           return;
         }
         setFirebaseUser(null);
@@ -738,26 +828,25 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         profileLookupRunningRef.current = null;
         setAdminDocApproved(false);
         setAdminApprovalChecking(false);
-        writeCachedJson(CACHE_PROFILE_KEY, null);
-        saveActiveProfileToSession(null);
-        setProfile(null);
         setProfileLoading(false);
-        setRawPackages([]);
-        setPersonalCardCounts({});
-        setPersonalSoldCounts({});
-        setSales([]);
-        setCustomers([]);
-        setLedgerEntries([]);
-        setNotifications([]);
-        setPendingRegistrations([]);
-        setPendingPasswordResets([]);
-        setTopupRequests([]);
-        setAuditLogs([]);
-        setManagedUsers([]);
       } else {
         explicitSignOutRef.current = false;
         setFirebaseUser(user);
-        const cached = readActiveProfileFromSession() || readProfileFromLocalCache(user);
+        // Only hydrate profile from Firebase Auth if no different active local session is already unlocked
+        const sessionProfile = readActiveProfileFromSession();
+        if (hasActiveSessionUnlocked() && sessionProfile && sessionProfile.uid === user.uid) {
+          setProfile((prev) => prev || sessionProfile);
+          if (sessionProfile.role === 'super_admin' && sessionProfile.status === 'active') {
+            setAdminDocApproved(true);
+          }
+          setProfileLoading(false);
+          return;
+        }
+        if (hasActiveSessionUnlocked() && sessionProfile && sessionProfile.uid !== user.uid) {
+          // Local session belongs to a different account — never overwrite it with stale Firebase Auth user
+          return;
+        }
+        const cached = readProfileFromLocalCache(user);
         if (cached && cached.uid === user.uid) {
           setProfile(cached);
           if (cached.role === 'super_admin' && cached.status === 'active') {
@@ -765,7 +854,6 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           }
           setProfileLoading(false);
         } else if (isSuperAdminEmail(user.email)) {
-          // Automatic Super Admin instant profile recovery (never blocked even offline or post-reset)
           const adminProfile = buildSuperAdminProfile(user);
           setProfile(adminProfile);
           persistProfileToLocalCache(adminProfile);
@@ -774,7 +862,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           }
           setProfileLoading(false);
         } else {
-          setProfileLoading(true);
+          setProfileLoading(false);
         }
       }
     });
@@ -1380,146 +1468,140 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
   }, [isOnline, firestoreConnected, authReady, userUid]);
 
-  // Listen to current user profile in real time with a STABLE subscription (zero target churn!)
+  // SILENT BACKGROUND ADMIN STATUS CHECK (Strictly ONCE per session, 1 single doc read: `users/{uid}`)
+  // Checks:
+  // 1) If Admin suspended/disabled the account (`status === 'suspended'` or `disabled === true`):
+  //    immediately revokes local session, updates localAuthVault, and returns user to AuthScreen.
+  // 2) If Admin changed the account's password: updates or invalidates localAuthVault seamlessly.
+  // 3) If offline / `resource-exhausted` / network error: silently ignored — user continues locally 100%.
   useEffect(() => {
-    const activeUser = auth.currentUser || firebaseUser;
-    if (!authReady || !activeUser || !userUid) return;
-    if (needsAdminEmailVerification) {
-      setProfileLoading(false);
-      return;
-    }
+    if (!authReady || !profile?.uid || profile.status !== 'active') return;
+    if (!hasActiveSessionUnlocked()) return;
+    if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+
+    const uid = profile.uid;
+    const authUser = auth.currentUser || firebaseUser;
+    // Wait until Firebase Auth matches this uid (warmed silently in background) so Firestore rules permit `get`
+    if (!authUser || authUser.uid !== uid) return;
+    if (hasBgAdminCheckDone(uid)) return;
 
     let cancelled = false;
-    const isAdminAccount = isSuperAdminEmail(activeUser.email);
-
-    // Hydrate from local cache or Super Admin recovery immediately so Home Screen opens without waiting
-    const cached = readProfileFromLocalCache(activeUser);
-    if (cached) {
-      setProfile((prev) => prev || cached);
-      setProfileLoading(false);
-    } else if (isAdminAccount) {
-      const adminProfile = buildSuperAdminProfile(activeUser);
-      setProfile((prev) => prev || adminProfile);
-      persistProfileToLocalCache(adminProfile);
-      setProfileLoading(false);
-    }
-
-    const userDocPath = `users/${userUid}`;
-    const unsub = onSnapshot(
-      doc(db, 'users', userUid),
-      (snap) => {
+    const runSilentAdminCheck = async () => {
+      try {
+        const snap = await raceWithTimeout(getDocFromServer(doc(db, 'users', uid)), 4000);
         if (cancelled) return;
-        if (!snap.metadata.fromCache) {
-          setFirestoreConnected(true);
-        }
-        if (snap.exists()) {
-          const p = snap.data() as UserProfile;
-          setProfile(p);
-          if (p.role === 'super_admin' && p.status === 'active') {
-            setAdminDocApproved(true);
-          }
-          persistProfileToLocalCache(p);
-          setProfileLoading(false);
-        } else {
-          // Super Admin: NEVER show profile load error — automatically recreate Firestore doc in background
-          if (isAdminAccount) {
-            const adminProfile = buildSuperAdminProfile(activeUser);
-            setProfile((prev) =>
-              prev && prev.uid === userUid && prev.role === 'super_admin' ? prev : adminProfile
-            );
-            persistProfileToLocalCache(adminProfile);
-            setProfileLoading(false);
-            if (activeUser.emailVerified || adminDocApprovedRef.current) {
-              void bootstrapRef.current(activeUser);
-            }
-            return;
-          }
+        markBgAdminCheckDone(uid);
+        setFirestoreConnected(true);
 
-          // If snapshot came from an empty local cache while offline/connecting, keep cached profile active!
-          const localCached = readProfileFromLocalCache(activeUser);
-          if (snap.metadata.fromCache && localCached) {
-            setProfile((prev) => prev || localCached);
-            setProfileLoading(false);
-            pendingProfileLookupRef.current = true;
-            return;
+        if (!snap.exists()) {
+          // Keep active session running; Super Admin self-bootstraps in background if needed
+          if (isSuperAdminEmail(authUser.email) && (authUser.emailVerified || adminDocApprovedRef.current)) {
+            void bootstrapRef.current(authUser);
           }
+          return;
+        }
 
-          // Run Smart Multi-Strategy Lookup + Instant Auto-Recovery (UID -> Email -> Phone -> Auto-Create)
-          if (!adminApprovalCheckingRef.current) {
-            void resolveProfileRef.current(activeUser).then((resolved) => {
-              if (cancelled) return;
-              if (resolved) {
-                setProfile(resolved);
-                persistProfileToLocalCache(resolved);
-                setProfileLoading(false);
-              } else {
-                const fallbackCached = readProfileFromLocalCache(activeUser);
-                const emergencyProfile =
-                  fallbackCached ||
-                  buildAutoRecoveredProfile(
-                    activeUser,
-                    clientDiscountPercentRef.current,
-                    findCachedAccountInBackups(activeUser)
-                  );
-                setProfile(emergencyProfile);
-                persistProfileToLocalCache(emergencyProfile);
-                setProfileLoading(false);
-              }
-            });
-          }
+        const raw = snap.data() as UserProfile & {
+          disabled?: boolean;
+          localPasswordHash?: string;
+          localPasswordSalt?: string;
+          passwordVersion?: string;
+          passwordUpdatedAt?: { toMillis?: () => number } | number | string;
+        };
+
+        // 1. Account suspended / disabled / rejected by Admin -> immediate revocation!
+        if (raw.status === 'suspended' || raw.disabled === true || raw.status === 'rejected') {
+          updateVaultAccountProfile(uid, {
+            status: raw.status === 'rejected' ? 'rejected' : 'suspended',
+            disabled: true,
+          });
+          explicitSignOutRef.current = true;
+          clearActiveSession(true);
+          clearMemorySessionCredentials();
+          setProfile(null);
+          notifyError('تم إيقاف الحساب', 'تم إيقاف هذا الحساب من قِبل الإدارة');
+          return;
         }
-      },
-      (err) => {
-        if (isFirestoreOfflineError(err)) {
-          setFirestoreConnected(false);
-          pendingProfileLookupRef.current = true;
-          const localCached = readProfileFromLocalCache(activeUser);
-          if (localCached) {
-            setProfile((prev) => prev || localCached);
-          } else if (isAdminAccount) {
-            const adminProfile = buildSuperAdminProfile(activeUser);
-            setProfile((prev) => prev || adminProfile);
-            persistProfileToLocalCache(adminProfile);
-          } else {
-            const offlineAuto = buildAutoRecoveredProfile(
-              activeUser,
-              clientDiscountPercentRef.current,
-              findCachedAccountInBackups(activeUser)
-            );
-            setProfile((prev) => prev || offlineAuto);
-            persistProfileToLocalCache(offlineAuto);
-          }
-        } else {
-          handleFirestoreError(err, OperationType.GET, userDocPath);
-          if (!isAdminAccount) {
-            const localCached = readProfileFromLocalCache(activeUser);
-            const safeFallback =
-              localCached ||
-              buildAutoRecoveredProfile(
-                activeUser,
-                clientDiscountPercentRef.current,
-                findCachedAccountInBackups(activeUser)
-              );
-            setProfile((prev) => prev || safeFallback);
-            persistProfileToLocalCache(safeFallback);
-          }
+
+        // 2. Sync Admin-triggered password changes into `localAuthVault`
+        const cloudPwdVer =
+          typeof raw.passwordVersion === 'string' && raw.passwordVersion
+            ? raw.passwordVersion
+            : raw.passwordUpdatedAt && typeof raw.passwordUpdatedAt === 'object' && typeof raw.passwordUpdatedAt.toMillis === 'function'
+            ? String(raw.passwordUpdatedAt.toMillis())
+            : typeof raw.passwordUpdatedAt === 'number' || typeof raw.passwordUpdatedAt === 'string'
+            ? String(raw.passwordUpdatedAt)
+            : undefined;
+
+        const existingVault = findVaultAccountByUid(uid);
+        if (
+          typeof raw.localPasswordHash === 'string' &&
+          raw.localPasswordHash.length >= 32 &&
+          typeof raw.localPasswordSalt === 'string' &&
+          raw.localPasswordSalt.length >= 8
+        ) {
+          updateVaultAccountHashDirectly(uid, raw.localPasswordHash, raw.localPasswordSalt, cloudPwdVer);
+        } else if (cloudPwdVer && existingVault?.passwordVersion && existingVault.passwordVersion !== cloudPwdVer) {
+          // Password was changed externally by Admin -> clear stale local hash so next login re-verifies once
+          removeVaultAccount(uid);
         }
-        if (!cancelled) setProfileLoading(false);
+
+        // 3. Quietly refresh live profile metadata (balance, role, discountRate, name)
+        const refreshedProfile: UserProfile = {
+          ...profile,
+          ...raw,
+          uid,
+        };
+        setProfile(refreshedProfile);
+        if (refreshedProfile.role === 'super_admin' && refreshedProfile.status === 'active') {
+          setAdminDocApproved(true);
+        }
+        persistProfileToLocalCache(refreshedProfile);
+        saveActiveProfileToSession(refreshedProfile);
+        updateVaultAccountProfile(uid, {
+          name: refreshedProfile.name,
+          phone: refreshedProfile.phone,
+          email: refreshedProfile.email,
+          role: refreshedProfile.role,
+          status: refreshedProfile.status,
+          disabled: false,
+          parentAgentId: refreshedProfile.parentAgentId,
+          discountRate: refreshedProfile.discountRate,
+          balance: refreshedProfile.balance,
+          ...(cloudPwdVer ? { passwordVersion: cloudPwdVer } : {}),
+        });
+      } catch (err) {
+        // Silently ignore offline, `resource-exhausted`, `unavailable`, timeout, or any network error
+        if (isFirestoreQuotaError(err) || isFirestoreOfflineError(err)) {
+          if (!cancelled) setFirestoreConnected(false);
+        }
       }
-    );
+    };
+
+    // Defer slightly so HomeScreen renders instantaneously at 60fps first
+    const timer = window.setTimeout(() => {
+      if (!cancelled) void runSilentAdminCheck();
+    }, 800);
 
     return () => {
       cancelled = true;
-      unsub();
+      window.clearTimeout(timer);
     };
-  }, [authReady, userUid, needsAdminEmailVerification, syncNonce]);
+  }, [authReady, profile?.uid, profile?.status, firebaseUser?.uid, isOnline, notifyError]);
 
-  // A. ULTRA-LOW-READ CORE LISTENERS (95% Read Reduction: Single stats/summary doc + Cache-First packages + Tight Real-Time Queues — ZERO open cards listener!)
+  // A. ULTRA-LOW-READ CORE DATA LOADER (Focused exclusively on Cards/Packages, Balances, and Compact Queues — Cache-First!)
   useEffect(() => {
-    const activeUser = auth.currentUser || firebaseUser;
-    if (!authReady || !activeUser || !profile || profile.status !== 'active') {
+    const effectiveUid = profile?.uid || auth.currentUser?.uid || firebaseUser?.uid;
+    if (!authReady || !effectiveUid || !profile || profile.status !== 'active') {
       return;
     }
+    if (!hasActiveSessionUnlocked()) {
+      return;
+    }
+    const cloudAuthReady =
+      Boolean(auth.currentUser && auth.currentUser.uid === effectiveUid) &&
+      (typeof navigator === 'undefined' || navigator.onLine);
+    const activeUser = { uid: effectiveUid };
 
     let cancelled = false;
     const unsubscribers: Array<() => void> = [];
@@ -1607,6 +1689,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           // Cache miss -> fall through to single on-demand server read
         }
       }
+      if (!cloudAuthReady) return;
       try {
         const serverSnap = await getDocs(pkgQ);
         if (!serverSnap.empty && !cancelled) {
@@ -1662,6 +1745,13 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       }
     };
     void loadPackagesCacheFirst();
+
+    // Stop before attaching cloud snapshots if offline or Firebase Auth hasn't warmed yet
+    if (!cloudAuthReady) {
+      return () => {
+        cancelled = true;
+      };
+    }
 
     // 1C. Single Lightweight Document Listener (`stats/summary` for Admin or `stats/user_{uid}` for Agent/Client = ONLY 1 doc read!)
     unsubscribers.push(
@@ -1819,17 +1909,27 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
     return () => {
       cancelled = true;
-      unsubscribers.forEach((u) => u());
+      unsubscribers.forEach((u) => {
+        try {
+          u();
+        } catch {
+          // ignore unsubscribe cleanup errors
+        }
+      });
     };
-  }, [authReady, userUid, profile?.uid, profile?.role, profile?.status, syncNonce]);
+  }, [authReady, userUid, firebaseUser?.uid, profile?.uid, profile?.role, profile?.status, isOnline, syncNonce]);
 
   // B. CACHE-FIRST + INCREMENTAL LAZY ROUTE DATA LOADER (Reads local cache first; fetches ONLY deltas updated after lastSyncTs!)
   useEffect(() => {
-    const activeUser = auth.currentUser || firebaseUser;
-    if (!authReady || !activeUser || !profile || profile.status !== 'active') {
+    const effectiveUid = profile?.uid || auth.currentUser?.uid || firebaseUser?.uid;
+    if (!authReady || !effectiveUid || !profile || profile.status !== 'active' || !hasActiveSessionUnlocked()) {
       return;
     }
 
+    const activeUser = { uid: effectiveUid };
+    const cloudAuthReady =
+      Boolean(auth.currentUser && auth.currentUser.uid === effectiveUid) &&
+      (typeof navigator === 'undefined' || navigator.onLine);
     let cancelled = false;
     const isAdmin = profile.role === 'super_admin';
     const isAgent = profile.role === 'agent';
@@ -1915,7 +2015,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         ? query(collection(db, 'sales'), where('updatedAt', '>', Timestamp.fromMillis(lastSyncMs)), limit(40))
         : baseSalesQ;
 
-      void getDocs(fetchSalesQ)
+      if (cloudAuthReady) {
+        void getDocs(fetchSalesQ)
         .then((snap) => {
           if (cancelled) return;
           const incoming = snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<SaleDoc, 'id'>) }));
@@ -1947,7 +2048,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             );
           }
         })
-        .catch((err) => handleFirestoreError(err, OperationType.LIST, 'sales'));
+          .catch((err) => handleFirestoreError(err, OperationType.LIST, 'sales'));
+      }
     }
 
     if (needsCustomers) {
@@ -1976,7 +2078,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         ? query(collection(db, 'customers'), where('updatedAt', '>', Timestamp.fromMillis(lastSyncMs)), limit(40))
         : baseCustQ;
 
-      void getDocs(fetchCustQ)
+      if (cloudAuthReady) {
+        void getDocs(fetchCustQ)
         .then((snap) => {
           if (cancelled) return;
           const incoming = snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<CustomerAccount, 'id'>) }));
@@ -2008,7 +2111,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             );
           }
         })
-        .catch((err) => handleFirestoreError(err, OperationType.LIST, 'customers'));
+          .catch((err) => handleFirestoreError(err, OperationType.LIST, 'customers'));
+      }
     }
 
     if (needsLedger) {
@@ -2026,15 +2130,17 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           }
         })
         .catch(() => {});
-      void getDocs(ledgerQuery)
-        .then((snap) => {
-          if (cancelled) return;
-          const list = snap.docs
-            .map((d) => ({ id: d.id, ...(d.data() as Omit<LedgerEntry, 'id'>) }))
-            .sort((a, b) => (b.createdAt?.toMillis?.() ?? 0) - (a.createdAt?.toMillis?.() ?? 0));
-          setLedgerEntries(list);
-        })
-        .catch((err) => handleFirestoreError(err, OperationType.LIST, 'ledgerEntries'));
+      if (cloudAuthReady) {
+        void getDocs(ledgerQuery)
+          .then((snap) => {
+            if (cancelled) return;
+            const list = snap.docs
+              .map((d) => ({ id: d.id, ...(d.data() as Omit<LedgerEntry, 'id'>) }))
+              .sort((a, b) => (b.createdAt?.toMillis?.() ?? 0) - (a.createdAt?.toMillis?.() ?? 0));
+            setLedgerEntries(list);
+          })
+          .catch((err) => handleFirestoreError(err, OperationType.LIST, 'ledgerEntries'));
+      }
     }
 
     if (needsManagedUsers) {
@@ -2049,7 +2155,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         activeRoute !== 'agents_management' &&
         syncNonce === 0;
 
-      if (!usersCacheFresh) {
+      if (!usersCacheFresh && cloudAuthReady) {
         const usersQuery = isAdmin
           ? query(collection(db, 'users'), limit(100))
           : query(collection(db, 'users'), where('parentAgentId', '==', activeUser.uid), limit(100));
@@ -2084,17 +2190,19 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           }
         })
         .catch(() => {});
-      void getDocs(auditQ)
-        .then((snap) => {
-          if (cancelled) return;
-          setAuditLogs(
-            snap.docs.map((d) => ({
-              id: d.id,
-              ...(d.data() as Omit<AuditLogDoc, 'id'>),
-            }))
-          );
-        })
-        .catch((err) => handleFirestoreError(err, OperationType.LIST, 'auditLogs'));
+      if (cloudAuthReady) {
+        void getDocs(auditQ)
+          .then((snap) => {
+            if (cancelled) return;
+            setAuditLogs(
+              snap.docs.map((d) => ({
+                id: d.id,
+                ...(d.data() as Omit<AuditLogDoc, 'id'>),
+              }))
+            );
+          })
+          .catch((err) => handleFirestoreError(err, OperationType.LIST, 'auditLogs'));
+      }
     }
 
     return () => {
@@ -2103,6 +2211,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   }, [
     authReady,
     userUid,
+    firebaseUser?.uid,
     profile?.uid,
     profile?.role,
     profile?.status,
@@ -2110,6 +2219,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     salesLimit,
     customersLimit,
     auditLogsLimit,
+    isOnline,
     syncNonce,
   ]);
 
@@ -2399,12 +2509,18 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
   }, [firebaseUser, flushOfflineSalesQueue, notifyError, notifySuccess, profile, resolveAndLinkUserProfile]);
 
+  // 100% Instant Local Sign-Out:
+  // Clears ONLY active session in sessionStorage & RAM; keeps `localAuthVault` and saved username intact!
   const signOutUser = useCallback(async () => {
     try {
       explicitSignOutRef.current = true;
       clearActiveSession(true);
       clearMemorySessionCredentials();
-      await firebaseSignOut(auth);
+      setProfile(null);
+      setProfileLoading(false);
+      setAdminDocApproved(false);
+      setAdminApprovalChecking(false);
+      setActiveRouteState('home');
       notifySuccess('تم تسجيل الخروج بأمان');
     } catch {
       notifyError('تعذر تسجيل الخروج');
@@ -2684,7 +2800,10 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   // =========================================================================
   const executeSaleTransaction = useCallback(
     async (input: SaleExecutionInput): Promise<SaleDoc | null> => {
-      const activeUser = auth.currentUser || firebaseUser;
+      const activeUser =
+        auth.currentUser ||
+        firebaseUser ||
+        (profile?.uid ? ({ uid: profile.uid, email: profile.email } as FirebaseUser) : null);
       if (!activeUser || !profile) return null;
 
       const requestedItems = input.items.filter((i) => i.quantity > 0);
@@ -5333,6 +5452,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             'firebase:',
             'taibah_theme',
             'taibah_bio',
+            'taibah_local_auth_vault',
+            'taibah_saved_identifier',
             'taibah_auto_backup',
             'taibah_cached_users',
             'taibah_cached_profile',
@@ -5466,6 +5587,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       refreshVerificationStatus,
       syncNow,
       signOutUser,
+      activateLocalSession,
+      resolveAndLinkUserProfile,
       writeAuditLog,
       sendCloudNotification,
       markNotificationRead,
@@ -5532,6 +5655,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       refreshVerificationStatus,
       syncNow,
       signOutUser,
+      activateLocalSession,
+      resolveAndLinkUserProfile,
       writeAuditLog,
       sendCloudNotification,
       markNotificationRead,
