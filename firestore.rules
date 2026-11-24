@@ -382,6 +382,18 @@ service cloud.firestore {
         data.updatedAt is timestamp;
     }
 
+    function isValidStatsSummaryDoc(data) {
+      return data.keys().hasAll(['updatedAt']) &&
+        data.keys().hasOnly(['ownerId', 'totalAvailable', 'totalSold', 'totalUploaded', 'totalInjected', 'packages', 'updatedAt']) &&
+        (!('ownerId' in data) || isValidString(data.ownerId, 0, 128)) &&
+        (!('totalAvailable' in data) || data.totalAvailable is number) &&
+        (!('totalSold' in data) || data.totalSold is number) &&
+        (!('totalUploaded' in data) || data.totalUploaded is number) &&
+        (!('totalInjected' in data) || data.totalInjected is number) &&
+        (!('packages' in data) || data.packages is map) &&
+        data.updatedAt is timestamp;
+    }
+
     // =========================================================================
     // Connection Test Document (Read-Only for Connectivity Probe)
     // =========================================================================
@@ -792,6 +804,28 @@ service cloud.firestore {
       allow create: if isValidId(settingId) && isValidAppSettingsDoc(incoming()) && isSuperAdmin() && incoming().updatedAt == request.time;
       allow update: if isValidId(settingId) && isValidAppSettingsDoc(incoming()) && isSuperAdmin() && incoming().updatedAt == request.time;
       allow delete: if false;
+    }
+
+    // =========================================================================
+    // 14. Lightweight Inventory Stats Summary (stats/summary & stats/user_{uid})
+    // =========================================================================
+    match /stats/{statId} {
+      allow get: if isValidId(statId) && isSignedIn() && (
+        isSuperAdmin() ||
+        statId == 'user_' + request.auth.uid
+      );
+      allow list: if isSuperAdmin();
+      allow create: if isValidId(statId) && isSignedIn() && isValidStatsSummaryDoc(incoming()) &&
+        incoming().updatedAt == request.time && (
+          isSuperAdmin() ||
+          statId == 'user_' + request.auth.uid
+        );
+      allow update: if isValidId(statId) && isSignedIn() && isValidStatsSummaryDoc(incoming()) &&
+        incoming().updatedAt == request.time && (
+          isSuperAdmin() ||
+          statId == 'user_' + request.auth.uid
+        );
+      allow delete: if isValidId(statId) && isSuperAdmin();
     }
   }
 }

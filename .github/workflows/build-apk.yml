@@ -38,7 +38,7 @@ jobs:
           java-version: '21'
 
       - name: Install Dependencies
-        run: npm ci --no-audit --no-fund
+        run: npm install --legacy-peer-deps --no-audit --no-fund
 
       - name: TypeScript Lint, Production Web Build & OTA Bundle (update.zip + version.json)
         env:
@@ -72,7 +72,7 @@ jobs:
         run: |
           set -euo pipefail
           test -f capacitor.config.json
-          npm install --no-save --no-audit --no-fund \
+          npm install --legacy-peer-deps --no-save --no-audit --no-fund \
             @capacitor/cli@7 \
             @capacitor/android@7 \
             @capacitor/push-notifications@7 \

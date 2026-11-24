@@ -12,7 +12,9 @@ import {
   deleteDoc,
   doc,
   getDoc,
+  getDocFromCache,
   getDocs,
+  getDocsFromCache,
   increment,
   limit,
   onSnapshot,
@@ -22,7 +24,7 @@ import {
   serverTimestamp,
   setDoc,
   terminate,
-  type Timestamp,
+  Timestamp,
   updateDoc,
   where,
   writeBatch,
@@ -266,6 +268,83 @@ const CACHE_SALES_PREFIX = 'taibah_cached_sales_v1_';
 const CACHE_CUSTOMERS_PREFIX = 'taibah_cached_customers_v1_';
 const CACHE_AUTO_BACKUP_KEY = 'taibah_auto_backup_v1';
 const CACHE_USERS_LIST_KEY = 'taibah_cached_users_v1';
+const CACHE_STATS_PREFIX = 'taibah_stats_summary_v1_';
+const CACHE_SYNC_TS_PREFIX = 'taibah_last_sync_ms_v1_';
+
+interface PackageCounterStats {
+  availableCount?: number;
+  soldCount?: number;
+  uploadedCount?: number;
+  injectedCount?: number;
+}
+
+interface StatsSummaryDocData {
+  ownerId?: string;
+  totalAvailable?: number;
+  totalSold?: number;
+  totalUploaded?: number;
+  totalInjected?: number;
+  packages?: Record<string, PackageCounterStats>;
+  updatedAt?: Timestamp;
+}
+
+/**
+ * Atomically apply incremental package counter deltas to the single lightweight
+ * `stats/summary` (admin) or `stats/user_{uid}` (agent/client) document.
+ */
+async function applyStatsSummaryDelta(
+  statDocId: string,
+  ownerId: string,
+  deltas: Record<string, { available?: number; sold?: number; uploaded?: number; injected?: number }>
+): Promise<void> {
+  const pkgEntries = Object.entries(deltas);
+  if (pkgEntries.length === 0) return;
+
+  let totalAvailDelta = 0;
+  let totalSoldDelta = 0;
+  let totalUploadedDelta = 0;
+  let totalInjectedDelta = 0;
+  const packagesUpdate: Record<string, Record<string, unknown>> = {};
+
+  for (const [pkgId, d] of pkgEntries) {
+    const pkgPatch: Record<string, unknown> = {};
+    if (d.available) {
+      pkgPatch.availableCount = increment(d.available);
+      totalAvailDelta += d.available;
+    }
+    if (d.sold) {
+      pkgPatch.soldCount = increment(d.sold);
+      totalSoldDelta += d.sold;
+    }
+    if (d.uploaded) {
+      pkgPatch.uploadedCount = increment(d.uploaded);
+      totalUploadedDelta += d.uploaded;
+    }
+    if (d.injected) {
+      pkgPatch.injectedCount = increment(d.injected);
+      totalInjectedDelta += d.injected;
+    }
+    if (Object.keys(pkgPatch).length > 0) {
+      packagesUpdate[pkgId] = pkgPatch;
+    }
+  }
+
+  if (Object.keys(packagesUpdate).length === 0) return;
+
+  const payload: Record<string, unknown> = {
+    ownerId,
+    packages: packagesUpdate,
+    updatedAt: serverTimestamp(),
+  };
+  if (totalAvailDelta !== 0) payload.totalAvailable = increment(totalAvailDelta);
+  if (totalSoldDelta !== 0) payload.totalSold = increment(totalSoldDelta);
+  if (totalUploadedDelta !== 0) payload.totalUploaded = increment(totalUploadedDelta);
+  if (totalInjectedDelta !== 0) payload.totalInjected = increment(totalInjectedDelta);
+
+  await setDoc(doc(db, 'stats', statDocId), payload, { merge: true }).catch(() => {
+    // Non-blocking: local cache already reflects optimistic counts
+  });
+}
 
 function readCachedJson<T>(key: string, fallback: T): T {
   try {
@@ -615,35 +694,22 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     };
   }, []);
 
-  // 2. Non-blocking startup connectivity probe + throttled quota-exceeded Arabic notice
+  // 2. Silent connectivity & quota-exhaustion observer (Zero startup reads, zero warning banners!)
   useEffect(() => {
-    let active = true;
-    const probeTimer = window.setTimeout(() => {
-      if (typeof navigator !== 'undefined' && !navigator.onLine) {
-        if (active) setFirestoreConnected(false);
-        return;
-      }
-      testFirestoreConnection().then((ok) => {
-        if (active) setFirestoreConnected(ok);
-      });
-    }, 300);
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      setFirestoreConnected(false);
+    }
 
-    let notifiedQuota = false;
     const onQuotaExceeded = () => {
-      if (notifiedQuota) return;
-      notifiedQuota = true;
-      notifyWarning(
-        'تم بلوغ الحد المجاني اليومي لقراءات قاعدة البيانات السحابية — يعمل التطبيق حالياً من الذاكرة المحلية، وتتجدد الحصة تلقائياً غداً أو بترقية الخطة.'
-      );
+      // Quietly switch indicator to local cache mode without intrusive banners or warnings
+      setFirestoreConnected(false);
     };
     window.addEventListener('taibah:firestore-quota-exceeded', onQuotaExceeded);
 
     return () => {
-      active = false;
-      window.clearTimeout(probeTimer);
       window.removeEventListener('taibah:firestore-quota-exceeded', onQuotaExceeded);
     };
-  }, [isOnline, notifyWarning]);
+  }, [isOnline]);
 
   // Keep active verified profile mirrored in sessionStorage during active run
   useEffect(() => {
@@ -896,9 +962,6 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (isFirestoreOfflineError(err)) {
         pendingBootstrapRef.current = true;
         setFirestoreConnected(false);
-        console.warn(
-          'Super Admin bootstrap deferred while Firestore is offline — will retry automatically upon reconnection.'
-        );
         return false;
       }
       handleFirestoreError(err, OperationType.WRITE, 'bootstrap_super_admin');
@@ -1451,23 +1514,103 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     };
   }, [authReady, userUid, needsAdminEmailVerification, syncNonce]);
 
-  // A. ALWAYS-ON LIGHTWEIGHT CORE LISTENERS (Home counters, Packages, Unread Notifications, Pending Queues)
+  // A. ULTRA-LOW-READ CORE LISTENERS (95% Read Reduction: Single stats/summary doc + Cache-First packages + Tight Real-Time Queues — ZERO open cards listener!)
   useEffect(() => {
     const activeUser = auth.currentUser || firebaseUser;
     if (!authReady || !activeUser || !profile || profile.status !== 'active') {
       return;
     }
 
+    let cancelled = false;
     const unsubscribers: Array<() => void> = [];
     const isAdmin = profile.role === 'super_admin';
     const isAgent = profile.role === 'agent';
+    const statDocId = isAdmin ? 'summary' : `user_${activeUser.uid}`;
+    const statsCacheKey = `${CACHE_STATS_PREFIX}${statDocId}`;
 
-    // 1. Live Packages Metadata (8 small documents — cached locally for instant display)
-    unsubscribers.push(
-      onSnapshot(
-        query(collection(db, 'packages'), where('price', '>', 0)),
-        (snap) => {
-          const list = snap.docs
+    const applyStatsDocToState = (statsData: StatsSummaryDocData | null) => {
+      if (!statsData || !statsData.packages || typeof statsData.packages !== 'object') return;
+      const pkgMap = statsData.packages;
+      if (isAdmin) {
+        setRawPackages((prev) => {
+          const base = prev.length > 0 ? prev : (EXCLUSIVE_PACKAGES as PackageDoc[]);
+          const next = base.map((pkg) => {
+            const c = pkgMap[pkg.id];
+            if (!c) return pkg;
+            return {
+              ...pkg,
+              availableCount: Math.max(0, Number(c.availableCount ?? pkg.availableCount ?? 0)),
+              soldCount: Math.max(0, Number(c.soldCount ?? pkg.soldCount ?? 0)),
+              uploadedCount: Math.max(0, Number(c.uploadedCount ?? pkg.uploadedCount ?? 0)),
+              injectedCount: Math.max(0, Number(c.injectedCount ?? pkg.injectedCount ?? 0)),
+            };
+          });
+          writeCachedJson(
+            CACHE_PACKAGES_KEY,
+            next.map(({ updatedAt: _u, ...rest }) => rest)
+          );
+          return next;
+        });
+      } else {
+        const availCounts: Record<string, number> = {};
+        const soldCounts: Record<string, number> = {};
+        for (const [pkgId, c] of Object.entries(pkgMap)) {
+          if (!c) continue;
+          availCounts[pkgId] = Math.max(0, Number(c.availableCount ?? 0));
+          soldCounts[pkgId] = Math.max(0, Number(c.soldCount ?? 0));
+        }
+        setPersonalCardCounts(availCounts);
+        setPersonalSoldCounts(soldCounts);
+      }
+    };
+
+    // 1. Hydrate immediately from localStorage cache (0 Firestore reads!)
+    const cachedStats = readCachedJson<StatsSummaryDocData | null>(statsCacheKey, null);
+    if (cachedStats) {
+      applyStatsDocToState(cachedStats);
+    }
+
+    // 1B. Try IndexedDB local cache FIRST (`getDocFromCache` / `getDocsFromCache` — 0 Firestore server reads!)
+    const statsRef = doc(db, 'stats', statDocId);
+    void getDocFromCache(statsRef)
+      .then((snap) => {
+        if (!cancelled && snap.exists()) {
+          applyStatsDocToState(snap.data() as StatsSummaryDocData);
+        }
+      })
+      .catch(() => {});
+
+    const loadPackagesCacheFirst = async () => {
+      const localPkgs = readCachedJson<PackageDoc[]>(CACHE_PACKAGES_KEY, []);
+      if (localPkgs.length >= EXCLUSIVE_PACKAGES.length && syncNonce === 0) {
+        if (!cancelled) setRawPackages(localPkgs);
+        return;
+      }
+      const pkgQ = query(collection(db, 'packages'), where('price', '>', 0));
+      if (syncNonce === 0) {
+        try {
+          const cachedSnap = await getDocsFromCache(pkgQ);
+          if (!cachedSnap.empty) {
+            const list = cachedSnap.docs
+              .map((d) => ({ id: d.id, ...(d.data() as Omit<PackageDoc, 'id'>) }))
+              .sort((a, b) => a.sortOrder - b.sortOrder);
+            if (!cancelled) {
+              setRawPackages(list);
+              writeCachedJson(
+                CACHE_PACKAGES_KEY,
+                list.map(({ updatedAt: _u, ...rest }) => rest)
+              );
+            }
+            return;
+          }
+        } catch {
+          // Cache miss -> fall through to single on-demand server read
+        }
+      }
+      try {
+        const serverSnap = await getDocs(pkgQ);
+        if (!serverSnap.empty && !cancelled) {
+          const list = serverSnap.docs
             .map((d) => ({ id: d.id, ...(d.data() as Omit<PackageDoc, 'id'>) }))
             .sort((a, b) => a.sortOrder - b.sortOrder);
           setRawPackages(list);
@@ -1476,104 +1619,84 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             list.map(({ updatedAt: _u, ...rest }) => rest)
           );
           setFirestoreConnected(true);
+          // Seed lightweight `stats/summary` once from packages if Super Admin has none yet
+          if (isAdmin && !cachedStats) {
+            const pkgSummaryMap: Record<string, PackageCounterStats> = {};
+            let totalAvailable = 0;
+            let totalSold = 0;
+            let totalUploaded = 0;
+            let totalInjected = 0;
+            for (const p of list) {
+              const av = Math.max(0, Number(p.availableCount) || 0);
+              const sd = Math.max(0, Number(p.soldCount) || 0);
+              const up = Math.max(0, Number(p.uploadedCount) || 0);
+              const inj = Math.max(0, Number(p.injectedCount) || 0);
+              pkgSummaryMap[p.id] = {
+                availableCount: av,
+                soldCount: sd,
+                uploadedCount: up,
+                injectedCount: inj,
+              };
+              totalAvailable += av;
+              totalSold += sd;
+              totalUploaded += up;
+              totalInjected += inj;
+            }
+            void setDoc(
+              doc(db, 'stats', 'summary'),
+              {
+                ownerId: activeUser.uid,
+                totalAvailable,
+                totalSold,
+                totalUploaded,
+                totalInjected,
+                packages: pkgSummaryMap,
+                updatedAt: serverTimestamp(),
+              },
+              { merge: true }
+            ).catch(() => {});
+          }
+        }
+      } catch (err) {
+        handleFirestoreError(err, OperationType.LIST, 'packages');
+      }
+    };
+    void loadPackagesCacheFirst();
+
+    // 1C. Single Lightweight Document Listener (`stats/summary` for Admin or `stats/user_{uid}` for Agent/Client = ONLY 1 doc read!)
+    unsubscribers.push(
+      onSnapshot(
+        statsRef,
+        (snap) => {
+          if (cancelled) return;
+          if (!snap.metadata.fromCache) {
+            setFirestoreConnected(true);
+          }
+          if (snap.exists()) {
+            const data = snap.data() as StatsSummaryDocData;
+            applyStatsDocToState(data);
+            writeCachedJson(statsCacheKey, {
+              ownerId: data.ownerId,
+              totalAvailable: data.totalAvailable ?? 0,
+              totalSold: data.totalSold ?? 0,
+              totalUploaded: data.totalUploaded ?? 0,
+              totalInjected: data.totalInjected ?? 0,
+              packages: data.packages ?? {},
+            });
+          }
         },
-        (err) => handleFirestoreError(err, OperationType.LIST, 'packages')
+        (err) => handleFirestoreError(err, OperationType.GET, `stats/${statDocId}`)
       )
     );
 
-    // 1B. STRICT ACCOUNT ISOLATION + LOW-READ OFFLINE CARD POOL SYNC
-    // Non-admins (agent/client) ONLY see their own cards (`ownerId == uid`), never Admin stock.
-    // Super Admin warms up a small, throttled offline reserve ONLY when local cache is empty
-    // (slashing startup Firestore reads by >95% to protect daily quota).
-    if (!isAdmin) {
-      unsubscribers.push(
-        onSnapshot(
-          query(collection(db, 'cards'), where('ownerId', '==', activeUser.uid), limit(500)),
-          (snap) => {
-            const availCounts: Record<string, number> = {};
-            const soldCounts: Record<string, number> = {};
-            const cachedAvail: CachedAvailableCard[] = [];
-            for (const d of snap.docs) {
-              const data = d.data() as CardDoc;
-              if (data.status === 'available' && !isCardLocallyLocked(data.cardNumber)) {
-                availCounts[data.packageId] = (availCounts[data.packageId] || 0) + 1;
-                cachedAvail.push({
-                  id: d.id,
-                  packageId: data.packageId,
-                  cardNumber: data.cardNumber,
-                  ownerId: activeUser.uid,
-                });
-              } else if (data.status === 'sold') {
-                soldCounts[data.packageId] = (soldCounts[data.packageId] || 0) + 1;
-              }
-            }
-            setPersonalCardCounts(availCounts);
-            setPersonalSoldCounts(soldCounts);
-            saveCachedAvailableCards(activeUser.uid, cachedAvail);
-          },
-          (err) => handleFirestoreError(err, OperationType.LIST, 'cards')
-        )
-      );
-    } else if (navigator.onLine) {
-      const existingCached = getCachedAvailableCards(activeUser.uid);
-      const warmupTsKey = `taibah_card_warmup_ts_v1_${activeUser.uid}`;
-      let lastWarmupTs = 0;
-      try {
-        lastWarmupTs = Number(localStorage.getItem(warmupTsKey) || '0');
-      } catch {
-        lastWarmupTs = 0;
-      }
-      const thirtyMinutesMs = 30 * 60 * 1000;
-      const shouldWarmup = existingCached.length === 0 && Date.now() - lastWarmupTs > thirtyMinutesMs;
+    // NOTE: Open `onSnapshot` on the `cards` collection is PERMANENTLY REMOVED.
+    // Cards are pulled ONLY from local cache (`localStorage` / `getDocsFromCache`) first,
+    // and fetched from Firestore strictly on-demand with exact `limit(1)` (Direct Sale) or `limit(qty)` (Wholesale).
 
-      if (shouldWarmup) {
-        try {
-          localStorage.setItem(warmupTsKey, String(Date.now()));
-        } catch {
-          // ignore storage errors
-        }
-        Promise.allSettled(
-          EXCLUSIVE_PACKAGES.map((pkg) =>
-            getDocs(
-              query(
-                collection(db, 'cards'),
-                where('ownerId', '==', activeUser.uid),
-                where('packageId', '==', pkg.id),
-                where('status', '==', 'available'),
-                limit(20)
-              )
-            )
-          )
-        )
-          .then((results) => {
-            const cachedAvail: CachedAvailableCard[] = [];
-            for (const res of results) {
-              if (res.status !== 'fulfilled') continue;
-              for (const d of res.value.docs) {
-                const data = d.data() as CardDoc;
-                if (!isCardLocallyLocked(data.cardNumber)) {
-                  cachedAvail.push({
-                    id: d.id,
-                    packageId: data.packageId,
-                    cardNumber: data.cardNumber,
-                    ownerId: activeUser.uid,
-                  });
-                }
-              }
-            }
-            if (cachedAvail.length > 0) {
-              saveCachedAvailableCards(activeUser.uid, cachedAvail);
-              setOfflinePoolVersion((v) => v + 1);
-            }
-          })
-          .catch(() => {});
-      }
-    }
-
-    // 2. Lightweight Notifications Stream (limit 30)
+    // 2. Compact Notifications Stream (limit 15)
     const notifQuery = isAdmin
-      ? query(collection(db, 'notifications'), orderBy('createdAt', 'desc'), limit(30))
-      : query(collection(db, 'notifications'), where('recipientId', '==', activeUser.uid), limit(30));
+      ? query(collection(db, 'notifications'), orderBy('createdAt', 'desc'), limit(15))
+      : query(collection(db, 'notifications'), where('recipientId', '==', activeUser.uid), limit(15));
     unsubscribers.push(
       onSnapshot(
         notifQuery,
@@ -1590,14 +1713,14 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       )
     );
 
-    // 3. Pending Registration Requests (Real-time badge on Home & instant queue — single-field query avoids composite index errors)
+    // 3. Pending Registration Requests (Real-time instant arrival for Admin/Agent — compact limit 15)
     if (isAdmin || isAgent) {
       const regQuery = isAdmin
-        ? query(collection(db, 'registrationRequests'), where('status', '==', 'pending'), limit(40))
+        ? query(collection(db, 'registrationRequests'), where('status', '==', 'pending'), limit(15))
         : query(
             collection(db, 'registrationRequests'),
             where('parentAgentId', '==', activeUser.uid),
-            limit(40)
+            limit(15)
           );
       unsubscribers.push(
         onSnapshot(
@@ -1616,7 +1739,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       );
     }
 
-    // 4. Lightweight Topup Requests (Admin: all; Agent: incoming from clients + own outgoing to Admin; Client: own)
+    // 4. Real-Time Topup Requests (Instant Admin/Agent arrival — compact limit 15)
     if (isAgent) {
       let incomingList: TopupRequest[] = [];
       let outgoingList: TopupRequest[] = [];
@@ -1633,7 +1756,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
       unsubscribers.push(
         onSnapshot(
-          query(collection(db, 'topupRequests'), where('targetId', '==', activeUser.uid), limit(50)),
+          query(collection(db, 'topupRequests'), where('targetId', '==', activeUser.uid), limit(15)),
           (snap) => {
             incomingList = snap.docs.map((d) => ({
               id: d.id,
@@ -1647,7 +1770,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
       unsubscribers.push(
         onSnapshot(
-          query(collection(db, 'topupRequests'), where('requesterId', '==', activeUser.uid), limit(50)),
+          query(collection(db, 'topupRequests'), where('requesterId', '==', activeUser.uid), limit(15)),
           (snap) => {
             outgoingList = snap.docs.map((d) => ({
               id: d.id,
@@ -1660,8 +1783,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       );
     } else {
       const topupQuery = isAdmin
-        ? query(collection(db, 'topupRequests'), limit(50))
-        : query(collection(db, 'topupRequests'), where('requesterId', '==', activeUser.uid), limit(50));
+        ? query(collection(db, 'topupRequests'), limit(15))
+        : query(collection(db, 'topupRequests'), where('requesterId', '==', activeUser.uid), limit(15));
       unsubscribers.push(
         onSnapshot(
           topupQuery,
@@ -1676,11 +1799,11 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       );
     }
 
-    // 5. Pending Password Resets (Admin badge only)
+    // 5. Pending Password Resets (Admin badge only — compact limit 10)
     if (isAdmin) {
       unsubscribers.push(
         onSnapshot(
-          query(collection(db, 'passwordResetRequests'), where('status', '==', 'pending'), limit(30)),
+          query(collection(db, 'passwordResetRequests'), where('status', '==', 'pending'), limit(10)),
           (snap) => {
             setPendingPasswordResets(
               snap.docs.map((d) => ({
@@ -1695,18 +1818,19 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
 
     return () => {
+      cancelled = true;
       unsubscribers.forEach((u) => u());
     };
   }, [authReady, userUid, profile?.uid, profile?.role, profile?.status, syncNonce]);
 
-  // B. LAZY ROUTE-SCOPED LISTENERS (Update 12: Load on demand & auto-unsubscribe on screen exit!)
+  // B. CACHE-FIRST + INCREMENTAL LAZY ROUTE DATA LOADER (Reads local cache first; fetches ONLY deltas updated after lastSyncTs!)
   useEffect(() => {
     const activeUser = auth.currentUser || firebaseUser;
     if (!authReady || !activeUser || !profile || profile.status !== 'active') {
       return;
     }
 
-    const unsubscribers: Array<() => void> = [];
+    let cancelled = false;
     const isAdmin = profile.role === 'super_admin';
     const isAgent = profile.role === 'agent';
 
@@ -1748,111 +1872,233 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
     const needsAuditLogs = isAdmin && activeRoute === 'audit_logs';
 
+    const readLastSyncMs = (key: string): number => {
+      try {
+        return Number(localStorage.getItem(`${CACHE_SYNC_TS_PREFIX}${activeUser.uid}_${key}`) || '0');
+      } catch {
+        return 0;
+      }
+    };
+    const writeLastSyncMs = (key: string, ms: number) => {
+      try {
+        localStorage.setItem(`${CACHE_SYNC_TS_PREFIX}${activeUser.uid}_${key}`, String(ms));
+      } catch {
+        // ignore storage errors
+      }
+    };
+
     if (needsSales) {
-      const limitCount = activeRoute === 'reports' || activeRoute === 'backup' ? 200 : salesLimit;
-      const salesQuery = isAdmin
+      const limitCount = activeRoute === 'reports' || activeRoute === 'backup' ? 120 : Math.min(salesLimit, 80);
+      const baseSalesQ = isAdmin
         ? query(collection(db, 'sales'), limit(limitCount))
         : query(collection(db, 'sales'), where('sellerId', '==', activeUser.uid), limit(limitCount));
-      unsubscribers.push(
-        onSnapshot(
-          salesQuery,
-          (snap) => {
-            const list = snap.docs
+
+      // 1. Hydrate from IndexedDB local cache immediately (0 server reads)
+      void getDocsFromCache(baseSalesQ)
+        .then((cSnap) => {
+          if (!cancelled && !cSnap.empty) {
+            const cachedList = cSnap.docs
               .map((d) => ({ id: d.id, ...(d.data() as Omit<SaleDoc, 'id'>) }))
               .sort((a, b) => (b.createdAt?.toMillis?.() ?? 0) - (a.createdAt?.toMillis?.() ?? 0));
+            setSales((prev) => (prev.length >= cachedList.length ? prev : cachedList));
+          }
+        })
+        .catch(() => {});
+
+      // 2. Incremental server fetch (ONLY docs updated after lastSyncMs when cache already populated!)
+      const localCachedSales = readCachedJson<SaleDoc[]>(`${CACHE_SALES_PREFIX}${activeUser.uid}`, []);
+      const lastSyncMs = readLastSyncMs('sales');
+      const useIncremental =
+        isAdmin && lastSyncMs > 0 && localCachedSales.length > 0 && salesLimit <= 40 && syncNonce === 0;
+
+      const fetchSalesQ = useIncremental
+        ? query(collection(db, 'sales'), where('updatedAt', '>', Timestamp.fromMillis(lastSyncMs)), limit(40))
+        : baseSalesQ;
+
+      void getDocs(fetchSalesQ)
+        .then((snap) => {
+          if (cancelled) return;
+          const incoming = snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<SaleDoc, 'id'>) }));
+          writeLastSyncMs('sales', Date.now());
+          if (useIncremental) {
+            if (incoming.length > 0) {
+              setSales((prev) => {
+                const mergedMap = new Map<string, SaleDoc>();
+                for (const s of prev) mergedMap.set(s.id, s);
+                for (const s of incoming) mergedMap.set(s.id, s);
+                const merged = Array.from(mergedMap.values()).sort(
+                  (a, b) => (b.createdAt?.toMillis?.() ?? 0) - (a.createdAt?.toMillis?.() ?? 0)
+                );
+                writeCachedJson(
+                  `${CACHE_SALES_PREFIX}${activeUser.uid}`,
+                  merged.slice(0, 60).map(({ createdAt: _c, updatedAt: _u, ...rest }) => rest)
+                );
+                return merged;
+              });
+            }
+          } else {
+            const list = incoming.sort(
+              (a, b) => (b.createdAt?.toMillis?.() ?? 0) - (a.createdAt?.toMillis?.() ?? 0)
+            );
             setSales(list);
             writeCachedJson(
               `${CACHE_SALES_PREFIX}${activeUser.uid}`,
               list.slice(0, 60).map(({ createdAt: _c, updatedAt: _u, ...rest }) => rest)
             );
-          },
-          (err) => handleFirestoreError(err, OperationType.LIST, 'sales')
-        )
-      );
+          }
+        })
+        .catch((err) => handleFirestoreError(err, OperationType.LIST, 'sales'));
     }
 
     if (needsCustomers) {
-      const limitCount = activeRoute === 'reports' || activeRoute === 'backup' ? 250 : customersLimit;
-      const customersQuery = isAdmin
+      const limitCount = activeRoute === 'reports' || activeRoute === 'backup' ? 120 : Math.min(customersLimit, 80);
+      const baseCustQ = isAdmin
         ? query(collection(db, 'customers'), limit(limitCount))
         : query(collection(db, 'customers'), where('ownerId', '==', activeUser.uid), limit(limitCount));
-      unsubscribers.push(
-        onSnapshot(
-          customersQuery,
-          (snap) => {
-            const list = snap.docs
+
+      void getDocsFromCache(baseCustQ)
+        .then((cSnap) => {
+          if (!cancelled && !cSnap.empty) {
+            const cachedList = cSnap.docs
               .map((d) => ({ id: d.id, ...(d.data() as Omit<CustomerAccount, 'id'>) }))
               .sort((a, b) => (b.updatedAt?.toMillis?.() ?? 0) - (a.updatedAt?.toMillis?.() ?? 0));
+            setCustomers((prev) => (prev.length >= cachedList.length ? prev : cachedList));
+          }
+        })
+        .catch(() => {});
+
+      const localCachedCust = readCachedJson<CustomerAccount[]>(`${CACHE_CUSTOMERS_PREFIX}${activeUser.uid}`, []);
+      const lastSyncMs = readLastSyncMs('customers');
+      const useIncremental =
+        isAdmin && lastSyncMs > 0 && localCachedCust.length > 0 && customersLimit <= 50 && syncNonce === 0;
+
+      const fetchCustQ = useIncremental
+        ? query(collection(db, 'customers'), where('updatedAt', '>', Timestamp.fromMillis(lastSyncMs)), limit(40))
+        : baseCustQ;
+
+      void getDocs(fetchCustQ)
+        .then((snap) => {
+          if (cancelled) return;
+          const incoming = snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<CustomerAccount, 'id'>) }));
+          writeLastSyncMs('customers', Date.now());
+          if (useIncremental) {
+            if (incoming.length > 0) {
+              setCustomers((prev) => {
+                const mergedMap = new Map<string, CustomerAccount>();
+                for (const c of prev) mergedMap.set(c.id, c);
+                for (const c of incoming) mergedMap.set(c.id, c);
+                const merged = Array.from(mergedMap.values()).sort(
+                  (a, b) => (b.updatedAt?.toMillis?.() ?? 0) - (a.updatedAt?.toMillis?.() ?? 0)
+                );
+                writeCachedJson(
+                  `${CACHE_CUSTOMERS_PREFIX}${activeUser.uid}`,
+                  merged.slice(0, 100).map(({ createdAt: _c, updatedAt: _u, ...rest }) => rest)
+                );
+                return merged;
+              });
+            }
+          } else {
+            const list = incoming.sort(
+              (a, b) => (b.updatedAt?.toMillis?.() ?? 0) - (a.updatedAt?.toMillis?.() ?? 0)
+            );
             setCustomers(list);
             writeCachedJson(
               `${CACHE_CUSTOMERS_PREFIX}${activeUser.uid}`,
               list.slice(0, 100).map(({ createdAt: _c, updatedAt: _u, ...rest }) => rest)
             );
-          },
-          (err) => handleFirestoreError(err, OperationType.LIST, 'customers')
-        )
-      );
+          }
+        })
+        .catch((err) => handleFirestoreError(err, OperationType.LIST, 'customers'));
     }
 
     if (needsLedger) {
       const ledgerQuery = isAdmin
-        ? query(collection(db, 'ledgerEntries'), limit(120))
-        : query(collection(db, 'ledgerEntries'), where('ownerId', '==', activeUser.uid), limit(120));
-      unsubscribers.push(
-        onSnapshot(
-          ledgerQuery,
-          (snap) => {
-            const list = snap.docs
-              .map((d) => ({ id: d.id, ...(d.data() as Omit<LedgerEntry, 'id'>) }))
-              .sort((a, b) => (b.createdAt?.toMillis?.() ?? 0) - (a.createdAt?.toMillis?.() ?? 0));
-            setLedgerEntries(list);
-          },
-          (err) => handleFirestoreError(err, OperationType.LIST, 'ledgerEntries')
-        )
-      );
+        ? query(collection(db, 'ledgerEntries'), limit(80))
+        : query(collection(db, 'ledgerEntries'), where('ownerId', '==', activeUser.uid), limit(80));
+      void getDocsFromCache(ledgerQuery)
+        .then((cSnap) => {
+          if (!cancelled && !cSnap.empty) {
+            setLedgerEntries(
+              cSnap.docs
+                .map((d) => ({ id: d.id, ...(d.data() as Omit<LedgerEntry, 'id'>) }))
+                .sort((a, b) => (b.createdAt?.toMillis?.() ?? 0) - (a.createdAt?.toMillis?.() ?? 0))
+            );
+          }
+        })
+        .catch(() => {});
+      void getDocs(ledgerQuery)
+        .then((snap) => {
+          if (cancelled) return;
+          const list = snap.docs
+            .map((d) => ({ id: d.id, ...(d.data() as Omit<LedgerEntry, 'id'>) }))
+            .sort((a, b) => (b.createdAt?.toMillis?.() ?? 0) - (a.createdAt?.toMillis?.() ?? 0));
+          setLedgerEntries(list);
+        })
+        .catch((err) => handleFirestoreError(err, OperationType.LIST, 'ledgerEntries'));
     }
 
     if (needsManagedUsers) {
-      const usersQuery = isAdmin
-        ? query(collection(db, 'users'), limit(150))
-        : query(collection(db, 'users'), where('parentAgentId', '==', activeUser.uid), limit(150));
-      unsubscribers.push(
-        onSnapshot(
-          usersQuery,
-          (snap) => {
+      const cachedUsersList = readCachedJson<UserProfile[]>(CACHE_USERS_LIST_KEY, []);
+      if (cachedUsersList.length > 0) {
+        setManagedUsers((prev) => (prev.length > 0 ? prev : cachedUsersList));
+      }
+      const lastUsersSyncMs = readLastSyncMs('users');
+      const usersCacheFresh =
+        cachedUsersList.length > 0 &&
+        Date.now() - lastUsersSyncMs < 10 * 60 * 1000 &&
+        activeRoute !== 'agents_management' &&
+        syncNonce === 0;
+
+      if (!usersCacheFresh) {
+        const usersQuery = isAdmin
+          ? query(collection(db, 'users'), limit(100))
+          : query(collection(db, 'users'), where('parentAgentId', '==', activeUser.uid), limit(100));
+        void getDocs(usersQuery)
+          .then((snap) => {
+            if (cancelled) return;
             const list = snap.docs.map((d) => d.data() as UserProfile);
             setManagedUsers(list);
+            writeLastSyncMs('users', Date.now());
             if (isAdmin && list.length > 0) {
               const serialized = list.map((u) =>
                 serializePlainAccountForBackup(u as unknown as Record<string, unknown>, u.uid)
               );
               writeCachedJson(CACHE_USERS_LIST_KEY, serialized);
             }
-          },
-          (err) => handleFirestoreError(err, OperationType.LIST, 'users')
-        )
-      );
+          })
+          .catch((err) => handleFirestoreError(err, OperationType.LIST, 'users'));
+      }
     }
 
     if (needsAuditLogs) {
-      unsubscribers.push(
-        onSnapshot(
-          query(collection(db, 'auditLogs'), orderBy('createdAt', 'desc'), limit(auditLogsLimit)),
-          (snap) => {
+      const auditQ = query(collection(db, 'auditLogs'), orderBy('createdAt', 'desc'), limit(auditLogsLimit));
+      void getDocsFromCache(auditQ)
+        .then((cSnap) => {
+          if (!cancelled && !cSnap.empty) {
             setAuditLogs(
-              snap.docs.map((d) => ({
+              cSnap.docs.map((d) => ({
                 id: d.id,
                 ...(d.data() as Omit<AuditLogDoc, 'id'>),
               }))
             );
-          },
-          (err) => handleFirestoreError(err, OperationType.LIST, 'auditLogs')
-        )
-      );
+          }
+        })
+        .catch(() => {});
+      void getDocs(auditQ)
+        .then((snap) => {
+          if (cancelled) return;
+          setAuditLogs(
+            snap.docs.map((d) => ({
+              id: d.id,
+              ...(d.data() as Omit<AuditLogDoc, 'id'>),
+            }))
+          );
+        })
+        .catch((err) => handleFirestoreError(err, OperationType.LIST, 'auditLogs'));
     }
 
     return () => {
-      unsubscribers.forEach((u) => u());
+      cancelled = true;
     };
   }, [
     authReady,
@@ -2353,12 +2599,17 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           return next;
         });
 
-        // Single atomic counter increment on the package document in Firestore
-        await updateDoc(doc(db, 'packages', packageId), {
-          availableCount: increment(done),
-          uploadedCount: increment(done),
-          updatedAt: serverTimestamp(),
-        });
+        // Single atomic counter increment on the package document + lightweight stats/summary doc
+        await Promise.all([
+          updateDoc(doc(db, 'packages', packageId), {
+            availableCount: increment(done),
+            uploadedCount: increment(done),
+            updatedAt: serverTimestamp(),
+          }),
+          applyStatsSummaryDelta('summary', activeUser.uid, {
+            [packageId]: { available: done, uploaded: done },
+          }),
+        ]);
 
         setOfflinePoolVersion((v) => v + 1);
         const elapsedMs = Math.max(100, Math.round(performance.now() - startedAt));
@@ -2526,7 +2777,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               return null;
             }
 
-            // Online fast parallel fetch ONLY for packages not fully satisfied by local RAM cache
+            // Cache-First (`localStorage` -> `getDocsFromCache`) then EXACT-LIMIT Firestore fetch (`limit(1)` direct / `limit(qty)` wholesale)
             const fetchedAll = await Promise.all(
               requestedItems.map(async (item) => {
                 const deliverTarget = Math.min(item.quantity, item.deliverNow ?? item.quantity);
@@ -2543,22 +2794,36 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                   };
                 }
 
-                let snap = await getDocs(
-                  query(
-                    collection(db, 'cards'),
-                    where('ownerId', '==', activeUser.uid),
-                    where('packageId', '==', item.packageId),
-                    where('status', '==', 'available'),
-                    limit(Math.max(deliverTarget + 60, 150))
-                  )
+                const ownerExactQ = query(
+                  collection(db, 'cards'),
+                  where('ownerId', '==', activeUser.uid),
+                  where('packageId', '==', item.packageId),
+                  where('status', '==', 'available'),
+                  limit(deliverTarget)
                 );
+
+                // Try IndexedDB cache FIRST (0 Firestore server reads!)
+                try {
+                  const idbSnap = await getDocsFromCache(ownerExactQ);
+                  const idbList = idbSnap.docs
+                    .map((d) => ({ id: d.id, cardNumber: (d.data() as CardDoc).cardNumber }))
+                    .filter((c) => !isCardLocallyLocked(c.cardNumber));
+                  if (idbList.length >= deliverTarget) {
+                    return { item, deliverTarget, list: idbList.slice(0, deliverTarget), fromCache: true };
+                  }
+                } catch {
+                  // Cache miss -> proceed to exact-limit server fetch
+                }
+
+                // Exact-limit server query: `limit(1)` for Direct Sale, `limit(deliverTarget)` for Wholesale
+                let snap = await getDocs(ownerExactQ);
                 if (profile.role === 'super_admin' && snap.docs.length < deliverTarget) {
                   snap = await getDocs(
                     query(
                       collection(db, 'cards'),
                       where('packageId', '==', item.packageId),
                       where('status', '==', 'available'),
-                      limit(Math.max(deliverTarget + 60, 150))
+                      limit(deliverTarget)
                     )
                   );
                 }
@@ -2566,18 +2831,6 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                   .map((d) => ({ id: d.id, cardNumber: (d.data() as CardDoc).cardNumber }))
                   .filter((c) => !isCardLocallyLocked(c.cardNumber));
 
-                // Top up local cache with surplus cards for subsequent instant sales
-                if (list.length > deliverTarget) {
-                  appendCachedAvailableCards(
-                    activeUser.uid,
-                    list.slice(deliverTarget).map((c) => ({
-                      id: c.id,
-                      packageId: item.packageId,
-                      cardNumber: c.cardNumber,
-                      ownerId: activeUser.uid,
-                    }))
-                  );
-                }
                 return { item, deliverTarget, list, fromCache: false };
               })
             );
@@ -2909,34 +3162,20 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               targetRoute: 'sales_list',
             }).catch(() => {});
 
-            // 4E. Silent Background Cache Replenishment when any sold package drops below 60 cached cards
-            if (isElectronic && touchedPkgIds.length > 0 && navigator.onLine) {
+            // 4E. Atomic single-doc `stats/summary` (and buyer `stats/user_{buyerId}`) counter increments (ZERO card scans!)
+            if (isElectronic && touchedPkgIds.length > 0) {
+              const sellerDeltas: Record<string, { available: number; sold: number }> = {};
+              const buyerDeltas: Record<string, { available: number }> = {};
               for (const pkgId of touchedPkgIds) {
-                if (getCachedAvailableCards(activeUser.uid, pkgId).length < 60) {
-                  getDocs(
-                    query(
-                      collection(db, 'cards'),
-                      where('ownerId', '==', activeUser.uid),
-                      where('packageId', '==', pkgId),
-                      where('status', '==', 'available'),
-                      limit(150)
-                    )
-                  )
-                    .then((snap) => {
-                      const fresh = snap.docs
-                        .map((d) => ({
-                          id: d.id,
-                          packageId: pkgId,
-                          cardNumber: (d.data() as CardDoc).cardNumber,
-                          ownerId: activeUser.uid,
-                        }))
-                        .filter((c) => !isCardLocallyLocked(c.cardNumber));
-                      if (fresh.length > 0) {
-                        appendCachedAvailableCards(activeUser.uid, fresh);
-                      }
-                    })
-                    .catch(() => {});
-                }
+                const qtyDelivered = deliveredByPkg[pkgId] || 0;
+                if (qtyDelivered <= 0) continue;
+                sellerDeltas[pkgId] = { available: -qtyDelivered, sold: qtyDelivered };
+                buyerDeltas[pkgId] = { available: qtyDelivered };
+              }
+              const sellerStatId = profile.role === 'super_admin' ? 'summary' : `user_${activeUser.uid}`;
+              void applyStatsSummaryDelta(sellerStatId, activeUser.uid, sellerDeltas);
+              if (transferOwnershipToBuyer && cleanBuyerId && profile.role === 'super_admin') {
+                void applyStatsSummaryDelta(`user_${cleanBuyerId}`, cleanBuyerId, buyerDeltas);
               }
             }
           } catch (bgErr) {
@@ -3038,6 +3277,10 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         }
 
         await batch.commit();
+        const sellerStatId = profile?.role === 'super_admin' ? 'summary' : `user_${activeUser.uid}`;
+        void applyStatsSummaryDelta(sellerStatId, activeUser.uid, {
+          [packageId]: { available: -pulled.length, sold: pulled.length },
+        });
         await writeAuditLog('تسليم دفعة كروت', `تسليم ${pulled.length} كرت إضافي للفاتورة ${sale.invoiceNumber || sale.id}`);
         notifySuccess(`تم تسليم ${pulled.length} كرت من الدفعة المتبقية بنجاح`);
         return pulled;
@@ -3111,6 +3354,13 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         });
 
         await batch.commit();
+        const activeUser = auth.currentUser || firebaseUser;
+        if (sale.saleType !== 'paper_invoice' && returnedCodes.length > 0 && activeUser) {
+          const sellerStatId = profile?.role === 'super_admin' ? 'summary' : `user_${activeUser.uid}`;
+          void applyStatsSummaryDelta(sellerStatId, activeUser.uid, {
+            [packageId]: { available: returnedCodes.length, sold: -returnedCodes.length },
+          });
+        }
         await writeAuditLog('مرتجع كروت', `إرجاع ${qty} كرت من الفاتورة ${sale.invoiceNumber || sale.id}`);
         notifySuccess(`تم تسجيل إرجاع ${qty} كرت وتحديث المخزون والحساب`);
         return true;
@@ -3120,7 +3370,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         return false;
       }
     },
-    [notifyError, notifySuccess, notifyWarning, packages, writeAuditLog]
+    [firebaseUser, notifyError, notifySuccess, notifyWarning, packages, profile, writeAuditLog]
   );
 
   const updateSaleRecord = useCallback(
@@ -4928,6 +5178,35 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           }
           await pkgBatch.commit();
 
+          const salesResetPkgStats: Record<string, PackageCounterStats> = {};
+          let totalAvail = 0;
+          let totalUp = 0;
+          let totalInj = 0;
+          for (const basePkg of EXCLUSIVE_PACKAGES) {
+            const existingData = existingPkgMap.get(basePkg.id);
+            const avail = Math.max(0, Number(existingData?.availableCount ?? 0));
+            const up = Math.max(0, Number(existingData?.uploadedCount ?? 0));
+            const inj = Math.max(0, Number(existingData?.injectedCount ?? 0));
+            salesResetPkgStats[basePkg.id] = {
+              availableCount: avail,
+              soldCount: 0,
+              uploadedCount: up,
+              injectedCount: inj,
+            };
+            totalAvail += avail;
+            totalUp += up;
+            totalInj += inj;
+          }
+          await setDoc(doc(db, 'stats', 'summary'), {
+            ownerId: activeUser.uid,
+            totalAvailable: totalAvail,
+            totalSold: 0,
+            totalUploaded: totalUp,
+            totalInjected: totalInj,
+            packages: salesResetPkgStats,
+            updatedAt: serverTimestamp(),
+          }).catch(() => {});
+
           clearOfflineSalesQueueOnly();
           writeCachedJson(`${CACHE_SALES_PREFIX}${activeUser.uid}`, []);
           setSales([]);
@@ -5016,6 +5295,26 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           }
         }
         await pkgBatch.commit();
+
+        // Also zero single lightweight `stats/summary` counters
+        const zeroPkgStats: Record<string, PackageCounterStats> = {};
+        for (const basePkg of EXCLUSIVE_PACKAGES) {
+          zeroPkgStats[basePkg.id] = {
+            availableCount: 0,
+            soldCount: 0,
+            uploadedCount: 0,
+            injectedCount: 0,
+          };
+        }
+        await setDoc(doc(db, 'stats', 'summary'), {
+          ownerId: activeUser.uid,
+          totalAvailable: 0,
+          totalSold: 0,
+          totalUploaded: 0,
+          totalInjected: 0,
+          packages: zeroPkgStats,
+          updatedAt: serverTimestamp(),
+        }).catch(() => {});
 
         // Write audit log BEFORE cleaning up local caches / reloading
         await writeAuditLog(

@@ -288,6 +288,21 @@
         "packages": { "type": "array" }
       },
       "required": ["backupType", "createdBy", "createdAt", "usersCount", "clientsCount"]
+    },
+    "StatsSummaryDoc": {
+      "title": "StatsSummaryDoc",
+      "description": "Lightweight single-document package inventory counters (available, sold, uploaded, injected) updated atomically via increment",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "totalAvailable": { "type": "number" },
+        "totalSold": { "type": "number" },
+        "totalUploaded": { "type": "number" },
+        "totalInjected": { "type": "number" },
+        "packages": { "type": "object" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["updatedAt"]
     }
   },
   "firestore": {
@@ -298,6 +313,7 @@
     "/registrationRequests/{requestId}": { "schema": { "$ref": "#/entities/RegistrationRequest" }, "description": "Pending account registration requests" },
     "/passwordResetRequests/{requestId}": { "schema": { "$ref": "#/entities/PasswordResetRequest" }, "description": "Pending password reset requests" },
     "/packages/{packageId}": { "schema": { "$ref": "#/entities/PackageDoc" }, "description": "The 8 exclusive Taibah Net voucher packages" },
+    "/stats/{statId}": { "schema": { "$ref": "#/entities/StatsSummaryDoc" }, "description": "Single-document package counters (stats/summary for admin and stats/user_{uid} for agents/clients)" },
     "/cards/{cardId}": { "schema": { "$ref": "#/entities/CardDoc" }, "description": "Electronic voucher card inventory" },
     "/sales/{saleId}": { "schema": { "$ref": "#/entities/SaleDoc" }, "description": "All direct, electronic wholesale, and paper sales" },
     "/customers/{customerId}": { "schema": { "$ref": "#/entities/CustomerAccount" }, "description": "General customer accounting ledger accounts" },

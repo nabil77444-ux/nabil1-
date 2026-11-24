@@ -161,9 +161,6 @@ export function handleFirestoreError(
     const now = Date.now();
     if (now - lastQuotaWarningAt > 30000) {
       lastQuotaWarningAt = now;
-      console.warn(
-        'Firestore daily read quota reached — continuing from local cache until quota resets or database is upgraded.'
-      );
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('taibah:firestore-quota-exceeded'));
       }
@@ -200,20 +197,25 @@ export function isFirestoreOfflineError(error: unknown): boolean {
 }
 
 /**
- * Startup connectivity verification against Firestore server with one automatic retry
- * to handle slow mobile handshakes without false offline errors.
+ * Connectivity verification against Firestore server (called on explicit manual sync).
+ * Gracefully falls back to local cache on offline or quota exhaustion with zero console warnings.
  */
 export async function testFirestoreConnection(attempt = 1): Promise<boolean> {
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
     return true;
   } catch (error) {
+    if (isFirestoreQuotaError(error)) {
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('taibah:firestore-quota-exceeded'));
+      }
+      return false;
+    }
     if (isFirestoreOfflineError(error)) {
       if (attempt < 2 && (typeof navigator === 'undefined' || navigator.onLine)) {
         await new Promise((resolve) => setTimeout(resolve, 1500));
         return testFirestoreConnection(attempt + 1);
       }
-      console.warn('Firestore connection temporarily offline — operating from local cache until reconnected.');
       return false;
     }
     // Permission or not-found still proves live network reachability to Firestore
@@ -227,8 +229,8 @@ export async function testFirestoreConnection(attempt = 1): Promise<boolean> {
 export async function applyAuthPersistence(rememberMe: boolean): Promise<void> {
   try {
     await setPersistence(auth, rememberMe ? browserLocalPersistence : browserSessionPersistence);
-  } catch (err) {
-    console.warn('Unable to update auth persistence:', err);
+  } catch {
+    // Silently keep existing auth persistence in restricted storage environments
   }
 }
 
