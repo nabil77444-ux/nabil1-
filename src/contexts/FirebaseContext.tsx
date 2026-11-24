@@ -33,6 +33,7 @@ import {
   generateSafeDocId,
   handleFirestoreError,
   isFirestoreOfflineError,
+  isFirestoreQuotaError,
   isSuperAdminEmail,
   normalizeDigits,
   OperationType,
@@ -83,6 +84,14 @@ import {
   type OfflineQueuedSale,
 } from '../lib/offlineCards';
 import { setGlobalShareTemplates } from '../utils/shareExport';
+import {
+  clearActiveSession,
+  hasActiveSessionUnlocked,
+  readActiveProfileFromSession,
+  readActiveRouteFromSession,
+  saveActiveProfileToSession,
+  saveActiveRouteToSession,
+} from '../lib/sessionGuard';
 
 export interface SaleExecutionInput {
   saleType: 'direct' | 'electronic_wholesale' | 'paper_invoice';
@@ -486,7 +495,10 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const isOnline = useOnlineStatus();
   const { notifySuccess, notifyError, notifyWarning, notifyInfo } = useFeedback();
 
-  const cachedProfileInitial = useMemo(() => readCachedJson<UserProfile | null>(CACHE_PROFILE_KEY, null), []);
+  const cachedProfileInitial = useMemo(
+    () => readActiveProfileFromSession() || readCachedJson<UserProfile | null>(CACHE_PROFILE_KEY, null),
+    []
+  );
 
   const [authReady, setAuthReady] = useState(false);
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
@@ -498,6 +510,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [syncNonce, setSyncNonce] = useState(0);
   const [adminDocApproved, setAdminDocApproved] = useState(false);
   const [adminApprovalChecking, setAdminApprovalChecking] = useState(false);
+  const explicitSignOutRef = useRef<boolean>(false);
   const bootstrappingUidRef = useRef<string | null>(null);
   const pendingBootstrapRef = useRef<boolean>(false);
   const pendingProfileLookupRef = useRef<boolean>(false);
@@ -505,7 +518,13 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const inFlightOpsRef = useRef<Set<string>>(new Set());
 
   // Update 12: Active route & pagination limits for lazy on-demand Firestore subscriptions
-  const [activeRoute, setActiveRoute] = useState<AppRoute>('home');
+  const [activeRoute, setActiveRouteState] = useState<AppRoute>(
+    () => readActiveRouteFromSession() || 'home'
+  );
+  const setActiveRoute = useCallback((next: AppRoute) => {
+    setActiveRouteState(next);
+    saveActiveRouteToSession(next);
+  }, []);
   const [salesLimit, setSalesLimit] = useState(40);
   const [customersLimit, setCustomersLimit] = useState(50);
   const [auditLogsLimit, setAuditLogsLimit] = useState(40);
@@ -596,7 +615,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     };
   }, []);
 
-  // 2. Non-blocking startup connectivity probe
+  // 2. Non-blocking startup connectivity probe + throttled quota-exceeded Arabic notice
   useEffect(() => {
     let active = true;
     const probeTimer = window.setTimeout(() => {
@@ -609,19 +628,44 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       });
     }, 300);
 
+    let notifiedQuota = false;
+    const onQuotaExceeded = () => {
+      if (notifiedQuota) return;
+      notifiedQuota = true;
+      notifyWarning(
+        'تم بلوغ الحد المجاني اليومي لقراءات قاعدة البيانات السحابية — يعمل التطبيق حالياً من الذاكرة المحلية، وتتجدد الحصة تلقائياً غداً أو بترقية الخطة.'
+      );
+    };
+    window.addEventListener('taibah:firestore-quota-exceeded', onQuotaExceeded);
+
     return () => {
       active = false;
       window.clearTimeout(probeTimer);
+      window.removeEventListener('taibah:firestore-quota-exceeded', onQuotaExceeded);
     };
-  }, [isOnline]);
+  }, [isOnline, notifyWarning]);
 
-  // Auth listener with instant Offline-First local cache hydration & Super Admin instant entry
+  // Keep active verified profile mirrored in sessionStorage during active run
+  useEffect(() => {
+    if (profile && hasActiveSessionUnlocked()) {
+      saveActiveProfileToSession(profile);
+    }
+  }, [profile]);
+
+  // Auth listener decoupled from kicking out active in-progress sessions
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (user) => {
-      setFirebaseUser(user);
       setVerificationVersion((v) => v + 1);
       setAuthReady(true);
+
       if (!user) {
+        // CRITICAL: Never kick an actively unlocked user out on transient null auth emissions
+        // (e.g., Android file picker, keyboard focus, visibilitychange, blur, or token refresh).
+        // Only clear state on explicit manual sign-out or when no active session is unlocked.
+        if (hasActiveSessionUnlocked() && !explicitSignOutRef.current) {
+          return;
+        }
+        setFirebaseUser(null);
         bootstrappingUidRef.current = null;
         pendingBootstrapRef.current = false;
         pendingProfileLookupRef.current = false;
@@ -629,6 +673,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         setAdminDocApproved(false);
         setAdminApprovalChecking(false);
         writeCachedJson(CACHE_PROFILE_KEY, null);
+        saveActiveProfileToSession(null);
         setProfile(null);
         setProfileLoading(false);
         setRawPackages([]);
@@ -644,8 +689,10 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         setAuditLogs([]);
         setManagedUsers([]);
       } else {
-        const cached = readProfileFromLocalCache(user);
-        if (cached) {
+        explicitSignOutRef.current = false;
+        setFirebaseUser(user);
+        const cached = readActiveProfileFromSession() || readProfileFromLocalCache(user);
+        if (cached && cached.uid === user.uid) {
           setProfile(cached);
           if (cached.role === 'super_admin' && cached.status === 'active') {
             setAdminDocApproved(true);
@@ -717,6 +764,15 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const currentUser = auth.currentUser || user;
     if (!isSuperAdminEmail(currentUser.email)) return false;
     if (!currentUser.emailVerified && !adminDocApproved) return false;
+    const bootstrapCacheKey = `taibah_sa_bootstrapped_v1_${currentUser.uid}`;
+    try {
+      if (localStorage.getItem(bootstrapCacheKey) === '1' && rawPackages.length >= EXCLUSIVE_PACKAGES.length) {
+        setAdminDocApproved(true);
+        return true;
+      }
+    } catch {
+      // ignore storage access errors
+    }
     if (typeof navigator !== 'undefined' && !navigator.onLine) {
       pendingBootstrapRef.current = true;
       return false;
@@ -823,11 +879,20 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         })(),
       ]);
 
+      try {
+        localStorage.setItem(bootstrapCacheKey, '1');
+      } catch {
+        // ignore storage errors
+      }
       pendingBootstrapRef.current = false;
       setFirestoreConnected(true);
       return true;
     } catch (err) {
       bootstrappingUidRef.current = null;
+      if (isFirestoreQuotaError(err)) {
+        handleFirestoreError(err, OperationType.WRITE, 'bootstrap_super_admin');
+        return false;
+      }
       if (isFirestoreOfflineError(err)) {
         pendingBootstrapRef.current = true;
         setFirestoreConnected(false);
@@ -839,7 +904,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       handleFirestoreError(err, OperationType.WRITE, 'bootstrap_super_admin');
       return false;
     }
-  }, [adminDocApproved]);
+  }, [adminDocApproved, rawPackages.length]);
 
   // Smart Multi-Strategy Account Profile Lookup (UID -> Email -> Phone across `users` & `clients`)
   // + Automatic UID linking (`setDoc` with `merge: true`) + Offline-First local cache fallback
@@ -1416,13 +1481,14 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       )
     );
 
-    // 1B. STRICT ACCOUNT ISOLATION + OFFLINE CARD POOL SYNC
+    // 1B. STRICT ACCOUNT ISOLATION + LOW-READ OFFLINE CARD POOL SYNC
     // Non-admins (agent/client) ONLY see their own cards (`ownerId == uid`), never Admin stock.
-    // Super Admin caches a lightweight pool of own available cards for seamless offline selling.
+    // Super Admin warms up a small, throttled offline reserve ONLY when local cache is empty
+    // (slashing startup Firestore reads by >95% to protect daily quota).
     if (!isAdmin) {
       unsubscribers.push(
         onSnapshot(
-          query(collection(db, 'cards'), where('ownerId', '==', activeUser.uid), limit(1500)),
+          query(collection(db, 'cards'), where('ownerId', '==', activeUser.uid), limit(500)),
           (snap) => {
             const availCounts: Record<string, number> = {};
             const soldCounts: Record<string, number> = {};
@@ -1449,53 +1515,59 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         )
       );
     } else if (navigator.onLine) {
-      // Parallel background warm-up across all 8 packages (up to 250 cards/package) so card retrieval is 0ms instant!
-      Promise.allSettled(
-        EXCLUSIVE_PACKAGES.map(async (pkg) => {
-          let snap = await getDocs(
-            query(
-              collection(db, 'cards'),
-              where('ownerId', '==', activeUser.uid),
-              where('packageId', '==', pkg.id),
-              where('status', '==', 'available'),
-              limit(250)
-            )
-          );
-          if (snap.docs.length === 0) {
-            snap = await getDocs(
+      const existingCached = getCachedAvailableCards(activeUser.uid);
+      const warmupTsKey = `taibah_card_warmup_ts_v1_${activeUser.uid}`;
+      let lastWarmupTs = 0;
+      try {
+        lastWarmupTs = Number(localStorage.getItem(warmupTsKey) || '0');
+      } catch {
+        lastWarmupTs = 0;
+      }
+      const thirtyMinutesMs = 30 * 60 * 1000;
+      const shouldWarmup = existingCached.length === 0 && Date.now() - lastWarmupTs > thirtyMinutesMs;
+
+      if (shouldWarmup) {
+        try {
+          localStorage.setItem(warmupTsKey, String(Date.now()));
+        } catch {
+          // ignore storage errors
+        }
+        Promise.allSettled(
+          EXCLUSIVE_PACKAGES.map((pkg) =>
+            getDocs(
               query(
                 collection(db, 'cards'),
+                where('ownerId', '==', activeUser.uid),
                 where('packageId', '==', pkg.id),
                 where('status', '==', 'available'),
-                limit(250)
+                limit(20)
               )
-            );
-          }
-          return snap;
-        })
-      )
-        .then((results) => {
-          const cachedAvail: CachedAvailableCard[] = [];
-          for (const res of results) {
-            if (res.status !== 'fulfilled') continue;
-            for (const d of res.value.docs) {
-              const data = d.data() as CardDoc;
-              if (!isCardLocallyLocked(data.cardNumber)) {
-                cachedAvail.push({
-                  id: d.id,
-                  packageId: data.packageId,
-                  cardNumber: data.cardNumber,
-                  ownerId: activeUser.uid,
-                });
+            )
+          )
+        )
+          .then((results) => {
+            const cachedAvail: CachedAvailableCard[] = [];
+            for (const res of results) {
+              if (res.status !== 'fulfilled') continue;
+              for (const d of res.value.docs) {
+                const data = d.data() as CardDoc;
+                if (!isCardLocallyLocked(data.cardNumber)) {
+                  cachedAvail.push({
+                    id: d.id,
+                    packageId: data.packageId,
+                    cardNumber: data.cardNumber,
+                    ownerId: activeUser.uid,
+                  });
+                }
               }
             }
-          }
-          if (cachedAvail.length > 0) {
-            saveCachedAvailableCards(activeUser.uid, cachedAvail);
-            setOfflinePoolVersion((v) => v + 1);
-          }
-        })
-        .catch(() => {});
+            if (cachedAvail.length > 0) {
+              saveCachedAvailableCards(activeUser.uid, cachedAvail);
+              setOfflinePoolVersion((v) => v + 1);
+            }
+          })
+          .catch(() => {});
+      }
     }
 
     // 2. Lightweight Notifications Stream (limit 30)
@@ -2083,6 +2155,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const signOutUser = useCallback(async () => {
     try {
+      explicitSignOutRef.current = true;
+      clearActiveSession(true);
       clearMemorySessionCredentials();
       await firebaseSignOut(auth);
       notifySuccess('تم تسجيل الخروج بأمان');
@@ -2177,19 +2251,22 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         return { totalParsed: 0, importedCount: 0, duplicateCount: 0, invalidCount: 0, elapsedMs: 0 };
       }
 
-      // Fast O(n) local validation & deduplication via Set
+      // Fast O(n) in-memory validation & deduplication via Set (zero per-card Firestore reads!)
       const validRegex = /^[0-9]{10,11}$/;
+      const existingPoolSet = new Set<string>(
+        getCachedAvailableCards(activeUser.uid).map((c) => c.cardNumber)
+      );
       const uniqueSet = new Set<string>();
       let invalidCount = 0;
       let duplicateCount = 0;
 
       for (let i = 0; i < rawCardNumbers.length; i++) {
-        const clean = rawCardNumbers[i].trim();
+        const clean = String(rawCardNumbers[i] ?? '').trim();
         if (!validRegex.test(clean)) {
           invalidCount++;
           continue;
         }
-        if (uniqueSet.has(clean)) {
+        if (uniqueSet.has(clean) || existingPoolSet.has(clean)) {
           duplicateCount++;
           continue;
         }
@@ -2209,8 +2286,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       }
 
       const batchId = generateSafeDocId('batch');
-      const CHUNK_SIZE = 500; // Exact Firestore maximum 500 writes per batch
-      const PARALLEL_WAVES = 10; // Fire up to 10 batches (5,000 cards) simultaneously via Promise.all
+      const CHUNK_SIZE = 480; // Optimal 450–500 cards per Firestore writeBatch
+      const PARALLEL_WAVES = 10; // Commit batches in parallel via Promise.all
       const chunks: string[][] = [];
       for (let i = 0; i < toInsert.length; i += CHUNK_SIZE) {
         chunks.push(toInsert.slice(i, i + CHUNK_SIZE));
@@ -5033,6 +5110,11 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         );
 
         window.setTimeout(() => {
+          try {
+            window.sessionStorage.setItem('taibah_post_reset_unlock_once', '1');
+          } catch {
+            // ignore storage restrictions
+          }
           window.location.reload();
         }, 700);
 

@@ -40,10 +40,33 @@ jobs:
       - name: Install Dependencies
         run: npm ci --no-audit --no-fund
 
-      - name: TypeScript Lint & Production Web Build
+      - name: TypeScript Lint, Production Web Build & OTA Bundle (update.zip + version.json)
+        env:
+          VITE_GITHUB_REPO: ${{ github.repository }}
+          VITE_APP_VERSION: 2.0.${{ github.run_number }}
+          VITE_NATIVE_VERSION: 2.0.${{ github.run_number }}
         run: |
+          set -euo pipefail
           npm run lint
           npm run build
+          rm -f update.zip version.json
+          (cd dist && zip -r -q ../update.zip .)
+          test -s update.zip || { echo "::error::update.zip was not created"; exit 1; }
+          OTA_SIZE_MB=$(python3 -c 'import os; print(round(os.path.getsize("update.zip") / (1024 * 1024), 2))')
+          cat > version.json <<EOF
+          {
+            "version": "2.0.${GITHUB_RUN_NUMBER}",
+            "sizeMb": ${OTA_SIZE_MB},
+            "notes": "تحديث خفيف وسريع لتطبيق كروت طيبة نت — تحسينات الواجهة والأداء والمزامنة السحابية.",
+            "otaUrl": "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/update.zip",
+            "apkUrl": "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/TaibahNet-Cards.apk",
+            "minNativeVersion": "2.0.0",
+            "publishedAt": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          }
+          EOF
+          echo "=== Generated OTA Manifest (version.json) ==="
+          cat version.json
+          ls -lh update.zip
 
       - name: Initialize & Sync Capacitor Android Project with Native Plugins
         run: |
@@ -333,21 +356,25 @@ jobs:
           path: TaibahNet-Cards.apk
           retention-days: 90
 
-      - name: Publish Direct APK to GitHub Releases (latest)
+      - name: Publish Direct APK & Lightweight OTA Bundle to GitHub Releases (latest)
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
-          name: كروت طيبة نت — TAIBAH NET (Android Release APK)
+          name: كروت طيبة نت — TAIBAH NET (Android Release APK + OTA)
           body: |
-            الإصدار النهائي الجاهز للتثبيت والتحديث المباشر فوق النسخة السابقة من تطبيق **كروت طيبة نت – TAIBAH NET**.
+            الإصدار النهائي الجاهز للتثبيت والتحديث المباشر أو التحديث الخفيف (OTA) لتطبيق **كروت طيبة نت – TAIBAH NET**.
             - **applicationId:** `net.taibah.wireless`
             - **الإصدار:** `${{ env.APK_VERSION_NAME }}` (`versionCode: ${{ env.APK_VERSION_CODE }}`)
             - **التوافق:** Android 6.0+ (`minSdkVersion = 23`) مع أيقونة Adaptive Icon دائرية متوازنة بدون قص
             - **حالة التوقيع:** `${{ env.SIGNING_STATUS }}`
+            - يدعم التحديث التلقائي الخفيف (`update.zip` + `version.json`) مباشرة من داخل التطبيق دون إعادة تحميل APK
             - يدعم الدخول بالبصمة والوجه عبر **Android BiometricPrompt** والعمل أوفلاين بالكامل (Offline-First) دون تكرار بيع أي كرت
-            - يدعم مشاركة الفواتير والكشوفات (PDF عربي + صور HD) وجلب جهات الاتصال مباشرة من الهاتف
+            - يدعم مشاركة الفواتير والكشوفات (PDF عربي + صور HD) وجلب جهات الاتصال مباشرة من سجل الهاتف الرسمي
             - مزامنة لحظية مع Firebase Firestore
-          files: TaibahNet-Cards.apk
+          files: |
+            TaibahNet-Cards.apk
+            update.zip
+            version.json
           make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

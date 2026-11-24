@@ -301,7 +301,7 @@ export const TopupRequestsScreen: React.FC<TopupRequestsScreenProps> = ({ hideNu
                 return (
                   <div
                     key={req.id}
-                    className="rounded-2xl border-2 border-slate-200 dark:border-slate-700 p-3.5 space-y-2.5"
+                    className="rounded-2xl border-2 border-[#D4AF37]/70 dark:border-[#D4AF37]/55 p-3.5 space-y-2.5 shadow-sm"
                   >
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-xs font-extrabold tabular-nums">
@@ -470,7 +470,7 @@ export const TopupRequestsScreen: React.FC<TopupRequestsScreenProps> = ({ hideNu
                 value={reqNotes}
                 onChange={(e) => setReqNotes(e.target.value)}
                 placeholder="ملاحظات إضافية لطلب التغذية (اختياري)"
-                className="w-full min-h-[42px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold"
+                className="w-full min-h-[42px] rounded-xl border-2 border-[#1A365D]/65 dark:border-[#60A5FA]/65 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold shadow-sm focus:border-[#D4AF37] focus:outline-none"
               />
 
               <div className="rounded-xl bg-[#1A365D] text-white p-3 flex items-center justify-between text-xs font-extrabold tabular-nums">
@@ -510,7 +510,7 @@ export const TopupRequestsScreen: React.FC<TopupRequestsScreenProps> = ({ hideNu
               value={rejectReason}
               onChange={(e) => setRejectReason(e.target.value)}
               placeholder="اكتب سبب الرفض لإشعار مقدم الطلب..."
-              className="w-full rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 p-3 text-xs font-bold"
+              className="w-full rounded-xl border-2 border-red-500/75 dark:border-red-400/70 bg-slate-50 dark:bg-slate-800 p-3 text-xs font-bold shadow-sm focus:border-red-600 focus:outline-none"
             />
             <button
               type="button"

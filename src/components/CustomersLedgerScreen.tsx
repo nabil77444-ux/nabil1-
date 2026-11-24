@@ -177,10 +177,7 @@ export const CustomersLedgerScreen: React.FC<CustomersLedgerScreenProps> = ({ hi
     const dirWord = params.direction === 'debit' ? 'عليك' : 'لك';
     const amtText = formatNumEn(Math.abs(Math.round(params.amount)));
     const roundedBal = Math.round(params.currentBalance);
-    const balanceText =
-      roundedBal < 0
-        ? `${formatNumEn(Math.abs(roundedBal))} ر.ي (لك)`
-        : `${formatNumEn(roundedBal)} ر.ي`;
+    const balanceText = `${formatNumEn(Math.abs(roundedBal))} ر.ي`;
     return [
       `الأخ / ${params.customerName}`,
       `تم إضافة ${amtText} ر.ي ${dirWord}`,
@@ -416,15 +413,16 @@ export const CustomersLedgerScreen: React.FC<CustomersLedgerScreenProps> = ({ hi
       </div>
 
       {/* Search & Category Filter */}
-      <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-3 space-y-2.5">
+      <div className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37]/80 p-3 space-y-2.5 shadow-sm">
         <div className="relative">
-          <Search className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2" />
+          <Search className="w-4 h-4 text-[#1A365D] dark:text-[#FDE68A] absolute right-3 top-1/2 -translate-y-1/2" />
           <input
             type="text"
+            autoComplete="off"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="بحث باسم العميل أو رقم الهاتف..."
-            className="w-full min-h-[42px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 pr-9 pl-3 text-xs font-bold focus:border-[#D4AF37] focus:outline-none"
+            className="w-full min-h-[42px] rounded-xl border-2 border-[#1A365D]/70 dark:border-[#60A5FA]/70 bg-slate-50 dark:bg-slate-800 pr-9 pl-3 text-xs font-extrabold shadow-xs focus:border-[#D4AF37] focus:outline-none"
           />
         </div>
         <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5">
@@ -618,10 +616,10 @@ export const CustomersLedgerScreen: React.FC<CustomersLedgerScreenProps> = ({ hi
                   <button
                     type="button"
                     onClick={() => setEntryType('debit')}
-                    className={`min-h-[36px] rounded-xl text-[11px] font-extrabold flex items-center justify-center gap-1 ${
+                    className={`min-h-[36px] rounded-xl border-2 text-[11px] font-extrabold flex items-center justify-center gap-1 shadow-xs ${
                       entryType === 'debit'
-                        ? 'bg-red-600 text-white'
-                        : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700'
+                        ? 'bg-red-600 text-white border-red-800'
+                        : 'bg-red-50/70 dark:bg-slate-900 border-red-500/75 text-red-700 dark:text-red-300'
                     }`}
                   >
                     <ArrowUpRight className="w-3.5 h-3.5" />
@@ -630,10 +628,10 @@ export const CustomersLedgerScreen: React.FC<CustomersLedgerScreenProps> = ({ hi
                   <button
                     type="button"
                     onClick={() => setEntryType('credit')}
-                    className={`min-h-[36px] rounded-xl text-[11px] font-extrabold flex items-center justify-center gap-1 ${
+                    className={`min-h-[36px] rounded-xl border-2 text-[11px] font-extrabold flex items-center justify-center gap-1 shadow-xs ${
                       entryType === 'credit'
-                        ? 'bg-emerald-600 text-white'
-                        : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700'
+                        ? 'bg-emerald-600 text-white border-emerald-800'
+                        : 'bg-emerald-50/70 dark:bg-slate-900 border-emerald-600/75 text-emerald-800 dark:text-emerald-300'
                     }`}
                   >
                     <ArrowDownLeft className="w-3.5 h-3.5" />
@@ -642,10 +640,10 @@ export const CustomersLedgerScreen: React.FC<CustomersLedgerScreenProps> = ({ hi
                   <button
                     type="button"
                     onClick={() => setEntryType('adjustment')}
-                    className={`min-h-[36px] rounded-xl text-[11px] font-extrabold ${
+                    className={`min-h-[36px] rounded-xl border-2 text-[11px] font-extrabold shadow-xs ${
                       entryType === 'adjustment'
-                        ? 'bg-amber-600 text-white'
-                        : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700'
+                        ? 'bg-amber-600 text-white border-amber-800'
+                        : 'bg-amber-50/75 dark:bg-slate-900 border-amber-600/75 text-amber-900 dark:text-amber-300'
                     }`}
                   >
                     قيد تصحيح
@@ -655,19 +653,21 @@ export const CustomersLedgerScreen: React.FC<CustomersLedgerScreenProps> = ({ hi
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   <input
                     type="number"
+                    inputMode="numeric"
                     required
                     min={1}
-                    value={entryAmount}
+                    value={entryAmount === '0' ? '' : entryAmount}
+                    onFocus={(e) => e.currentTarget.select()}
                     onChange={(e) => setEntryAmount(e.target.value)}
                     placeholder="المبلغ بالريال اليمني"
-                    className="min-h-[40px] rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 text-xs font-extrabold tabular-nums"
+                    className="min-h-[40px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-white dark:bg-slate-900 px-3 text-xs font-extrabold tabular-nums focus:border-[#D4AF37] focus:outline-none"
                   />
                   <input
                     type="text"
                     value={entryDesc}
                     onChange={(e) => setEntryDesc(e.target.value)}
-                    placeholder="البيان / سبب القيد (مثال: دفعة نقدية)"
-                    className="min-h-[40px] rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 text-xs font-bold"
+                    placeholder="البيان / سبب القيد (مثال: تسليم نقدي أو رصيد)"
+                    className="min-h-[40px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-white dark:bg-slate-900 px-3 text-xs font-bold focus:border-[#D4AF37] focus:outline-none"
                   />
                 </div>
 
@@ -856,10 +856,11 @@ export const CustomersLedgerScreen: React.FC<CustomersLedgerScreenProps> = ({ hi
               <input
                 type="text"
                 required
+                autoComplete="off"
                 value={formName}
                 onChange={(e) => setFormName(e.target.value)}
                 placeholder="مثال: بقالة النور / حساب خاص"
-                className="w-full min-h-[42px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold"
+                className="w-full min-h-[42px] rounded-xl border-2 border-[#1A365D]/65 dark:border-[#60A5FA]/65 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold shadow-sm focus:border-[#D4AF37] focus:outline-none"
               />
             </div>
 
@@ -868,10 +869,12 @@ export const CustomersLedgerScreen: React.FC<CustomersLedgerScreenProps> = ({ hi
               <div className="flex items-center gap-1.5">
                 <input
                   type="tel"
+                  inputMode="numeric"
+                  autoComplete="off"
                   value={formPhone}
                   onChange={(e) => setFormPhone(e.target.value)}
                   placeholder="77xxxxxxx"
-                  className="flex-1 min-h-[42px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold tabular-nums"
+                  className="flex-1 min-h-[42px] rounded-xl border-2 border-[#1A365D]/65 dark:border-[#60A5FA]/65 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold tabular-nums shadow-sm focus:border-[#D4AF37] focus:outline-none"
                 />
                 <ContactPickerButton
                   onSelect={(c) => {
@@ -887,7 +890,7 @@ export const CustomersLedgerScreen: React.FC<CustomersLedgerScreenProps> = ({ hi
               <select
                 value={formCategory}
                 onChange={(e) => setFormCategory(e.target.value)}
-                className="w-full min-h-[42px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold"
+                className="w-full min-h-[42px] rounded-xl border-2 border-[#1A365D]/65 dark:border-[#60A5FA]/65 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold shadow-sm focus:border-[#D4AF37] focus:outline-none"
               >
                 {ACCOUNT_CATEGORIES.filter((c) => c !== 'الكل').map((cat) => (
                   <option key={cat} value={cat}>
@@ -903,22 +906,28 @@ export const CustomersLedgerScreen: React.FC<CustomersLedgerScreenProps> = ({ hi
                   <label className="block text-[11px] font-extrabold mb-1 text-red-600">رصيد افتتاحي عليه</label>
                   <input
                     type="number"
+                    inputMode="numeric"
+                    autoComplete="off"
                     min={0}
-                    value={formInitialDebit}
+                    value={formInitialDebit === '0' ? '' : formInitialDebit}
+                    onFocus={(e) => e.currentTarget.select()}
                     onChange={(e) => setFormInitialDebit(e.target.value)}
                     placeholder="0"
-                    className="w-full min-h-[40px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold tabular-nums"
+                    className="w-full min-h-[40px] rounded-xl border-2 border-red-500/70 dark:border-red-400/70 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold tabular-nums shadow-sm focus:border-[#D4AF37] focus:outline-none"
                   />
                 </div>
                 <div>
                   <label className="block text-[11px] font-extrabold mb-1 text-emerald-600">رصيد افتتاحي له</label>
                   <input
                     type="number"
+                    inputMode="numeric"
+                    autoComplete="off"
                     min={0}
-                    value={formInitialCredit}
+                    value={formInitialCredit === '0' ? '' : formInitialCredit}
+                    onFocus={(e) => e.currentTarget.select()}
                     onChange={(e) => setFormInitialCredit(e.target.value)}
                     placeholder="0"
-                    className="w-full min-h-[40px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold tabular-nums"
+                    className="w-full min-h-[40px] rounded-xl border-2 border-emerald-600/70 dark:border-emerald-400/70 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold tabular-nums shadow-sm focus:border-[#D4AF37] focus:outline-none"
                   />
                 </div>
               </div>
@@ -928,10 +937,11 @@ export const CustomersLedgerScreen: React.FC<CustomersLedgerScreenProps> = ({ hi
               <label className="block text-xs font-extrabold mb-1">ملاحظات</label>
               <input
                 type="text"
+                autoComplete="off"
                 value={formNotes}
                 onChange={(e) => setFormNotes(e.target.value)}
                 placeholder="ملاحظات إضافية (اختياري)"
-                className="w-full min-h-[40px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold"
+                className="w-full min-h-[40px] rounded-xl border-2 border-[#1A365D]/65 dark:border-[#60A5FA]/65 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold shadow-sm focus:border-[#D4AF37] focus:outline-none"
               />
             </div>
 

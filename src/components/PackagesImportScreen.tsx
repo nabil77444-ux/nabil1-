@@ -95,52 +95,100 @@ export const PackagesImportScreen: React.FC<PackagesImportScreenProps> = ({ hide
         }
         extractedText = parts.join('\n');
       } else if (ext === 'pdf') {
-        setParsingStatus('جاري استخراج أرقام الكروت من ملف PDF بسرعة فائقة...');
+        const parseStart = performance.now();
+        setParsingStatus('جاري استخراج أرقام الكروت من ملف PDF بالتوازي بسرعة فائقة...');
         const buffer = await file.arrayBuffer();
+        const bytes = new Uint8Array(buffer);
+        let pdfCodes: string[] = [];
+
         try {
           const pdfjsLib = await import('pdfjs-dist');
-          pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-            'pdfjs-dist/build/pdf.worker.min.mjs',
-            import.meta.url
-          ).toString();
+          try {
+            pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+              'pdfjs-dist/build/pdf.worker.min.mjs',
+              import.meta.url
+            ).toString();
+          } catch {
+            // Worker URL fallback handled gracefully by pdfjs
+          }
+
           const loadingTask = pdfjsLib.getDocument({
-            data: new Uint8Array(buffer),
+            data: bytes,
             disableFontFace: true,
             useSystemFonts: true,
           });
           const pdf = await loadingTask.promise;
-          const totalPages = pdf.numPages;
+          const totalPages = pdf.numPages || 0;
           const allPageCodes: string[][] = new Array(totalPages);
-          const BATCH_PAGES = 28;
-          for (let start = 1; start <= totalPages; start += BATCH_PAGES) {
-            const end = Math.min(totalPages, start + BATCH_PAGES - 1);
-            setParsingStatus(`استخراج سريع للصفحات ${start} - ${end} من ${totalPages}...`);
-            const batchPromises: Array<Promise<void>> = [];
-            for (let pageNum = start; pageNum <= end; pageNum++) {
-              batchPromises.push(
-                pdf.getPage(pageNum).then(async (page) => {
-                  try {
-                    const content = await page.getTextContent({ includeMarkedContent: false });
-                    let joined = '';
-                    for (let i = 0; i < content.items.length; i++) {
-                      const item = content.items[i];
-                      if ('str' in item && item.str) {
-                        joined += item.str + ' ';
-                      }
+
+          // Step 1 (Primary Ultra-Fast Path): Parallel direct text extraction across all pages (ZERO Canvas, ZERO OCR)
+          const PAGE_WAVE = 40;
+          for (let start = 1; start <= totalPages; start += PAGE_WAVE) {
+            const end = Math.min(totalPages, start + PAGE_WAVE - 1);
+            setParsingStatus(`استخراج نصي فائق السرعة للصفحات ${start} - ${end} من ${totalPages}...`);
+            const pageNumbers = Array.from({ length: end - start + 1 }, (_, i) => start + i);
+            await Promise.all(
+              pageNumbers.map(async (pageNum) => {
+                const page = await pdf.getPage(pageNum);
+                try {
+                  const content = await page.getTextContent({ includeMarkedContent: false });
+                  const items = content?.items || [];
+                  const chunks: string[] = [];
+                  for (let i = 0; i < items.length; i++) {
+                    const item = items[i];
+                    if (item && 'str' in item && item.str) {
+                      chunks.push(item.str);
                     }
-                    allPageCodes[pageNum - 1] = extractVoucherNumbers(joined);
-                  } finally {
-                    page.cleanup();
                   }
-                })
-              );
-            }
-            await Promise.all(batchPromises);
+                  allPageCodes[pageNum - 1] = extractVoucherNumbers(chunks.join(' '));
+                } finally {
+                  page.cleanup();
+                }
+              })
+            );
           }
+
+          pdfCodes = allPageCodes.flat();
+
+          // Step 2 (OCR Fallback ONLY if PDF is a scanned image with 0 extractable text codes)
+          if (pdfCodes.length === 0 && totalPages > 0) {
+            const maxOcrPages = Math.min(totalPages, 15);
+            setParsingStatus(
+              `الملف عبارة عن صور ممسوحة — جاري تشغيل خطة OCR البديلة (${maxOcrPages} صفحة)...`
+            );
+            const Tesseract = await import('tesseract.js');
+            const ocrParts: string[] = [];
+            for (let pageNum = 1; pageNum <= maxOcrPages; pageNum++) {
+              setParsingStatus(`قراءة ضوئية (OCR) للصفحة ${pageNum} من ${maxOcrPages}...`);
+              const page = await pdf.getPage(pageNum);
+              try {
+                const viewport = page.getViewport({ scale: 1.75 });
+                const canvas = document.createElement('canvas');
+                canvas.width = Math.round(viewport.width);
+                canvas.height = Math.round(viewport.height);
+                const ctx = canvas.getContext('2d');
+                if (ctx) {
+                  await page.render({ canvasContext: ctx, viewport, canvas }).promise;
+                  const ocrRes = await Tesseract.recognize(canvas, 'eng');
+                  if (ocrRes?.data?.text) {
+                    ocrParts.push(ocrRes.data.text);
+                  }
+                }
+              } finally {
+                page.cleanup();
+              }
+            }
+            pdfCodes = extractVoucherNumbers(ocrParts.join('\n'));
+          }
+
           await loadingTask.destroy();
-          extractedText = allPageCodes.flat().join('\n');
+          extractedText = pdfCodes.join('\n');
+          const sec = ((performance.now() - parseStart) / 1000).toFixed(1);
+          if (pdfCodes.length > 0) {
+            setParsingStatus(`تم استخراج ${pdfCodes.length} رقم خلال ${sec} ثانية ⚡`);
+          }
         } catch {
-          // Clean fallback: decode raw PDF bytes text stream if worker blocked
+          // Clean fallback: decode raw PDF bytes text stream if pdfjs worker is restricted
           const decoder = new TextDecoder('latin1');
           extractedText = decoder.decode(buffer);
         }
@@ -154,17 +202,21 @@ export const PackagesImportScreen: React.FC<PackagesImportScreenProps> = ({ hide
             }
           },
         });
-        extractedText = result.data.text || '';
+        extractedText = result?.data?.text || '';
       } else {
         extractedText = await file.text();
       }
 
-      const codes = extractVoucherNumbers(extractedText);
-      if (codes.length === 0) {
+      // Immediate in-memory Set deduplication
+      const allCodes = extractVoucherNumbers(extractedText);
+      const uniqueCodes = Array.from(new Set(allCodes));
+      if (uniqueCodes.length === 0) {
         notifyInfo('لم يُعثر على أرقام كروت (10 أو 11 خانة)', 'تأكد من وضوح الملف أو الصق الأرقام مباشرة.');
       } else {
-        setRawText((prev) => (prev.trim() ? `${prev.trim()}\n${codes.join('\n')}` : codes.join('\n')));
-        notifySuccess(`تم استخراج ${codes.length} رقم كرت من ${file.name} بنجاح`);
+        setRawText((prev) =>
+          prev.trim() ? `${prev.trim()}\n${uniqueCodes.join('\n')}` : uniqueCodes.join('\n')
+        );
+        notifySuccess(`تم استخراج ${uniqueCodes.length} رقم كرت فريد من ${file.name} بنجاح ⚡`);
       }
     } catch {
       notifyError('تعذر قراءة الملف', 'جرّب ملف Excel / CSV / TXT / PDF أو الصق الأرقام مباشرة.');
@@ -379,7 +431,7 @@ export const PackagesImportScreen: React.FC<PackagesImportScreenProps> = ({ hide
                   value={rawText}
                   onChange={(e) => setRawText(e.target.value)}
                   placeholder={'1234567890\n98765432101\n...'}
-                  className="w-full rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 p-3 font-mono text-xs font-bold focus:border-[#D4AF37] focus:outline-none"
+                  className="w-full rounded-xl border-2 border-[#1A365D]/70 dark:border-[#60A5FA]/70 bg-slate-50 dark:bg-slate-800 p-3 font-mono text-xs font-bold shadow-xs focus:border-[#D4AF37] focus:outline-none"
                 />
               </div>
 

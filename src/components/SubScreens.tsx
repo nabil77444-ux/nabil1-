@@ -6,6 +6,7 @@ import {
   BellRing,
   CheckCheck,
   DatabaseBackup,
+  DownloadCloud,
   FileClock,
   FileText,
   Fingerprint,
@@ -18,7 +19,6 @@ import {
   Plus,
   RotateCcw,
   Save,
-  ScanFace,
   Search,
   Settings,
   ShieldCheck,
@@ -31,13 +31,15 @@ import {
 import { useFirebase } from '../contexts/FirebaseContext';
 import { useFeedback } from '../lib/feedback';
 import {
-  disableBiometricMethod,
+  clearBiometricEnrollment,
   enrollDeviceBiometric,
   getBiometricMethodStatus,
   getMemorySessionCredentials,
   type BiometricMethod,
 } from '../lib/biometric';
+import { getInstalledAppVersion } from '../services/updaterService';
 import { DirectSaleScreen } from './DirectSaleScreen';
+import { ErrorBoundary } from './ErrorBoundary';
 import {
   DEFAULT_APP_SETTINGS,
   DEFAULT_HERO_SLIDES,
@@ -143,7 +145,7 @@ const SubScreenShell: React.FC<SubScreenShellProps> = ({
 }) => (
   <div
     dir="rtl"
-    className={`${
+    className={`taibah-app-frame ${
       fixedViewport ? 'h-[100dvh] overflow-hidden' : 'min-h-[100dvh]'
     } w-full flex flex-col bg-slate-100 dark:bg-[#0B1220] text-slate-900 dark:text-slate-100`}
   >
@@ -185,7 +187,9 @@ const SubScreenShell: React.FC<SubScreenShellProps> = ({
           : 'flex-1 w-full max-w-5xl mx-auto px-3.5 pt-3 pb-[calc(env(safe-area-inset-bottom,0px)+28px)] sm:px-5 sm:pt-4 safe-x'
       }
     >
-      {children}
+      <ErrorBoundary resetKey={title} onReturnHome={onBack}>
+        {children}
+      </ErrorBoundary>
     </main>
 
     <footer className="shrink-0 bg-[#0F172A] border-t-2 border-[#D4AF37]/80 pt-1.5 pb-[calc(env(safe-area-inset-bottom,0px)+8px)] text-center">
@@ -203,6 +207,7 @@ interface ActiveSubScreenProps {
   isDark: boolean;
   onToggleTheme: () => void;
   hideNumbers: boolean;
+  onManualCheckUpdate?: () => void;
 }
 
 export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
@@ -212,6 +217,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
   isDark,
   onToggleTheme,
   hideNumbers,
+  onManualCheckUpdate,
 }) => {
   const {
     profile,
@@ -631,7 +637,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
               <button
                 type="button"
                 onClick={onToggleTheme}
-                className="min-h-[46px] rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3.5 flex items-center justify-between text-xs font-extrabold"
+                className="min-h-[46px] rounded-xl border-2 border-[#1A365D]/65 dark:border-[#60A5FA]/65 bg-slate-50 dark:bg-slate-800 px-3.5 flex items-center justify-between text-xs font-extrabold shadow-xs"
               >
                 <span>مظهر التطبيق الحالي</span>
                 <span className="flex items-center gap-1.5 text-[#1A365D] dark:text-[#FDE68A]">
@@ -640,91 +646,96 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                 </span>
               </button>
 
-              {/* Real Native Biometric Toggle 1: Fingerprint */}
-              {(
-                [
-                  {
-                    method: 'fingerprint' as const,
-                    label: 'تفعيل الدخول ببصمة اليد (Fingerprint)',
-                    enabled: bioStatus.fingerprintEnabled,
-                    Icon: Fingerprint,
-                  },
-                  {
-                    method: 'face' as const,
-                    label: 'تفعيل الدخول ببصمة الوجه (Face Unlock)',
-                    enabled: bioStatus.faceEnabled,
-                    Icon: ScanFace,
-                  },
-                ] as const
-              ).map(({ method, label, enabled, Icon }) => (
-                <button
-                  key={method}
-                  type="button"
-                  disabled={enrollingSettingsBio}
-                  onClick={async () => {
-                    const methodAr = method === 'face' ? 'بصمة الوجه' : 'بصمة اليد';
-                    if (enabled) {
-                      disableBiometricMethod(method);
-                      setBioStatus(getBiometricMethodStatus());
-                      notifySuccess(`تم إيقاف الدخول عبر ${methodAr} على هذا الجهاز`);
-                      return;
-                    }
-                    if (!profile) return;
-                    const mem = getMemorySessionCredentials();
-                    if (!mem?.password && !bioStatus.hasVault) {
-                      setSettingsBioPass('');
-                      setPendingBioMethod(method);
-                      return;
-                    }
-                    setEnrollingSettingsBio(true);
-                    try {
-                      const result = await enrollDeviceBiometric(
-                        profile.uid,
-                        profile.phone || profile.email,
-                        profile.name,
-                        {
-                          method,
-                          authEmail: mem?.email || profile.email,
-                          password: mem?.password,
-                        }
-                      );
-                      setBioStatus(getBiometricMethodStatus());
-                      if (result.success) {
-                        notifySuccess(
-                          `تم تفعيل الدخول عبر ${methodAr} بنجاح ✅ — دخول فوري بدون كلمة مرور`
-                        );
-                      } else {
-                        notifyError(
-                          `تعذر تفعيل ${methodAr}`,
-                          result.errorMessage || 'تأكد من إعداد البصمة/الوجه في أمان الهاتف.'
-                        );
+              {/* ONE Unified Native Android BiometricPrompt Toggle (Fingerprint + Face + Device PIN) */}
+              <button
+                type="button"
+                disabled={enrollingSettingsBio}
+                onClick={async () => {
+                  if (bioStatus.hasAnyEnabled) {
+                    clearBiometricEnrollment();
+                    setBioStatus(getBiometricMethodStatus());
+                    notifySuccess('تم إيقاف الدخول الحيوي (البصمة / الوجه / رمز الجهاز) على هذا الهاتف');
+                    return;
+                  }
+                  if (!profile) return;
+                  const mem = getMemorySessionCredentials();
+                  if (!mem?.password && !bioStatus.hasVault) {
+                    setSettingsBioPass('');
+                    setPendingBioMethod('unified');
+                    return;
+                  }
+                  setEnrollingSettingsBio(true);
+                  try {
+                    const result = await enrollDeviceBiometric(
+                      profile.uid,
+                      profile.phone || profile.email,
+                      profile.name,
+                      {
+                        method: 'unified',
+                        authEmail: mem?.email || profile.email,
+                        password: mem?.password,
                       }
-                    } finally {
-                      setEnrollingSettingsBio(false);
+                    );
+                    setBioStatus(getBiometricMethodStatus());
+                    if (result.success) {
+                      notifySuccess('تم تفعيل الدخول الحيوي الموحد (البصمة / الوجه / رمز الجهاز) بنجاح ✅');
+                    } else {
+                      notifyError(
+                        'تعذر تفعيل الدخول الحيوي',
+                        result.errorMessage || 'تأكد من إعداد البصمة أو الوجه في أمان الهاتف.'
+                      );
                     }
-                  }}
-                  className={`min-h-[48px] rounded-xl border-2 px-3.5 flex items-center justify-between gap-2 text-xs font-extrabold transition-colors ${
-                    enabled
-                      ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-900 dark:text-emerald-200'
-                      : 'border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white'
+                  } finally {
+                    setEnrollingSettingsBio(false);
+                  }
+                }}
+                className={`min-h-[48px] rounded-xl border-2 px-3.5 flex items-center justify-between gap-2 text-xs font-extrabold transition-colors ${
+                  bioStatus.hasAnyEnabled
+                    ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-900 dark:text-emerald-200'
+                    : 'border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white'
+                }`}
+              >
+                <span className="flex items-center gap-2 min-w-0">
+                  <Fingerprint className="w-4 h-4 text-[#D4AF37] shrink-0" />
+                  <span className="truncate">الدخول الحيوي الموحد (البصمة / الوجه / رمز الجهاز)</span>
+                </span>
+                <span
+                  className={`shrink-0 px-2.5 py-1 rounded-lg text-[11px] font-extrabold ${
+                    bioStatus.hasAnyEnabled
+                      ? 'bg-emerald-600 text-white'
+                      : 'bg-[#1A365D] text-[#FDE68A] border border-[#D4AF37]'
                   }`}
                 >
-                  <span className="flex items-center gap-2 min-w-0">
-                    <Icon className="w-4 h-4 text-[#D4AF37] shrink-0" />
-                    <span className="truncate">{label}</span>
-                  </span>
-                  <span
-                    className={`shrink-0 px-2.5 py-1 rounded-lg text-[11px] font-extrabold ${
-                      enabled
-                        ? 'bg-emerald-600 text-white'
-                        : 'bg-[#1A365D] text-[#FDE68A]'
-                    }`}
-                  >
-                    {enabled ? 'مُفعّل ✅' : 'تفعيل'}
-                  </span>
-                </button>
-              ))}
+                  {bioStatus.hasAnyEnabled ? 'مُفعّل ✅' : 'تفعيل'}
+                </span>
+              </button>
             </div>
+          </div>
+
+          {/* App Updates Section (Visible to ALL users: Admin, Agent, Client) */}
+          <div className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] p-3.5 shadow-md space-y-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-sm font-extrabold text-[#1A365D] dark:text-[#FDE68A] flex items-center gap-2">
+                <span className="w-7 h-7 rounded-lg bg-[#1A365D] text-[#FDE68A] border border-[#D4AF37] flex items-center justify-center shrink-0">
+                  <DownloadCloud className="w-4 h-4" />
+                </span>
+                تحديثات التطبيق
+              </h2>
+              <span className="px-2.5 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 border border-[#D4AF37] text-[11px] font-extrabold text-[#1A365D] dark:text-[#FDE68A] tabular-nums">
+                الإصدار الحالي: v{getInstalledAppVersion()}
+              </span>
+            </div>
+            <p className="text-[11px] font-bold text-slate-600 dark:text-slate-300 leading-relaxed">
+              تحديث خفيف وفوري (OTA) يحمّل آخر التحسينات خلال ثوانٍ دون فقدان أي بيانات أو تسجيل خروج.
+            </p>
+            <button
+              type="button"
+              onClick={() => onManualCheckUpdate?.()}
+              className="w-full min-h-[44px] rounded-xl bg-gradient-to-b from-[#1E3A8A] via-[#1A365D] to-[#0F172A] border-2 border-[#D4AF37] text-white text-xs font-extrabold flex items-center justify-center gap-2 shadow active:scale-[0.99] transition-transform"
+            >
+              <DownloadCloud className="w-4 h-4 text-[#FDE68A]" />
+              <span>التحقق من وجود تحديث خفيف</span>
+            </button>
           </div>
 
           {pendingBioMethod && profile && (
@@ -733,8 +744,6 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                 onSubmit={async (e) => {
                   e.preventDefault();
                   if (!settingsBioPass) return;
-                  const targetMethod = pendingBioMethod;
-                  const methodAr = targetMethod === 'face' ? 'بصمة الوجه' : 'بصمة اليد';
                   setEnrollingSettingsBio(true);
                   try {
                     const result = await enrollDeviceBiometric(
@@ -742,7 +751,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                       profile.phone || profile.email,
                       profile.name,
                       {
-                        method: targetMethod,
+                        method: 'unified',
                         authEmail: profile.email,
                         password: settingsBioPass,
                       }
@@ -751,13 +760,11 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                     if (result.success) {
                       setPendingBioMethod(null);
                       setSettingsBioPass('');
-                      notifySuccess(
-                        `تم تفعيل الدخول عبر ${methodAr} بنجاح ✅ — دخول فوري بدون كلمة مرور`
-                      );
+                      notifySuccess('تم تفعيل الدخول الحيوي الموحد بنجاح ✅');
                     } else {
                       notifyError(
-                        `تعذر تفعيل ${methodAr}`,
-                        result.errorMessage || 'تأكد من إعداد البصمة/الوجه في أمان الهاتف.'
+                        'تعذر تفعيل الدخول الحيوي',
+                        result.errorMessage || 'تأكد من إعداد البصمة أو الوجه في أمان الهاتف.'
                       );
                     }
                   } finally {
@@ -770,9 +777,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                   <div className="flex items-center gap-2 text-[#1A365D] dark:text-[#FDE68A]">
                     <KeyRound className="w-5 h-5" />
                     <h3 className="text-sm font-extrabold">
-                      {pendingBioMethod === 'face'
-                        ? 'تفعيل الدخول ببصمة الوجه (Face Unlock)'
-                        : 'تفعيل الدخول ببصمة اليد (Fingerprint)'}
+                      تفعيل الدخول الحيوي (البصمة / الوجه / رمز الجهاز)
                     </h3>
                   </div>
                   <button
@@ -784,26 +789,22 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                   </button>
                 </div>
                 <p className="text-xs font-bold text-slate-600 dark:text-slate-300 leading-relaxed">
-                  أدخل كلمة المرور لمرة واحدة فقط لتشفير بيانات حسابك داخل خزنة الهاتف الآمنة، وبعد التحقق الحيوي ستدخل مباشرةً بدون كلمة مرور نهائياً.
+                  أدخل كلمة المرور لمرة واحدة لتشفير بيانات حسابك داخل خزنة الهاتف الآمنة (Keystore).
                 </p>
                 <input
                   type="password"
                   value={settingsBioPass}
                   onChange={(e) => setSettingsBioPass(e.target.value)}
                   placeholder="كلمة مرور الحساب..."
-                  className="w-full min-h-[44px] rounded-xl border-2 border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-sm font-bold text-slate-900 dark:text-white focus:border-[#D4AF37] focus:outline-none"
+                  className="w-full min-h-[44px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-sm font-bold text-slate-900 dark:text-white focus:border-[#D4AF37] focus:outline-none"
                   autoFocus
                 />
                 <button
                   type="submit"
                   disabled={enrollingSettingsBio}
-                  className="w-full min-h-[44px] royal-btn-3d text-white font-extrabold text-xs rounded-xl"
+                  className="w-full min-h-[44px] royal-btn-3d border-2 border-[#D4AF37] text-white font-extrabold text-xs rounded-xl"
                 >
-                  {enrollingSettingsBio
-                    ? 'جاري التحقق والتشفير...'
-                    : pendingBioMethod === 'face'
-                      ? 'التحقق وتفعيل بصمة الوجه'
-                      : 'التحقق وتفعيل بصمة اليد'}
+                  {enrollingSettingsBio ? 'جاري التحقق والتشفير...' : 'التحقق وتفعيل الدخول الحيوي'}
                 </button>
               </form>
             </div>
@@ -862,7 +863,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                     rows={2}
                     value={newsTicker}
                     onChange={(e) => setNewsTicker(e.target.value)}
-                    className="w-full rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 p-3 text-xs font-bold focus:border-[#D4AF37] focus:outline-none"
+                    className="w-full rounded-xl border-2 border-[#1A365D]/65 dark:border-[#60A5FA]/65 bg-slate-50 dark:bg-slate-800 p-3 text-xs font-bold shadow-xs focus:border-[#D4AF37] focus:outline-none"
                   />
                 </div>
 
@@ -907,11 +908,14 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                   </label>
                   <input
                     type="number"
+                    inputMode="numeric"
                     min={2}
                     max={30}
-                    value={sliderSpeed}
+                    value={sliderSpeed === '0' ? '' : sliderSpeed}
+                    placeholder="5"
+                    onFocus={(e) => e.currentTarget.select()}
                     onChange={(e) => setSliderSpeed(e.target.value)}
-                    className="w-full sm:w-44 min-h-[42px] rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-sm font-bold tabular-nums focus:border-[#D4AF37] focus:outline-none"
+                    className="w-full sm:w-44 min-h-[42px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-sm font-bold tabular-nums focus:border-[#D4AF37] focus:outline-none"
                   />
                 </div>
 
@@ -919,7 +923,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                   {sliderSlides.map((slide, idx) => (
                     <div
                       key={slide.id || idx}
-                      className="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 p-3 space-y-2"
+                      className="rounded-xl border-2 border-[#D4AF37]/65 dark:border-[#D4AF37]/50 bg-slate-50 dark:bg-slate-800/60 p-3 space-y-2 shadow-sm"
                     >
                       <div className="flex items-center justify-between gap-2">
                         <span className="text-xs font-extrabold text-[#1A365D] dark:text-[#FDE68A]">
@@ -942,14 +946,14 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                           value={slide.title}
                           onChange={(e) => handleSlideChange(idx, 'title', e.target.value)}
                           placeholder="عنوان الشريحة"
-                          className="min-h-[38px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 text-xs font-bold"
+                          className="min-h-[38px] rounded-lg border-2 border-[#1A365D]/60 dark:border-[#60A5FA]/60 bg-white dark:bg-slate-900 px-2.5 text-xs font-bold focus:border-[#D4AF37] focus:outline-none"
                         />
                         <input
                           type="text"
                           value={slide.subtitle}
                           onChange={(e) => handleSlideChange(idx, 'subtitle', e.target.value)}
                           placeholder="النص الفرعي"
-                          className="min-h-[38px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 text-xs font-bold"
+                          className="min-h-[38px] rounded-lg border-2 border-[#1A365D]/60 dark:border-[#60A5FA]/60 bg-white dark:bg-slate-900 px-2.5 text-xs font-bold focus:border-[#D4AF37] focus:outline-none"
                         />
                       </div>
 
@@ -959,7 +963,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                           value={slide.image.startsWith('data:') ? 'صورة مرفوعة من الجهاز ✅' : slide.image}
                           onChange={(e) => handleSlideChange(idx, 'image', e.target.value)}
                           placeholder="رابط الصورة أو ارفع صورة..."
-                          className="flex-1 min-h-[38px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 text-xs font-bold"
+                          className="flex-1 min-h-[38px] rounded-lg border-2 border-[#1A365D]/60 dark:border-[#60A5FA]/60 bg-white dark:bg-slate-900 px-2.5 text-xs font-bold focus:border-[#D4AF37] focus:outline-none"
                         />
                         <label className="min-h-[38px] px-3 rounded-lg bg-[#1A365D] text-[#FDE68A] text-[11px] font-extrabold flex items-center gap-1 cursor-pointer shrink-0">
                           <ImagePlus className="w-3.5 h-3.5" />
@@ -1010,7 +1014,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                     rows={3}
                     value={smsTemplate}
                     onChange={(e) => setSmsTemplate(e.target.value)}
-                    className="w-full rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 p-3 text-xs font-bold focus:border-[#D4AF37] focus:outline-none"
+                    className="w-full rounded-xl border-2 border-[#1A365D]/65 dark:border-[#60A5FA]/65 bg-slate-50 dark:bg-slate-800 p-3 text-xs font-bold shadow-sm focus:border-[#D4AF37] focus:outline-none"
                   />
                 </div>
 
@@ -1020,11 +1024,11 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                     rows={3}
                     value={whatsappTemplate}
                     onChange={(e) => setWhatsappTemplate(e.target.value)}
-                    className="w-full rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 p-3 text-xs font-bold focus:border-[#D4AF37] focus:outline-none"
+                    className="w-full rounded-xl border-2 border-[#1A365D]/65 dark:border-[#60A5FA]/65 bg-slate-50 dark:bg-slate-800 p-3 text-xs font-bold shadow-sm focus:border-[#D4AF37] focus:outline-none"
                   />
                 </div>
 
-                <div className="pt-2 border-t border-slate-200 dark:border-slate-800 space-y-2.5">
+                <div className="pt-2 border-t-2 border-[#D4AF37]/40 space-y-2.5">
                   <div className="text-xs font-extrabold text-[#1A365D] dark:text-[#FDE68A] flex items-center gap-1.5">
                     <FileText className="w-4 h-4" />
                     تخصيص ترويسة وتذييل ملفات PDF والصور HD
@@ -1036,7 +1040,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                         type="text"
                         value={pdfHeaderTitle}
                         onChange={(e) => setPdfHeaderTitle(e.target.value)}
-                        className="w-full min-h-[40px] rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold focus:border-[#D4AF37] focus:outline-none"
+                        className="w-full min-h-[40px] rounded-xl border-2 border-[#1A365D]/65 dark:border-[#60A5FA]/65 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold shadow-sm focus:border-[#D4AF37] focus:outline-none"
                       />
                     </div>
                     <div>
@@ -1045,7 +1049,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                         type="text"
                         value={pdfHeaderSubtitle}
                         onChange={(e) => setPdfHeaderSubtitle(e.target.value)}
-                        className="w-full min-h-[40px] rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold focus:border-[#D4AF37] focus:outline-none"
+                        className="w-full min-h-[40px] rounded-xl border-2 border-[#1A365D]/65 dark:border-[#60A5FA]/65 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold shadow-sm focus:border-[#D4AF37] focus:outline-none"
                       />
                     </div>
                   </div>
@@ -1055,7 +1059,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                       type="text"
                       value={pdfFooterText}
                       onChange={(e) => setPdfFooterText(e.target.value)}
-                      className="w-full min-h-[40px] rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold focus:border-[#D4AF37] focus:outline-none"
+                      className="w-full min-h-[40px] rounded-xl border-2 border-[#1A365D]/65 dark:border-[#60A5FA]/65 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold shadow-sm focus:border-[#D4AF37] focus:outline-none"
                     />
                   </div>
                 </div>
@@ -1075,32 +1079,41 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                     <label className="block text-xs font-extrabold mb-1">حد تنبيه المخزون المنخفض</label>
                     <input
                       type="number"
+                      inputMode="numeric"
                       min={0}
-                      value={lowStockThreshold}
+                      value={lowStockThreshold === '0' ? '' : lowStockThreshold}
+                      placeholder="0"
+                      onFocus={(e) => e.currentTarget.select()}
                       onChange={(e) => setLowStockThreshold(e.target.value)}
-                      className="w-full min-h-[44px] rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-sm font-bold tabular-nums focus:border-[#D4AF37] focus:outline-none"
+                      className="w-full min-h-[44px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-sm font-bold tabular-nums focus:border-[#D4AF37] focus:outline-none"
                     />
                   </div>
                   <div>
                     <label className="block text-xs font-extrabold mb-1">نسبة تسعير الوكيل (%)</label>
                     <input
                       type="number"
+                      inputMode="numeric"
                       min={1}
                       max={100}
-                      value={agentDiscount}
+                      value={agentDiscount === '0' ? '' : agentDiscount}
+                      placeholder="70"
+                      onFocus={(e) => e.currentTarget.select()}
                       onChange={(e) => setAgentDiscount(e.target.value)}
-                      className="w-full min-h-[44px] rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-sm font-bold tabular-nums focus:border-[#D4AF37] focus:outline-none"
+                      className="w-full min-h-[44px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-sm font-bold tabular-nums focus:border-[#D4AF37] focus:outline-none"
                     />
                   </div>
                   <div>
                     <label className="block text-xs font-extrabold mb-1">نسبة تسعير العميل (%)</label>
                     <input
                       type="number"
+                      inputMode="numeric"
                       min={1}
                       max={100}
-                      value={clientDiscount}
+                      value={clientDiscount === '0' ? '' : clientDiscount}
+                      placeholder="80"
+                      onFocus={(e) => e.currentTarget.select()}
                       onChange={(e) => setClientDiscount(e.target.value)}
-                      className="w-full min-h-[44px] rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-sm font-bold tabular-nums focus:border-[#D4AF37] focus:outline-none"
+                      className="w-full min-h-[44px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-sm font-bold tabular-nums focus:border-[#D4AF37] focus:outline-none"
                     />
                   </div>
                 </div>
@@ -1113,7 +1126,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                     rows={2}
                     value={appDescription}
                     onChange={(e) => setAppDescription(e.target.value)}
-                    className="w-full rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 p-3 text-xs font-bold focus:border-[#D4AF37] focus:outline-none"
+                    className="w-full rounded-xl border-2 border-[#1A365D]/65 dark:border-[#60A5FA]/65 bg-slate-50 dark:bg-slate-800 p-3 text-xs font-bold shadow-sm focus:border-[#D4AF37] focus:outline-none"
                   />
                 </div>
 
@@ -1225,7 +1238,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                 </span>
                 <div className="min-w-0 flex-1">
                   <h2 className="text-sm font-extrabold text-[#DC2626] dark:text-red-400">
-                    تصفير بيانات التطبيق بالكامل
+                    تصفير بيانات التطبيق بالكامل وحذفها
                   </h2>
                   <p className="text-[11px] font-bold text-slate-600 dark:text-slate-300 mt-0.5 leading-relaxed">
                     يتم أولاً حفظ نسخة احتياطية تلقائية (auto_backup) في السحابة والهاتف، ثم تصفير الكروت والمبيعات والفواتير والأرصدة إلى (0) مع الإبقاء الكامل على المدير العام وجميع الوكلاء والعملاء وهيكل الباقات الثماني.
@@ -1247,7 +1260,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                 >
                   <div className="flex items-center gap-1.5 text-xs font-extrabold text-[#DC2626] dark:text-red-300">
                     <Trash2 className="w-3.5 h-3.5 shrink-0" />
-                    <span>تصفير بيانات التطبيق بالكامل</span>
+                    <span>تصفير بيانات التطبيق بالكامل وحذفها</span>
                   </div>
                   <p className="text-[10.5px] font-bold text-red-700/90 dark:text-red-300/90 mt-0.5">
                     أخذ نسخة تلقائية ثم تصفير الكروت والمبيعات والفواتير والدفتر والأرصدة إلى (0) مع بقاء جميع حسابات الإدارة والوكلاء والعملاء.
@@ -1428,12 +1441,12 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
   // AUDIT LOG (Super Admin Only)
   // =========================================================================
   if (route === 'audit_logs') {
-    const filteredLogs = auditLogs.filter(
+    const filteredLogs = (auditLogs || []).filter(
       (l) =>
         !auditSearch.trim() ||
-        l.action.includes(auditSearch.trim()) ||
-        l.details.includes(auditSearch.trim()) ||
-        l.actorName.includes(auditSearch.trim())
+        (l?.action || '').includes(auditSearch.trim()) ||
+        (l?.details || '').includes(auditSearch.trim()) ||
+        (l?.actorName || '').includes(auditSearch.trim())
     );
     return (
       <SubScreenShell
@@ -1442,18 +1455,18 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
         onBack={onBack}
       >
         <div className="relative mb-4">
-          <Search className="w-4 h-4 text-slate-400 absolute right-3.5 top-1/2 -translate-y-1/2" />
+          <Search className="w-4 h-4 text-[#1A365D] dark:text-[#FDE68A] absolute right-3.5 top-1/2 -translate-y-1/2" />
           <input
             type="text"
             value={auditSearch}
             onChange={(e) => setAuditSearch(e.target.value)}
             placeholder="بحث في سجل العمليات..."
-            className="w-full min-h-[44px] rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 pr-10 pl-3 text-sm font-bold focus:border-[#D4AF37] focus:outline-none"
+            className="w-full min-h-[44px] rounded-xl border-2 border-[#1A365D]/70 dark:border-[#60A5FA]/70 bg-white dark:bg-slate-900 pr-10 pl-3 text-sm font-bold shadow-sm focus:border-[#D4AF37] focus:outline-none"
           />
         </div>
 
         {filteredLogs.length === 0 ? (
-          <div className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37]/50 p-8 text-center">
+          <div className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37]/75 p-8 text-center shadow-sm">
             <FileClock className="w-10 h-10 mx-auto text-[#D4AF37] mb-2" />
             <p className="text-sm font-extrabold">سجل العمليات فارغ حالياً (0)</p>
           </div>
@@ -1462,7 +1475,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
             {filteredLogs.map((log) => (
               <div
                 key={log.id}
-                className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-slate-200 dark:border-slate-700 hover:border-[#D4AF37]/70 p-3.5 shadow-sm transition-colors"
+                className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37]/60 dark:border-[#D4AF37]/50 hover:border-[#D4AF37] p-3.5 shadow-sm transition-colors"
               >
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-sm font-extrabold text-[#1A365D] dark:text-[#FDE68A]">
@@ -1510,23 +1523,23 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
         </p>
 
         <div className="mt-4 grid grid-cols-3 gap-2 text-center">
-          <div className="rounded-xl bg-slate-50 dark:bg-slate-800 p-2.5 border border-slate-200 dark:border-slate-700">
+          <div className="rounded-xl bg-slate-50 dark:bg-slate-800 p-2.5 border-2 border-[#D4AF37]/70 shadow-sm">
             <div className="text-lg font-extrabold text-[#1A365D] dark:text-[#FDE68A] tabular-nums">
-              {formatCount(packages.length || EXCLUSIVE_PACKAGES.length, hideNumbers)}
+              {formatCount((packages || []).length || EXCLUSIVE_PACKAGES.length, hideNumbers)}
             </div>
-            <div className="text-[11px] font-bold text-slate-500">الباقات</div>
+            <div className="text-[11px] font-bold text-slate-600 dark:text-slate-300">الباقات</div>
           </div>
-          <div className="rounded-xl bg-slate-50 dark:bg-slate-800 p-2.5 border border-slate-200 dark:border-slate-700">
-            <div className="text-lg font-extrabold text-emerald-600 dark:text-emerald-400 tabular-nums">
-              {formatCount(totalAvailableCards, hideNumbers)}
+          <div className="rounded-xl bg-emerald-50/70 dark:bg-slate-800 p-2.5 border-2 border-emerald-600/70 shadow-sm">
+            <div className="text-lg font-extrabold text-emerald-700 dark:text-emerald-400 tabular-nums">
+              {formatCount(totalAvailableCards ?? 0, hideNumbers)}
             </div>
-            <div className="text-[11px] font-bold text-slate-500">الكروت المتاحة</div>
+            <div className="text-[11px] font-bold text-slate-600 dark:text-slate-300">الكروت المتاحة</div>
           </div>
-          <div className="rounded-xl bg-slate-50 dark:bg-slate-800 p-2.5 border border-slate-200 dark:border-slate-700">
-            <div className="text-lg font-extrabold text-blue-600 dark:text-blue-400 tabular-nums">
-              {formatCount(isAdmin || isAgent ? managedUsers.length : sales.length, hideNumbers)}
+          <div className="rounded-xl bg-blue-50/70 dark:bg-slate-800 p-2.5 border-2 border-blue-600/70 shadow-sm">
+            <div className="text-lg font-extrabold text-blue-700 dark:text-blue-400 tabular-nums">
+              {formatCount(isAdmin || isAgent ? (managedUsers || []).length : (sales || []).length, hideNumbers)}
             </div>
-            <div className="text-[11px] font-bold text-slate-500">
+            <div className="text-[11px] font-bold text-slate-600 dark:text-slate-300">
               {isAdmin || isAgent ? 'الحسابات' : 'عمليات البيع'}
             </div>
           </div>

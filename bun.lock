@@ -6,11 +6,13 @@
       "name": "react-example",
       "dependencies": {
         "@capacitor-community/contacts": "7",
+        "@capacitor/app": "7",
         "@capacitor/core": "7",
         "@capacitor/filesystem": "7",
         "@capacitor/share": "7",
         "@capacitor/status-bar": "7",
         "@capgo/capacitor-native-biometric": "7",
+        "@capgo/capacitor-updater": "7",
         "@firebase/eslint-plugin-security-rules": "^0.0.2",
         "@google/genai": "^2.4.0",
         "@tailwindcss/vite": "^4.3.3",
@@ -233,6 +235,8 @@
 
     "@capacitor-community/contacts": ["@capacitor-community/contacts@7.2.0", "", { "peerDependencies": { "@capacitor/core": ">=7.0.0" } }, "sha512-s/DVHuhMYbIbkSCuZyx6+ZDIho2wuUdtcb+cre4igo5Fz26lkBlayRSo+tBBfJsYxLlrQX21Jy8rMmUCdz2GTQ=="],
 
+    "@capacitor/app": ["@capacitor/app@7.1.2", "", { "peerDependencies": { "@capacitor/core": ">=7.0.0" } }, "sha512-d4I/oF/PRu4megL7/IGKYfe5j7yzSON1FRFgq6kH+m5kH6g7V+wyjHRLauCzGNjdRx4S+nWOumINds0qcRBtKg=="],
+
     "@capacitor/core": ["@capacitor/core@7.6.10", "", { "dependencies": { "tslib": "^2.1.0" } }, "sha512-foYHd//t6E3RTELVG8wdkp5jVnmLcHKUurAa9BA8EUSNd2eY0SijCHpfO0bFwYBP5DrCeXwgSFYi3NJw413gtQ=="],
 
     "@capacitor/filesystem": ["@capacitor/filesystem@7.1.9", "", { "dependencies": { "@capacitor/synapse": "^1.0.3" }, "peerDependencies": { "@capacitor/core": ">=7.0.0" } }, "sha512-HBr3NwENo/Fm7Cmm6Cvps255OIdgQ2VXtSNZK+2Nkw0Y7EMid9y5AS9XfEzGmsC7MXbC6Hx2yXV/hvnuifsSXA=="],
@@ -244,6 +248,8 @@
     "@capacitor/synapse": ["@capacitor/synapse@1.0.4", "", {}, "sha512-/C1FUo8/OkKuAT4nCIu/34ny9siNHr9qtFezu4kxm6GY1wNFxrCFWjfYx5C1tUhVGz3fxBABegupkpjXvjCHrw=="],
 
     "@capgo/capacitor-native-biometric": ["@capgo/capacitor-native-biometric@7.6.0", "", { "peerDependencies": { "@capacitor/core": ">=7.0.0" } }, "sha512-ZQ+Nc+uS2sT8TED/REYlmGV34ASFsBe30YdABBQIRL+A2iVbWtdiL0FbX+1sKKXzrS2DGf+mD657Qwl1jGSDLg=="],
+
+    "@capgo/capacitor-updater": ["@capgo/capacitor-updater@7.53.0", "", { "peerDependencies": { "@capacitor/core": "^7.0.0" } }, "sha512-XO8t1nWIOHz+edtbfK3Gm8s/Qq14ZhvOZGK1PySQ3ZEYAZQqkD/7labSmj9ddp8i6qsrmAcS/oJi6WC7jtCLEA=="],
 
     "@emnapi/core": ["@emnapi/core@2.0.0-beta.2", "", { "dependencies": { "@emnapi/wasi-threads": "2.2.0", "tslib": "^2.4.0" } }, "sha512-MzCVoWtcg4Pm2B3je5mMvYMvj3MmBKw+fU7vbsJc9/iT8ip6/eYIHo/Dsm/mr+wsHB6SEyJDuxB09Yy6r/8+4A=="],
 

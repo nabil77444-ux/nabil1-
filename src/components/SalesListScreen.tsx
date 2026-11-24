@@ -33,6 +33,7 @@ import {
   formatCount,
   formatDateTimeAr,
   formatYER,
+  getPackageThemeStyle,
   SUPER_ADMIN_CONFIG,
   TAIBAH_ASSETS,
   type AppRoute,
@@ -402,34 +403,35 @@ export const SalesListScreen: React.FC<SalesListScreenProps> = ({ hideNumbers, o
           <Search className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2" />
           <input
             type="text"
+            autoComplete="off"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             placeholder="بحث باسم العميل، رقم الهاتف، أو رقم الفاتورة..."
-            className="w-full min-h-[42px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 pr-9 pl-3 text-xs font-bold focus:border-[#D4AF37] focus:outline-none"
+            className="w-full min-h-[42px] rounded-xl border-2 border-[#1A365D]/70 dark:border-[#60A5FA]/70 bg-slate-50 dark:bg-slate-800 pr-9 pl-3 text-xs font-extrabold shadow-xs focus:border-[#D4AF37] focus:outline-none"
           />
         </div>
         {dateFilter === 'range' && (
           <div className="grid grid-cols-2 gap-2">
             <div>
-              <label className="block text-[11px] font-bold text-slate-500 mb-1 flex items-center gap-1">
+              <label className="block text-[11px] font-extrabold text-[#1A365D] dark:text-[#FDE68A] mb-1 flex items-center gap-1">
                 <Calendar className="w-3 h-3" /> من تاريخ
               </label>
               <input
                 type="date"
                 value={fromDate}
                 onChange={(e) => setFromDate(e.target.value)}
-                className="w-full min-h-[38px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-2.5 text-xs font-bold"
+                className="w-full min-h-[38px] rounded-xl border-2 border-[#1A365D]/65 dark:border-[#60A5FA]/65 bg-slate-50 dark:bg-slate-800 px-2.5 text-xs font-extrabold shadow-xs focus:border-[#D4AF37] focus:outline-none"
               />
             </div>
             <div>
-              <label className="block text-[11px] font-bold text-slate-500 mb-1 flex items-center gap-1">
+              <label className="block text-[11px] font-extrabold text-[#1A365D] dark:text-[#FDE68A] mb-1 flex items-center gap-1">
                 <Calendar className="w-3 h-3" /> إلى تاريخ
               </label>
               <input
                 type="date"
                 value={toDate}
                 onChange={(e) => setToDate(e.target.value)}
-                className="w-full min-h-[38px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-2.5 text-xs font-bold"
+                className="w-full min-h-[38px] rounded-xl border-2 border-[#1A365D]/65 dark:border-[#60A5FA]/65 bg-slate-50 dark:bg-slate-800 px-2.5 text-xs font-extrabold shadow-xs focus:border-[#D4AF37] focus:outline-none"
               />
             </div>
           </div>
@@ -478,10 +480,110 @@ export const SalesListScreen: React.FC<SalesListScreenProps> = ({ hideNumbers, o
         <div className="space-y-3">
           {filteredSales.map((sale) => {
             const badge = getTypeBadge(sale);
+            const isDirect = sale.saleType === 'direct';
+            const primaryItem = sale.items?.[0];
+            const denomPrice = primaryItem?.price || sale.totalAmount || 100;
+            const pkgTheme = getPackageThemeStyle(denomPrice);
+            const primaryCard =
+              sale.cardNumbers?.[0] || primaryItem?.cardNumbers?.[0] || sale.invoiceNumber || '—';
+            const extraCardsCount = Math.max(0, (sale.cardNumbers?.length || 1) - 1);
+            const directStatusText =
+              sale.status === 'returned'
+                ? 'مرتجع'
+                : sale.status === 'cancelled'
+                  ? 'ملغي'
+                  : 'مباع / مفعل';
+
+            if (isDirect) {
+              return (
+                <div
+                  key={sale.id}
+                  className={`royal-card-frame rounded-2xl bg-white dark:bg-slate-900 border-2 ${pkgTheme.border} overflow-hidden`}
+                >
+                  {/* Color-coded Denomination Header Bar with Large Card Number + Status */}
+                  <div
+                    className={`bg-gradient-to-l ${pkgTheme.headerBg} px-3.5 py-2.5 flex items-center justify-between gap-2`}
+                  >
+                    <div className="min-w-0 flex items-center gap-2">
+                      <span
+                        dir="ltr"
+                        className="font-mono text-sm sm:text-base font-extrabold text-white tracking-wider drop-shadow truncate"
+                      >
+                        {hideNumbers ? '••••••••' : primaryCard}
+                      </span>
+                      {extraCardsCount > 0 && (
+                        <span className="px-1.5 py-0.5 rounded-md bg-black/25 border border-white/30 text-[10px] font-extrabold text-[#FDE68A] shrink-0 tabular-nums">
+                          +{extraCardsCount}
+                        </span>
+                      )}
+                    </div>
+                    <span className="px-2.5 py-0.5 rounded-full bg-white/95 text-[#0F172A] text-[10px] font-extrabold shrink-0 shadow-xs">
+                      {directStatusText}
+                    </span>
+                  </div>
+
+                  {/* Direct Sale Card Body */}
+                  <div className="p-3.5 space-y-2.5">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-sm font-extrabold text-slate-900 dark:text-white truncate">
+                            {sale.buyerName}
+                          </span>
+                          <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-md ${badge.cls}`}>
+                            {badge.label}
+                          </span>
+                        </div>
+                        <div className="text-[11px] font-bold text-slate-500 dark:text-slate-400 mt-0.5 tabular-nums">
+                          {sale.buyerPhone || 'بدون هاتف'} · {formatDateTimeAr(sale.createdAt)}
+                        </div>
+                      </div>
+                      <div className="text-left shrink-0">
+                        <div className={`text-sm font-extrabold tabular-nums ${pkgTheme.textAccent}`}>
+                          {formatYER(sale.totalAmount, hideNumbers)}
+                        </div>
+                        <div className="text-[10px] font-bold text-slate-500 tabular-nums">
+                          {primaryItem?.packageLabel || `فئة ${denomPrice} ريال`} ({formatCount(sale.totalCards, hideNumbers)} كرت)
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Crisp Bottom Action Boxes */}
+                    <div className="grid grid-cols-3 gap-1.5 pt-1 border-t border-slate-200 dark:border-slate-800">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedSale(sale)}
+                        className="min-h-[38px] rounded-xl bg-[#1A365D] hover:bg-[#142a4a] border border-[#D4AF37] text-white text-xs font-extrabold flex items-center justify-center gap-1"
+                      >
+                        <Eye className="w-3.5 h-3.5 text-[#FDE68A]" />
+                        <span>التفاصيل</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => openEditModal(sale)}
+                        className="min-h-[38px] rounded-xl bg-amber-50 dark:bg-amber-950/40 border-2 border-[#D4AF37] text-[#1A365D] dark:text-[#FDE68A] text-xs font-extrabold flex items-center justify-center gap-1"
+                      >
+                        <Edit3 className="w-3.5 h-3.5" />
+                        <span>تعديل</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDeleteTarget(sale)}
+                        className="min-h-[38px] rounded-xl bg-red-50 dark:bg-red-950/40 border-2 border-red-400 dark:border-red-700 text-red-700 dark:text-red-400 text-xs font-extrabold flex items-center justify-center gap-1"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>حذف</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            }
+
             return (
               <div
                 key={sale.id}
-                className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37]/60 shadow-md overflow-hidden"
+                className="royal-card-frame rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] overflow-hidden"
               >
                 {/* Colored top stripe */}
                 <div className={`h-2 w-full ${getTopStripeColor(sale)}`} />
@@ -515,7 +617,7 @@ export const SalesListScreen: React.FC<SalesListScreenProps> = ({ hideNumbers, o
 
                   {/* Per-Denomination Breakdown inside Sale Card */}
                   {sale.items && sale.items.length > 0 && (
-                    <div className="rounded-xl bg-amber-50/60 dark:bg-amber-950/20 border border-[#D4AF37]/40 px-2.5 py-1.5 space-y-1">
+                    <div className="rounded-xl bg-amber-50/60 dark:bg-amber-950/20 border-2 border-[#D4AF37]/50 px-2.5 py-1.5 space-y-1">
                       {buildSingleSaleBreakdown(sale, appSettings).map((b) => (
                         <div
                           key={b.key}
@@ -533,7 +635,7 @@ export const SalesListScreen: React.FC<SalesListScreenProps> = ({ hideNumbers, o
                   )}
 
                   {/* Financial mini-bar */}
-                  <div className="grid grid-cols-3 gap-1.5 rounded-xl bg-slate-50 dark:bg-slate-800/80 p-2 text-center text-[11px] font-extrabold tabular-nums">
+                  <div className="grid grid-cols-3 gap-1.5 rounded-xl bg-slate-50 dark:bg-slate-800/80 border border-slate-300 dark:border-slate-700 p-2 text-center text-[11px] font-extrabold tabular-nums">
                     <div className="text-emerald-700 dark:text-emerald-400">
                       المدفوع: {formatYER(sale.paidAmount, hideNumbers)}
                     </div>
@@ -550,7 +652,7 @@ export const SalesListScreen: React.FC<SalesListScreenProps> = ({ hideNumbers, o
                     <button
                       type="button"
                       onClick={() => setSelectedSale(sale)}
-                      className="min-h-[38px] rounded-xl bg-[#1A365D] hover:bg-[#142a4a] text-white text-xs font-extrabold flex items-center justify-center gap-1"
+                      className="min-h-[38px] rounded-xl bg-[#1A365D] hover:bg-[#142a4a] border border-[#D4AF37] text-white text-xs font-extrabold flex items-center justify-center gap-1"
                     >
                       <Eye className="w-3.5 h-3.5 text-[#FDE68A]" />
                       <span>التفاصيل والمشاركة</span>
@@ -558,7 +660,7 @@ export const SalesListScreen: React.FC<SalesListScreenProps> = ({ hideNumbers, o
                     <button
                       type="button"
                       onClick={() => openEditModal(sale)}
-                      className="min-h-[38px] rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-[#D4AF37] text-[#1A365D] dark:text-[#FDE68A] text-xs font-extrabold flex items-center justify-center gap-1"
+                      className="min-h-[38px] rounded-xl bg-amber-50 dark:bg-amber-950/40 border-2 border-[#D4AF37] text-[#1A365D] dark:text-[#FDE68A] text-xs font-extrabold flex items-center justify-center gap-1"
                     >
                       <Edit3 className="w-3.5 h-3.5" />
                       <span>تعديل</span>
@@ -566,7 +668,7 @@ export const SalesListScreen: React.FC<SalesListScreenProps> = ({ hideNumbers, o
                     <button
                       type="button"
                       onClick={() => setDeleteTarget(sale)}
-                      className="min-h-[38px] rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-300 dark:border-red-800 text-red-700 dark:text-red-400 text-xs font-extrabold flex items-center justify-center gap-1"
+                      className="min-h-[38px] rounded-xl bg-red-50 dark:bg-red-950/40 border-2 border-red-400 dark:border-red-700 text-red-700 dark:text-red-400 text-xs font-extrabold flex items-center justify-center gap-1"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                       <span>حذف</span>
@@ -845,11 +947,14 @@ export const SalesListScreen: React.FC<SalesListScreenProps> = ({ hideNumbers, o
               </label>
               <input
                 type="number"
+                inputMode="numeric"
                 min={0}
                 max={editingSale.totalAmount}
-                value={editPaidAmount}
+                value={editPaidAmount === '0' ? '' : editPaidAmount}
+                placeholder="0"
+                onFocus={(e) => e.currentTarget.select()}
                 onChange={(e) => setEditPaidAmount(e.target.value)}
-                className="w-full min-h-[42px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold tabular-nums"
+                className="w-full min-h-[42px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold tabular-nums focus:border-[#D4AF37] focus:outline-none"
               />
             </div>
             <div>

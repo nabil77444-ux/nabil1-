@@ -112,6 +112,27 @@ export interface FirestoreErrorInfo {
   };
 }
 
+let lastQuotaWarningAt = 0;
+
+/**
+ * Detect Firestore daily free-tier / billing quota exhaustion errors (`resource-exhausted`).
+ */
+export function isFirestoreQuotaError(error: unknown): boolean {
+  if (!error) return false;
+  const code =
+    typeof error === 'object' && 'code' in error && typeof (error as { code?: unknown }).code === 'string'
+      ? (error as { code: string }).code.toLowerCase()
+      : '';
+  const msg = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  return (
+    code === 'resource-exhausted' ||
+    msg.includes('quota limit exceeded') ||
+    msg.includes('quota exceeded') ||
+    msg.includes('free daily read units') ||
+    msg.includes('resource_exhausted')
+  );
+}
+
 export function handleFirestoreError(
   error: unknown,
   operationType: OperationType,
@@ -135,6 +156,21 @@ export function handleFirestoreError(
     operationType,
     path,
   };
+
+  if (isFirestoreQuotaError(error)) {
+    const now = Date.now();
+    if (now - lastQuotaWarningAt > 30000) {
+      lastQuotaWarningAt = now;
+      console.warn(
+        'Firestore daily read quota reached — continuing from local cache until quota resets or database is upgraded.'
+      );
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('taibah:firestore-quota-exceeded'));
+      }
+    }
+    return errInfo;
+  }
+
   console.error('Firestore Error: ', JSON.stringify(errInfo));
   if (rethrow) {
     throw new Error(JSON.stringify(errInfo));

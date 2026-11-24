@@ -623,24 +623,24 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
                 <button
                   type="button"
                   onClick={() => setAddRole('client')}
-                  className={`min-h-[40px] rounded-xl border-2 text-xs font-extrabold ${
+                  className={`min-h-[40px] rounded-xl border-2 text-xs font-extrabold shadow-xs ${
                     addRole === 'client'
-                      ? 'bg-[#1A365D] text-white border-[#D4AF37]'
-                      : 'bg-slate-50 dark:bg-slate-800 border-slate-200 dark:border-slate-700'
+                      ? 'bg-[#1A365D] text-[#FDE68A] border-[#D4AF37]'
+                      : 'bg-blue-50/75 dark:bg-slate-800 border-blue-700/70 dark:border-blue-400/70 text-[#1A365D] dark:text-blue-100'
                   }`}
                 >
-                  عميل / نقطة بيع ({appSettings.clientDiscountPercent}%)
+                  عميل / نقطة بيع ({appSettings?.clientDiscountPercent ?? 80}%)
                 </button>
                 <button
                   type="button"
                   onClick={() => setAddRole('agent')}
-                  className={`min-h-[40px] rounded-xl border-2 text-xs font-extrabold ${
+                  className={`min-h-[40px] rounded-xl border-2 text-xs font-extrabold shadow-xs ${
                     addRole === 'agent'
-                      ? 'bg-[#1A365D] text-white border-[#D4AF37]'
-                      : 'bg-slate-50 dark:bg-slate-800 border-slate-200 dark:border-slate-700'
+                      ? 'bg-[#1A365D] text-[#FDE68A] border-[#D4AF37]'
+                      : 'bg-blue-50/75 dark:bg-slate-800 border-blue-700/70 dark:border-blue-400/70 text-[#1A365D] dark:text-blue-100'
                   }`}
                 >
-                  وكيل معتمد ({appSettings.agentDiscountPercent}%)
+                  وكيل معتمد ({appSettings?.agentDiscountPercent ?? 70}%)
                 </button>
               </div>
             )}
@@ -648,20 +648,23 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
             <input
               type="text"
               required
+              autoComplete="off"
               value={addName}
               onChange={(e) => setAddName(e.target.value)}
               placeholder="الاسم الكامل / اسم المحل"
-              className="w-full min-h-[42px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold"
+              className="w-full min-h-[42px] rounded-xl border-2 border-[#1A365D]/70 dark:border-[#60A5FA]/70 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-extrabold shadow-xs focus:border-[#D4AF37] focus:outline-none"
             />
 
             <div className="flex items-center gap-1.5">
               <input
                 type="tel"
+                inputMode="numeric"
                 required
+                autoComplete="off"
                 value={addPhone}
                 onChange={(e) => setAddPhone(e.target.value)}
                 placeholder="رقم الهاتف (77xxxxxxx)"
-                className="flex-1 min-h-[42px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold tabular-nums"
+                className="flex-1 min-h-[42px] rounded-xl border-2 border-[#1A365D]/70 dark:border-[#60A5FA]/70 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-extrabold tabular-nums shadow-xs focus:border-[#D4AF37] focus:outline-none"
               />
               <ContactPickerButton
                 onSelect={(c) => {
@@ -673,17 +676,18 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
 
             <input
               type="email"
+              autoComplete="off"
               value={addEmail}
               onChange={(e) => setAddEmail(e.target.value)}
               placeholder="البريد الإلكتروني (اختياري)"
-              className="w-full min-h-[42px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold"
+              className="w-full min-h-[42px] rounded-xl border-2 border-[#1A365D]/70 dark:border-[#60A5FA]/70 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-extrabold shadow-xs focus:border-[#D4AF37] focus:outline-none"
             />
 
             {isAdmin && addRole === 'client' && agents.length > 0 && (
               <select
                 value={addParentAgent}
                 onChange={(e) => setAddParentAgent(e.target.value)}
-                className="w-full min-h-[42px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold"
+                className="w-full min-h-[42px] rounded-xl border-2 border-[#1A365D]/70 dark:border-[#60A5FA]/70 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-extrabold shadow-xs focus:border-[#D4AF37] focus:outline-none"
               >
                 <option value="">تابع للإدارة العامة مباشرة ({SUPER_ADMIN_CONFIG.name})</option>
                 {agents.map((ag) => (
@@ -779,20 +783,26 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
                 <label className="block text-[11px] font-extrabold mb-1">النسبة (%)</label>
                 <input
                   type="number"
+                  inputMode="numeric"
                   min={1}
                   max={100}
-                  value={editRate}
+                  value={editRate === '0' ? '' : editRate}
+                  placeholder="0"
+                  onFocus={(e) => e.currentTarget.select()}
                   onChange={(e) => setEditRate(e.target.value)}
-                  className="w-full min-h-[40px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-2.5 text-xs font-bold tabular-nums"
+                  className="w-full min-h-[40px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-2.5 text-xs font-bold tabular-nums focus:border-[#D4AF37] focus:outline-none"
                 />
               </div>
               <div>
                 <label className="block text-[11px] font-extrabold mb-1">الرصيد (ر.ي)</label>
                 <input
                   type="number"
-                  value={editBalance}
+                  inputMode="numeric"
+                  value={editBalance === '0' ? '' : editBalance}
+                  placeholder="0"
+                  onFocus={(e) => e.currentTarget.select()}
                   onChange={(e) => setEditBalance(e.target.value)}
-                  className="w-full min-h-[40px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-2.5 text-xs font-bold tabular-nums"
+                  className="w-full min-h-[40px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-2.5 text-xs font-bold tabular-nums focus:border-[#D4AF37] focus:outline-none"
                 />
               </div>
               <div>
@@ -800,7 +810,7 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
                 <select
                   value={editStatus}
                   onChange={(e) => setEditStatus(e.target.value as UserProfile['status'])}
-                  className="w-full min-h-[40px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-2 text-xs font-bold"
+                  className="w-full min-h-[40px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-2 text-xs font-bold focus:border-[#D4AF37] focus:outline-none"
                 >
                   <option value="active">نشط</option>
                   <option value="suspended">موقوف</option>

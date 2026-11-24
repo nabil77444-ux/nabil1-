@@ -1,6 +1,4 @@
 import { Capacitor } from '@capacitor/core';
-import { Directory, Filesystem } from '@capacitor/filesystem';
-import { Share } from '@capacitor/share';
 import {
   DEFAULT_APP_SETTINGS,
   formatDateTimeAr,
@@ -771,8 +769,20 @@ async function shareOrDownloadFile(
   const blobUrl = URL.createObjectURL(blob);
 
   // 1. Native Android APK via official @capacitor/filesystem + @capacitor/share
-  if (Capacitor.isNativePlatform()) {
+  const isNative = (() => {
     try {
+      return Capacitor.isNativePlatform();
+    } catch {
+      return false;
+    }
+  })();
+
+  if (isNative) {
+    try {
+      const [{ Directory, Filesystem }, { Share }] = await Promise.all([
+        import('@capacitor/filesystem'),
+        import('@capacitor/share'),
+      ]);
       const base64Data = await blobToBase64(blob);
       const cacheFileName = buildSafeAndroidCacheName(extension);
       const saved = await Filesystem.writeFile({

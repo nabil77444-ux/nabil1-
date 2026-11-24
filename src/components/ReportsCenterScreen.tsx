@@ -238,19 +238,22 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
       }
 
       case 'customers_ledger': {
-        const list = customers.filter((c) => matchSearch([c.name, c.phone || '', c.category || '']));
-        const debit = list.reduce((a, c) => a + (c.totalDebit || 0), 0);
-        const credit = list.reduce((a, c) => a + (c.totalCredit || 0), 0);
+        const list = (customers || []).filter((c) => matchSearch([c?.name || '', c?.phone || '', c?.category || '']));
+        const debit = list.reduce((a, c) => a + (c?.totalDebit || 0), 0);
+        const credit = list.reduce((a, c) => a + (c?.totalCredit || 0), 0);
         return {
           title: 'تقرير الدفتر المحاسبي العام وحسابات العملاء',
           headers: ['العميل', 'التصنيف', 'عليه (مدين)', 'له (دائن)', 'الصافي'],
-          rows: list.map((c) => [
-            c.name,
-            c.category || 'عميل شبكة',
-            `${c.totalDebit} ر.ي`,
-            `${c.totalCredit} ر.ي`,
-            c.balance > 0 ? `عليه ${c.balance}` : c.balance < 0 ? `له ${Math.abs(c.balance)}` : '0',
-          ]),
+          rows: list.map((c) => {
+            const bal = c?.balance ?? 0;
+            return [
+              c?.name || '-',
+              c?.category || 'عميل شبكة',
+              `${c?.totalDebit ?? 0} ر.ي`,
+              `${c?.totalCredit ?? 0} ر.ي`,
+              bal > 0 ? `عليه ${bal}` : bal < 0 ? `له ${Math.abs(bal)}` : '0',
+            ];
+          }),
           summary: [
             { label: 'إجمالي المدين', value: `${debit} ر.ي` },
             { label: 'إجمالي الدائن', value: `${credit} ر.ي` },
@@ -261,20 +264,22 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
       }
 
       case 'debts_receivables': {
-        const saleDebts = sales.filter(
+        const saleDebts = (sales || []).filter(
           (s) =>
-            s.remainingAmount > 0 &&
-            inDateRange(s.createdAt?.toMillis?.()) &&
-            matchSearch([s.buyerName, s.buyerPhone || ''])
+            (s?.remainingAmount ?? 0) > 0 &&
+            inDateRange(s?.createdAt?.toMillis?.()) &&
+            matchSearch([s?.buyerName || '', s?.buyerPhone || ''])
         );
-        const custDebts = customers.filter((c) => c.balance > 0 && matchSearch([c.name, c.phone || '']));
+        const custDebts = (customers || []).filter(
+          (c) => (c?.balance ?? 0) > 0 && matchSearch([c?.name || '', c?.phone || ''])
+        );
         const rows = [
-          ...saleDebts.map((s) => [s.buyerName, 'فاتورة آجلة', s.buyerPhone || '-', `${s.remainingAmount} ر.ي`]),
-          ...custDebts.map((c) => [c.name, `دفتر (${c.category || 'عميل'})`, c.phone || '-', `${c.balance} ر.ي`]),
+          ...saleDebts.map((s) => [s?.buyerName || '-', 'فاتورة آجلة', s?.buyerPhone || '-', `${s?.remainingAmount ?? 0} ر.ي`]),
+          ...custDebts.map((c) => [c?.name || '-', `دفتر (${c?.category || 'عميل'})`, c?.phone || '-', `${c?.balance ?? 0} ر.ي`]),
         ];
         const totalDebts =
-          saleDebts.reduce((a, s) => a + s.remainingAmount, 0) +
-          custDebts.reduce((a, c) => a + c.balance, 0);
+          saleDebts.reduce((a, s) => a + (s?.remainingAmount ?? 0), 0) +
+          custDebts.reduce((a, c) => a + (c?.balance ?? 0), 0);
         return {
           title: 'تقرير الديون والمبالغ المتبقية للتحصيل',
           headers: ['الاسم', 'المصدر', 'الهاتف', 'المبلغ المستحق'],
@@ -288,22 +293,22 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
       }
 
       case 'profits_analysis': {
-        const list = sales.filter(
-          (s) => inDateRange(s.createdAt?.toMillis?.()) && matchSearch([s.buyerName, s.invoiceNumber || ''])
+        const list = (sales || []).filter(
+          (s) => inDateRange(s?.createdAt?.toMillis?.()) && matchSearch([s?.buyerName || '', s?.invoiceNumber || ''])
         );
-        const expected = list.reduce((a, s) => a + (s.expectedProfit || 0), 0);
-        const realized = list.reduce((a, s) => a + (s.realizedProfit || 0), 0);
+        const expected = list.reduce((a, s) => a + (s?.expectedProfit || 0), 0);
+        const realized = list.reduce((a, s) => a + (s?.realizedProfit || 0), 0);
         const breakdown = buildSalesListDenominationBreakdown(list, appSettings);
         return {
           title: 'تقرير الأرباح المتوقعة والمحققة فعلياً',
           headers: ['الفاتورة', 'العميل', 'نوع الحساب', 'الإجمالي', 'الربح المتوقع', 'الربح المحقق'],
           rows: list.map((s) => [
-            s.invoiceNumber || s.id.slice(-6),
-            s.buyerName,
-            getBuyerRoleArabicLabel(s.buyerRole, s.saleType),
-            `${formatNumEn(s.totalAmount)} ر.ي`,
-            `${formatNumEn(s.expectedProfit || 0)} ر.ي`,
-            `${formatNumEn(s.realizedProfit || 0)} ر.ي`,
+            s?.invoiceNumber || (s?.id || '').slice(-6),
+            s?.buyerName || '-',
+            getBuyerRoleArabicLabel(s?.buyerRole, s?.saleType),
+            `${formatNumEn(s?.totalAmount ?? 0)} ر.ي`,
+            `${formatNumEn(s?.expectedProfit || 0)} ر.ي`,
+            `${formatNumEn(s?.realizedProfit || 0)} ر.ي`,
           ]),
           breakdown,
           summary: [
@@ -315,19 +320,19 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
       }
 
       case 'agents_performance': {
-        const list = managedUsers.filter(
-          (u) => u.role !== 'super_admin' && matchSearch([u.name, u.phone])
+        const list = (managedUsers || []).filter(
+          (u) => u?.role !== 'super_admin' && matchSearch([u?.name || '', u?.phone || ''])
         );
-        const totalBal = list.reduce((a, u) => a + (u.balance || 0), 0);
+        const totalBal = list.reduce((a, u) => a + (u?.balance || 0), 0);
         return {
           title: 'تقرير الوكلاء ونقاط البيع والعملاء',
           headers: ['الاسم', 'الدور', 'الهاتف', 'النسبة', 'الرصيد'],
           rows: list.map((u) => [
-            u.name,
-            getRoleArabicLabel(u.role),
-            u.phone,
-            `${u.discountRate || 80}%`,
-            `${u.balance || 0} ر.ي`,
+            u?.name || '-',
+            getRoleArabicLabel(u?.role),
+            u?.phone || '-',
+            `${u?.discountRate || 80}%`,
+            `${u?.balance || 0} ر.ي`,
           ]),
           summary: [
             { label: 'إجمالي الحسابات', value: String(list.length) },
@@ -338,21 +343,21 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
       }
 
       case 'topup_requests': {
-        const list = topupRequests.filter(
+        const list = (topupRequests || []).filter(
           (t) =>
-            inDateRange(t.createdAt?.toMillis?.()) &&
-            matchSearch([t.requesterName, t.targetName || ''])
+            inDateRange(t?.createdAt?.toMillis?.()) &&
+            matchSearch([t?.requesterName || '', t?.targetName || ''])
         );
-        const total = list.reduce((a, t) => a + t.totalAmount, 0);
+        const total = list.reduce((a, t) => a + (t?.totalAmount ?? 0), 0);
         return {
           title: 'تقرير طلبات التغذية (ثنائي المستوى)',
           headers: ['مقدم الطلب', 'الموجّه إليه', 'الكروت', 'المبلغ', 'الحالة'],
           rows: list.map((t) => [
-            t.requesterName,
-            t.targetName || SUPER_ADMIN_CONFIG.name,
-            String(t.totalCards),
-            `${t.totalAmount} ر.ي`,
-            t.status === 'approved' ? 'مُنفّذ ✅' : t.status === 'pending' ? 'معلق' : 'مرفوض',
+            t?.requesterName || '-',
+            t?.targetName || SUPER_ADMIN_CONFIG.name,
+            String(t?.totalCards ?? 0),
+            `${t?.totalAmount ?? 0} ر.ي`,
+            t?.status === 'approved' ? 'مُنفّذ ✅' : t?.status === 'pending' ? 'معلق' : 'مرفوض',
           ]),
           summary: [
             { label: 'عدد الطلبات', value: String(list.length) },
@@ -363,17 +368,17 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
       }
 
       case 'packages_inventory': {
-        const list = displayPackages.filter((p) => matchSearch([String(p.price), p.dataLabel]));
-        const avail = list.reduce((a, p) => a + p.availableCount, 0);
-        const sold = list.reduce((a, p) => a + p.soldCount, 0);
+        const list = (displayPackages || []).filter((p) => matchSearch([String(p?.price ?? ''), p?.dataLabel || '']));
+        const avail = list.reduce((a, p) => a + (p?.availableCount ?? 0), 0);
+        const sold = list.reduce((a, p) => a + (p?.soldCount ?? 0), 0);
         if (!isAdmin) {
           return {
             title: 'تقرير جرد الباقات المتاحة بحسابك',
             headers: ['الباقة', 'الكروت المتاحة', 'الكروت المباعة'],
             rows: list.map((p) => [
-              `${p.price} ر.ي (${p.dataLabel})`,
-              String(p.availableCount),
-              String(p.soldCount),
+              `${p?.price ?? 0} ر.ي (${p?.dataLabel || ''})`,
+              String(p?.availableCount ?? 0),
+              String(p?.soldCount ?? 0),
             ]),
             summary: [
               { label: 'إجمالي المباعة', value: `${sold} كرت` },
@@ -382,17 +387,17 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
             fileName: 'تقرير_جرد_مخزوني',
           };
         }
-        const uploaded = list.reduce((a, p) => a + p.uploadedCount, 0);
-        const injected = list.reduce((a, p) => a + p.injectedCount, 0);
+        const uploaded = list.reduce((a, p) => a + (p?.uploadedCount ?? 0), 0);
+        const injected = list.reduce((a, p) => a + (p?.injectedCount ?? 0), 0);
         return {
           title: 'تقرير جرد الباقات الثماني والمخزون',
           headers: ['الباقة', 'المرفوعة', 'المتاحة', 'المباعة', 'المحقونة'],
           rows: list.map((p) => [
-            `${p.price} ر.ي (${p.dataLabel})`,
-            String(p.uploadedCount),
-            String(p.availableCount),
-            String(p.soldCount),
-            String(p.injectedCount),
+            `${p?.price ?? 0} ر.ي (${p?.dataLabel || ''})`,
+            String(p?.uploadedCount ?? 0),
+            String(p?.availableCount ?? 0),
+            String(p?.soldCount ?? 0),
+            String(p?.injectedCount ?? 0),
           ]),
           summary: [
             { label: 'إجمالي المرفوعة', value: `${uploaded} كرت` },
@@ -405,12 +410,12 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
       }
 
       default: {
-        const filteredAllSales = sales.filter((s) => inDateRange(s.createdAt?.toMillis?.()));
-        const totalSalesAmt = filteredAllSales.reduce((a, s) => a + s.totalAmount, 0);
-        const totalPaidAmt = filteredAllSales.reduce((a, s) => a + s.paidAmount, 0);
-        const totalRemAmt = filteredAllSales.reduce((a, s) => a + s.remainingAmount, 0);
-        const totalCardsSold = filteredAllSales.reduce((a, s) => a + s.totalCards, 0);
-        const totalAvail = displayPackages.reduce((a, p) => a + p.availableCount, 0);
+        const filteredAllSales = (sales || []).filter((s) => inDateRange(s?.createdAt?.toMillis?.()));
+        const totalSalesAmt = filteredAllSales.reduce((a, s) => a + (s?.totalAmount ?? 0), 0);
+        const totalPaidAmt = filteredAllSales.reduce((a, s) => a + (s?.paidAmount ?? 0), 0);
+        const totalRemAmt = filteredAllSales.reduce((a, s) => a + (s?.remainingAmount ?? 0), 0);
+        const totalCardsSold = filteredAllSales.reduce((a, s) => a + (s?.totalCards ?? 0), 0);
+        const totalAvail = (displayPackages || []).reduce((a, p) => a + (p?.availableCount ?? 0), 0);
         const breakdown = buildSalesListDenominationBreakdown(filteredAllSales, appSettings);
         const rows: string[][] = [
           ['إجمالي عمليات البيع المسجلة', `${formatNumEn(filteredAllSales.length)} عملية`],
@@ -517,34 +522,35 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
         </div>
 
         {/* Date Range + Search Filters */}
-        <div className="rounded-2xl bg-white dark:bg-slate-900 border border-[#D4AF37]/60 p-3 space-y-2">
+        <div className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] p-3 space-y-2 shadow-sm">
           <div className="relative">
-            <Search className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2" />
+            <Search className="w-4 h-4 text-[#1A365D] dark:text-[#FDE68A] absolute right-3 top-1/2 -translate-y-1/2" />
             <input
               type="text"
+              autoComplete="off"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="بحث داخل التقرير..."
-              className="w-full min-h-[40px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 pr-9 pl-3 text-xs font-bold"
+              className="w-full min-h-[40px] rounded-xl border-2 border-[#1A365D]/70 dark:border-[#60A5FA]/70 bg-slate-50 dark:bg-slate-800 pr-9 pl-3 text-xs font-extrabold shadow-xs focus:border-[#D4AF37] focus:outline-none"
             />
           </div>
           <div className="grid grid-cols-2 gap-2">
             <div className="flex items-center gap-1.5">
-              <Calendar className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+              <Calendar className="w-3.5 h-3.5 text-[#1A365D] dark:text-[#FDE68A] shrink-0" />
               <input
                 type="date"
                 value={fromDate}
                 onChange={(e) => setFromDate(e.target.value)}
-                className="flex-1 min-h-[36px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-2 text-xs font-bold"
+                className="flex-1 min-h-[36px] rounded-xl border-2 border-[#1A365D]/65 dark:border-[#60A5FA]/65 bg-slate-50 dark:bg-slate-800 px-2 text-xs font-extrabold shadow-xs focus:border-[#D4AF37] focus:outline-none"
               />
             </div>
             <div className="flex items-center gap-1.5">
-              <Calendar className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+              <Calendar className="w-3.5 h-3.5 text-[#1A365D] dark:text-[#FDE68A] shrink-0" />
               <input
                 type="date"
                 value={toDate}
                 onChange={(e) => setToDate(e.target.value)}
-                className="flex-1 min-h-[36px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-2 text-xs font-bold"
+                className="flex-1 min-h-[36px] rounded-xl border-2 border-[#1A365D]/65 dark:border-[#60A5FA]/65 bg-slate-50 dark:bg-slate-800 px-2 text-xs font-extrabold shadow-xs focus:border-[#D4AF37] focus:outline-none"
               />
             </div>
           </div>

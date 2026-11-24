@@ -1,5 +1,4 @@
 import { Capacitor } from '@capacitor/core';
-import { NativeBiometric } from '@capgo/capacitor-native-biometric';
 
 /**
  * Real Native Android Fingerprint & Face Unlock Engine (`@capgo/capacitor-native-biometric`)
@@ -28,7 +27,7 @@ const IDB_STORE = 'vault';
 const IDB_KEY_ID = 'aes_gcm_master_key';
 const IDB_RECORD_ID = 'encrypted_session_cred';
 
-export type BiometricMethod = 'fingerprint' | 'face';
+export type BiometricMethod = 'unified' | 'fingerprint' | 'face';
 
 export interface BiometricEnrollment {
   mode: 'android_biometric' | 'webauthn' | 'quick_pin';
@@ -71,6 +70,16 @@ function isNativeAndroid(): boolean {
     return Capacitor.isNativePlatform();
   } catch {
     return false;
+  }
+}
+
+async function loadNativeBiometric() {
+  if (!isNativeAndroid()) return null;
+  try {
+    const mod = await import('@capgo/capacitor-native-biometric');
+    return mod?.NativeBiometric ?? null;
+  } catch {
+    return null;
   }
 }
 
@@ -190,6 +199,8 @@ export async function saveBiometricVaultCredentials(
 
   if (isNativeAndroid()) {
     try {
+      const NativeBiometric = await loadNativeBiometric();
+      if (!NativeBiometric) return false;
       await NativeBiometric.setCredentials({
         username: cleanEmail,
         password,
@@ -231,6 +242,8 @@ export async function saveBiometricVaultCredentials(
  */
 export async function readBiometricVaultCredentials(): Promise<StoredVaultCredentials | null> {
   if (isNativeAndroid()) {
+    const NativeBiometric = await loadNativeBiometric();
+    if (!NativeBiometric) return null;
     try {
       const creds = await NativeBiometric.getCredentials({
         server: NATIVE_KEYSTORE_SERVER,
@@ -283,8 +296,11 @@ export async function readBiometricVaultCredentials(): Promise<StoredVaultCreden
 
 async function deleteBiometricVaultCredentials(): Promise<void> {
   if (isNativeAndroid()) {
-    await NativeBiometric.deleteCredentials({ server: NATIVE_KEYSTORE_SERVER }).catch(() => {});
-    await NativeBiometric.deleteCredentials({ server: LEGACY_KEYSTORE_SERVER }).catch(() => {});
+    const NativeBiometric = await loadNativeBiometric();
+    if (NativeBiometric) {
+      await NativeBiometric.deleteCredentials({ server: NATIVE_KEYSTORE_SERVER }).catch(() => {});
+      await NativeBiometric.deleteCredentials({ server: LEGACY_KEYSTORE_SERVER }).catch(() => {});
+    }
   }
   try {
     await idbDelete(IDB_RECORD_ID);
@@ -300,6 +316,8 @@ export async function isBiometricHardwareAvailable(): Promise<{
   if (typeof window === 'undefined') return { available: false };
   if (isNativeAndroid()) {
     try {
+      const NativeBiometric = await loadNativeBiometric();
+      if (!NativeBiometric) return { available: false };
       const status = await NativeBiometric.isAvailable();
       return {
         available: Boolean(status?.isAvailable),
@@ -425,6 +443,10 @@ export function clearBiometricEnrollment(): void {
 }
 
 export function disableBiometricMethod(method: BiometricMethod): BiometricEnrollment | null {
+  if (method === 'unified') {
+    clearBiometricEnrollment();
+    return null;
+  }
   const existing = getSavedBiometricEnrollment();
   if (!existing) {
     clearBiometricEnrollment();
@@ -477,7 +499,7 @@ export async function enrollDeviceBiometric(
   hasVault: boolean;
   errorMessage?: string;
 }> {
-  const method: BiometricMethod = options?.method || 'fingerprint';
+  const method: BiometricMethod = options?.method || 'unified';
   const existing = getSavedBiometricEnrollment();
 
   if (activeBiometricPrompt) {
@@ -500,25 +522,32 @@ export async function enrollDeviceBiometric(
   const vaultPassword = options?.password || memorySessionCredentials?.password || '';
 
   const promptTitle =
-    method === 'face'
-      ? 'تفعيل الدخول ببصمة الوجه — طيبة نت'
-      : 'تفعيل الدخول ببصمة اليد — طيبة نت';
+    method === 'unified'
+      ? 'تفعيل الدخول الحيوي — طيبة نت'
+      : method === 'face'
+        ? 'تفعيل الدخول ببصمة الوجه — طيبة نت'
+        : 'تفعيل الدخول ببصمة اليد — طيبة نت';
   const promptSubtitle =
-    method === 'face'
-      ? 'التحقق الحقيقي عبر مستشعر الوجه'
-      : 'التحقق الحقيقي عبر مستشعر البصمة';
+    method === 'unified'
+      ? 'البصمة أو الوجه أو رمز قفل الجهاز'
+      : method === 'face'
+        ? 'التحقق الحقيقي عبر مستشعر الوجه'
+        : 'التحقق الحقيقي عبر مستشعر البصمة';
   const promptDesc =
-    method === 'face'
-      ? 'تحقق من وجهك لحفظ الجلسة مشفرة والدخول فوراً بدون كلمة مرور'
-      : 'ضع إصبعك على المستشعر لحفظ الجلسة مشفرة والدخول فوراً بدون كلمة مرور';
+    method === 'unified'
+      ? 'تحقق عبر نظام أمان الهاتف الرسمي لحفظ الدخول الحيوي الآمن'
+      : method === 'face'
+        ? 'تحقق من وجهك لحفظ الجلسة مشفرة والدخول الآمن'
+        : 'ضع إصبعك على المستشعر لحفظ الجلسة مشفرة والدخول الآمن';
 
   activeBiometricPrompt = true;
   try {
     // Tier 1: Real Native Android BiometricPrompt + Hardware Keystore (`server: "taibahnet.app"`)
     if (isNativeAndroid()) {
       try {
-        const availability = await NativeBiometric.isAvailable();
-        if (!availability?.isAvailable) {
+        const NativeBiometric = await loadNativeBiometric();
+        const availability = NativeBiometric ? await NativeBiometric.isAvailable() : null;
+        if (!NativeBiometric || !availability?.isAvailable) {
           return {
             success: false,
             mode: 'android_biometric',
@@ -560,8 +589,14 @@ export async function enrollDeviceBiometric(
           authEmail: vaultEmail,
           displayName,
           hasVault: true,
-          fingerprintEnabled: method === 'fingerprint' ? true : Boolean(existing?.fingerprintEnabled),
-          faceEnabled: method === 'face' ? true : Boolean(existing?.faceEnabled),
+          fingerprintEnabled:
+            method === 'unified' || method === 'fingerprint'
+              ? true
+              : Boolean(existing?.fingerprintEnabled),
+          faceEnabled:
+            method === 'unified' || method === 'face'
+              ? true
+              : Boolean(existing?.faceEnabled),
           enrolledAt: Date.now(),
         };
         localStorage.setItem(BIOMETRIC_META_KEY, JSON.stringify(record));
@@ -627,8 +662,14 @@ export async function enrollDeviceBiometric(
             authEmail: vaultEmail,
             displayName,
             hasVault,
-            fingerprintEnabled: method === 'fingerprint' ? true : Boolean(existing?.fingerprintEnabled),
-            faceEnabled: method === 'face' ? true : Boolean(existing?.faceEnabled),
+            fingerprintEnabled:
+              method === 'unified' || method === 'fingerprint'
+                ? true
+                : Boolean(existing?.fingerprintEnabled),
+            faceEnabled:
+              method === 'unified' || method === 'face'
+                ? true
+                : Boolean(existing?.faceEnabled),
             enrolledAt: Date.now(),
           };
           localStorage.setItem(BIOMETRIC_META_KEY, JSON.stringify(record));
@@ -639,7 +680,7 @@ export async function enrollDeviceBiometric(
       }
     }
 
-    // Tier 3: Encrypted AES-GCM Web Vault fallback (for embedded web preview)
+    // Tier 3: Encrypted AES-GCM Web Vault fallback (requires explicit PIN for web verification)
     const hasVault = vaultPassword
       ? await saveBiometricVaultCredentials(vaultEmail, vaultPassword)
       : Boolean(await readBiometricVaultCredentials());
@@ -659,8 +700,14 @@ export async function enrollDeviceBiometric(
       authEmail: vaultEmail,
       displayName,
       hasVault: true,
-      fingerprintEnabled: method === 'fingerprint' ? true : Boolean(existing?.fingerprintEnabled),
-      faceEnabled: method === 'face' ? true : Boolean(existing?.faceEnabled),
+      fingerprintEnabled:
+        method === 'unified' || method === 'fingerprint'
+          ? true
+          : Boolean(existing?.fingerprintEnabled),
+      faceEnabled:
+        method === 'unified' || method === 'face'
+          ? true
+          : Boolean(existing?.faceEnabled),
       pinHash: options?.optionalPin ? simplePinHash(options.optionalPin) : existing?.pinHash,
       enrolledAt: Date.now(),
     };
@@ -672,13 +719,13 @@ export async function enrollDeviceBiometric(
 }
 
 /**
- * Verify real Biometric / Face Unlock and retrieve credentials from Android Hardware Keystore
- * (`NativeBiometric.getCredentials({ server: "taibahnet.app" })`) for instant automatic login
- * WITHOUT ever asking for a password.
+ * Verify real Biometric / Face / Device PIN Unlock via Android's unified BiometricPrompt
+ * and retrieve credentials from Hardware Keystore (`server: "taibahnet.app"`).
+ * Strictly enforces real verification — NEVER bypasses security checks!
  */
 export async function verifyDeviceBiometric(
   enteredPin?: string,
-  method: BiometricMethod = 'fingerprint'
+  method: BiometricMethod = 'unified'
 ): Promise<{
   verified: boolean;
   enrollment: BiometricEnrollment | null;
@@ -692,37 +739,45 @@ export async function verifyDeviceBiometric(
     return {
       verified: false,
       enrollment: null,
-      errorMessage: 'قم بتفعيل البصمة أو الوجه أولاً من شاشة الإعدادات وحول التطبيق.',
+      errorMessage: 'قم بتفعيل الدخول الحيوي أولاً من شاشة «الإعدادات وحول التطبيق».',
     };
   }
 
-  const methodEnabled = method === 'face' ? saved.faceEnabled : saved.fingerprintEnabled;
+  const methodEnabled =
+    method === 'unified'
+      ? saved.fingerprintEnabled || saved.faceEnabled
+      : method === 'face'
+        ? saved.faceEnabled
+        : saved.fingerprintEnabled;
+
   if (!methodEnabled) {
     return {
       verified: false,
       enrollment: saved,
-      errorMessage:
-        method === 'face'
-          ? 'الدخول ببصمة الوجه غير مُفعّل بعد — فعّله من شاشة الإعدادات.'
-          : 'الدخول ببصمة اليد غير مُفعّل بعد — فعّله من شاشة الإعدادات.',
+      errorMessage: 'الدخول الحيوي غير مُفعّل بعد — فعّله أولاً من شاشة الإعدادات.',
     };
   }
 
   const title =
-    method === 'face'
-      ? 'كروت طيبة نت — بصمة الوجه'
-      : 'كروت طيبة نت — بصمة اليد';
+    method === 'unified'
+      ? 'كروت طيبة نت — التحقق الحيوي'
+      : method === 'face'
+        ? 'كروت طيبة نت — بصمة الوجه'
+        : 'كروت طيبة نت — بصمة اليد';
   const description =
-    method === 'face'
-      ? 'وجّه وجهك للكاميرا للدخول الفوري بدون كلمة مرور'
-      : 'ضع إصبعك على مستشعر البصمة للدخول الفوري بدون كلمة مرور';
+    method === 'unified'
+      ? 'تحقق عبر البصمة أو الوجه أو رمز قفل الهاتف للدخول الآمن'
+      : method === 'face'
+        ? 'وجّه وجهك للكاميرا للدخول الآمن'
+        : 'ضع إصبعك على مستشعر البصمة للدخول الآمن';
 
   // Tier 1: Real Native Android BiometricPrompt + Hardware Keystore (`taibahnet.app`)
   if (isNativeAndroid()) {
     activeBiometricPrompt = true;
     try {
-      const avail = await NativeBiometric.isAvailable();
-      if (!avail?.isAvailable) {
+      const NativeBiometric = await loadNativeBiometric();
+      const avail = NativeBiometric ? await NativeBiometric.isAvailable() : null;
+      if (!NativeBiometric || !avail?.isAvailable) {
         return {
           verified: false,
           enrollment: saved,
@@ -739,27 +794,55 @@ export async function verifyDeviceBiometric(
       });
 
       const credentials = await readBiometricVaultCredentials();
+      if (!credentials?.email || !credentials?.password) {
+        return {
+          verified: false,
+          enrollment: saved,
+          errorMessage: 'تعذر استرجاع الجلسة المشفرة — يرجى الدخول بكلمة المرور لتحديث الخزنة.',
+        };
+      }
       return { verified: true, enrollment: saved, credentials };
     } catch {
-      return { verified: false, enrollment: null };
+      return {
+        verified: false,
+        enrollment: null,
+        errorMessage: 'لم يكتمل التحقق الحيوي — حاول مجدداً أو استخدم كلمة المرور.',
+      };
     } finally {
       activeBiometricPrompt = false;
     }
   }
 
-  // Tier 3: Quick-PIN or embedded web preview vault
+  // Tier 3: Web preview / Quick-PIN — strictly requires real PIN (no silent bypass!)
   if (saved.mode === 'quick_pin' || isRunningInsideIframe()) {
     if (saved.pinHash) {
       if (!enteredPin) {
         return { verified: false, enrollment: saved, requiresPin: true };
       }
       const match = simplePinHash(enteredPin) === saved.pinHash;
-      if (!match) return { verified: false, enrollment: null };
+      if (!match) {
+        return {
+          verified: false,
+          enrollment: null,
+          errorMessage: 'رمز التحقق غير صحيح.',
+        };
+      }
       const credentials = await readBiometricVaultCredentials();
+      if (!credentials?.email || !credentials?.password) {
+        return {
+          verified: false,
+          enrollment: saved,
+          errorMessage: 'سجّل الدخول بكلمة المرور لتحديث الخزنة المشفرة.',
+        };
+      }
       return { verified: true, enrollment: saved, credentials };
     }
-    const credentials = await readBiometricVaultCredentials();
-    return { verified: true, enrollment: saved, credentials };
+    return {
+      verified: false,
+      enrollment: saved,
+      errorMessage:
+        'مستشعر البصمة والوجه الرسمي يعمل مباشرة على تطبيق أندرويد (APK) — يرجى الدخول بكلمة المرور هنا.',
+    };
   }
 
   // Tier 2: WebAuthn platform verification

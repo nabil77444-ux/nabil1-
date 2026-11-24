@@ -1,6 +1,5 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Capacitor } from '@capacitor/core';
-import { StatusBar, Style } from '@capacitor/status-bar';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { FeedbackProvider, useFeedback } from './lib/feedback';
 import { FirebaseProvider, useFirebase } from './contexts/FirebaseContext';
@@ -9,6 +8,18 @@ import { AuthScreen } from './components/AuthScreen';
 import { HomeScreen } from './components/HomeScreen';
 import { SidebarDrawer } from './components/SidebarDrawer';
 import { ActiveSubScreen, preloadCoreSubScreens } from './components/SubScreens';
+import { UpdatePromptModal } from './components/UpdatePromptModal';
+import {
+  EXPLICIT_SIGNOUT_EVENT,
+  hasActiveSessionUnlocked,
+  markActiveSessionUnlocked,
+} from './lib/sessionGuard';
+import {
+  checkForAppUpdate,
+  isUpdateSnoozedForCurrentSession,
+  notifyUpdaterReady,
+  type AppUpdateManifest,
+} from './services/updaterService';
 import type { AppRoute } from './types/taibah';
 
 const THEME_STORAGE_KEY = 'taibah_theme_v1';
@@ -31,6 +42,14 @@ const VALID_ROUTES: AppRoute[] = [
   'backup',
 ];
 
+function isNativePlatformSafe(): boolean {
+  try {
+    return Capacitor.isNativePlatform();
+  } catch {
+    return false;
+  }
+}
+
 function getInitialRoute(): AppRoute {
   try {
     const params = new URLSearchParams(window.location.search);
@@ -49,36 +68,141 @@ const TaibahAppShell: React.FC = () => {
     authReady,
     firebaseUser,
     profile,
-    profileLoading,
     needsAdminEmailVerification,
+    appSettings,
     activeRoute,
     setActiveRoute,
   } = useFirebase();
-  const { notifyInfo } = useFeedback();
+  const { notifyInfo, notifySuccess } = useFeedback();
 
-  // Update 12: Mandatory hard cap of 1200ms max on Splash Screen — NEVER block startup!
+  // Persisted in sessionStorage during the active run:
+  // - Never locks on blur, visibilitychange, keyboard open, PDF picker, or icon navigation.
+  // - Automatically resets to locked ONLY when the app is completely closed and reopened fresh
+  //   OR when the user manually taps "تسجيل الخروج".
+  const [sessionUnlocked, setSessionUnlocked] = useState<boolean>(() =>
+    hasActiveSessionUnlocked()
+  );
+
+  // Brief splash cap (max 650ms) so AuthScreen / Workspace appears almost instantaneously
   const [splashCapReached, setSplashCapReached] = useState(false);
 
+  // Global OTA Live Update state (applies to ALL users: client, agent, admin)
+  const [availableUpdate, setAvailableUpdate] = useState<{
+    manifest: AppUpdateManifest;
+    requiresNativeApk: boolean;
+  } | null>(null);
+
+  const runUpdateCheck = useCallback(
+    async (silent: boolean) => {
+      try {
+        const result = await checkForAppUpdate({
+          apkDownloadUrl: appSettings?.apkDownloadUrl,
+          silent,
+        });
+
+        if (result.hasUpdate && result.manifest) {
+          if (silent && isUpdateSnoozedForCurrentSession(result.manifest.version)) {
+            return;
+          }
+          setAvailableUpdate({
+            manifest: result.manifest,
+            requiresNativeApk: result.requiresNativeApk,
+          });
+        } else if (!silent) {
+          if (result.error) {
+            notifyInfo('تحديثات التطبيق', result.error);
+          } else {
+            notifySuccess(`التطبيق محدّث على آخر إصدار (v${result.currentVersion}) ✅`);
+          }
+        }
+      } catch {
+        // Non-fatal: never crash app or disturb user on update check failures
+      }
+    },
+    [appSettings?.apkDownloadUrl, notifyInfo, notifySuccess]
+  );
+
+  // ONLY lock the session when the user explicitly clicks manual "تسجيل الخروج"
   useEffect(() => {
-    // Enforce native Android Safe Area (prevent top status bar overlap with WebView)
-    if (Capacitor.isNativePlatform()) {
-      StatusBar.setOverlaysWebView({ overlay: false }).catch(() => {});
-      StatusBar.setStyle({ style: Style.Dark }).catch(() => {});
-      StatusBar.setBackgroundColor({ color: '#0F172A' }).catch(() => {});
+    const onExplicitSignOut = () => {
+      setSessionUnlocked(false);
+    };
+    window.addEventListener(EXPLICIT_SIGNOUT_EVENT, onExplicitSignOut);
+    return () => {
+      window.removeEventListener(EXPLICIT_SIGNOUT_EVENT, onExplicitSignOut);
+    };
+  }, []);
+
+  useEffect(() => {
+    // 1. Immediately confirm active OTA bundle loaded cleanly (native only)
+    try {
+      notifyUpdaterReady();
+    } catch {
+      // non-fatal on web preview
+    }
+
+    // 2. Enforce native Android Safe Area (prevent top status bar overlap with WebView)
+    if (isNativePlatformSafe()) {
+      void import('@capacitor/status-bar')
+        .then(({ StatusBar, Style }) => {
+          StatusBar.setOverlaysWebView({ overlay: false }).catch(() => {});
+          StatusBar.setStyle({ style: Style.Dark }).catch(() => {});
+          StatusBar.setBackgroundColor({ color: '#0F172A' }).catch(() => {});
+        })
+        .catch(() => {
+          // ignore on unsupported environments
+        });
     }
 
     const initial = getInitialRoute();
     if (initial !== 'home') {
       setActiveRoute(initial);
     }
-    const timer = window.setTimeout(() => setSplashCapReached(true), 1200);
-    // Warm up secondary sub-screen chunks silently in the background for snappy navigation
-    const preloadTimer = window.setTimeout(() => preloadCoreSubScreens(), 550);
+    const timer = window.setTimeout(() => setSplashCapReached(true), 650);
+    const preloadTimer = window.setTimeout(() => preloadCoreSubScreens(), 500);
     return () => {
       window.clearTimeout(timer);
       window.clearTimeout(preloadTimer);
     };
   }, [setActiveRoute]);
+
+  // 3. Silent OTA Update Check on launch + on resume from background (native guarded)
+  useEffect(() => {
+    if (!isNativePlatformSafe()) return;
+
+    let cancelled = false;
+    const initialCheckTimer = window.setTimeout(() => {
+      if (!cancelled) void runUpdateCheck(true);
+    }, 1800);
+
+    let appStateHandle: { remove: () => Promise<void> } | null = null;
+    void import('@capacitor/app')
+      .then(({ App: CapacitorApp }) => {
+        if (cancelled) return;
+        return CapacitorApp.addListener('appStateChange', ({ isActive }) => {
+          if (!cancelled && isActive) {
+            void runUpdateCheck(true);
+          }
+        }).then((handle) => {
+          if (cancelled) {
+            void handle.remove().catch(() => {});
+          } else {
+            appStateHandle = handle;
+          }
+        });
+      })
+      .catch(() => {
+        // non-fatal on web preview
+      });
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(initialCheckTimer);
+      if (appStateHandle) {
+        void appStateHandle.remove().catch(() => {});
+      }
+    };
+  }, [runUpdateCheck]);
 
   const [isDark, setIsDark] = useState<boolean>(() => {
     try {
@@ -148,38 +272,71 @@ const TaibahAppShell: React.FC = () => {
     });
   };
 
-  // 1. Instant Boot (Update 12): If cached active profile exists, render immediately (<0.5s).
-  // Otherwise show Splash for AT MOST 1200ms while Firebase Auth/Firestore settles silently.
-  const hasCachedActiveSession = profile && profile.status === 'active' && !needsAdminEmailVerification;
-  const stillInitializing = !authReady || (firebaseUser && profileLoading && !profile);
+  const handleUnlockSession = useCallback((uid?: string, email?: string) => {
+    markActiveSessionUnlocked(uid, email);
+    setSessionUnlocked(true);
+  }, []);
 
-  if (!hasCachedActiveSession && stillInitializing && !splashCapReached) {
-    return <SplashScreen />;
+  const updateModalNode = (
+    <UpdatePromptModal
+      manifest={availableUpdate?.manifest || null}
+      requiresNativeApk={Boolean(availableUpdate?.requiresNativeApk)}
+      onDismiss={() => {
+        setAvailableUpdate(null);
+      }}
+    />
+  );
+
+  // 1. Brief Splash only while Auth boots (<650ms)
+  if (!authReady && !splashCapReached) {
+    return (
+      <>
+        <SplashScreen />
+        {updateModalNode}
+      </>
+    );
   }
 
-  // 2. Authentication, Email Verification, or Pending Approval Gate
-  if (
-    (!hasCachedActiveSession && !firebaseUser) ||
-    needsAdminEmailVerification ||
-    !profile ||
-    profile.status !== 'active'
-  ) {
-    return <AuthScreen isDark={isDark} onToggleTheme={toggleTheme} />;
+  // 2. Authentication Gate:
+  //    - Mandatory on fresh cold start (when sessionStorage is empty)
+  //    - Rock-solid during active session (never kicks out on blur/file picker/visibilitychange)
+  const hasAuthenticatedIdentity = Boolean(firebaseUser) || Boolean(profile?.uid);
+  const isFullyVerifiedSession =
+    sessionUnlocked &&
+    hasAuthenticatedIdentity &&
+    !needsAdminEmailVerification &&
+    Boolean(profile) &&
+    profile?.status === 'active';
+
+  if (!isFullyVerifiedSession) {
+    return (
+      <>
+        <AuthScreen
+          isDark={isDark}
+          onToggleTheme={toggleTheme}
+          sessionUnlocked={sessionUnlocked}
+          onUnlockSession={handleUnlockSession}
+        />
+        {updateModalNode}
+      </>
+    );
   }
 
-  // 3. Authenticated Active Workspace
+  // 3. Authenticated Active Workspace (Sub-screens wrapped in dedicated ErrorBoundary)
   return (
     <>
       {activeRoute === 'home' ? (
-        <HomeScreen
-          activeRoute={activeRoute}
-          onNavigate={handleNavigate}
-          onOpenSidebar={() => setSidebarOpen(true)}
-          isDark={isDark}
-          onToggleTheme={toggleTheme}
-          hideNumbers={hideNumbers}
-          onToggleHideNumbers={toggleHideNumbers}
-        />
+        <ErrorBoundary resetKey="home">
+          <HomeScreen
+            activeRoute={activeRoute}
+            onNavigate={handleNavigate}
+            onOpenSidebar={() => setSidebarOpen(true)}
+            isDark={isDark}
+            onToggleTheme={toggleTheme}
+            hideNumbers={hideNumbers}
+            onToggleHideNumbers={toggleHideNumbers}
+          />
+        </ErrorBoundary>
       ) : (
         <ActiveSubScreen
           route={activeRoute}
@@ -188,6 +345,7 @@ const TaibahAppShell: React.FC = () => {
           isDark={isDark}
           onToggleTheme={toggleTheme}
           hideNumbers={hideNumbers}
+          onManualCheckUpdate={() => void runUpdateCheck(false)}
         />
       )}
 
@@ -198,6 +356,8 @@ const TaibahAppShell: React.FC = () => {
         onClose={() => setSidebarOpen(false)}
         onNavigate={handleNavigate}
       />
+
+      {updateModalNode}
     </>
   );
 };

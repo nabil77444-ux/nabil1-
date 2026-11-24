@@ -103,28 +103,29 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
       tag: string;
     }> = [];
 
-    for (const u of managedUsers) {
-      if (u.role === 'super_admin' || u.status !== 'active') continue;
+    for (const u of managedUsers || []) {
+      if (!u || u.role === 'super_admin' || u.status !== 'active') continue;
       opts.push({
         key: `user_${u.uid}`,
         id: u.uid,
-        name: u.name,
-        phone: u.phone,
+        name: u.name || 'حساب بدون اسم',
+        phone: u.phone || '',
         role: u.role === 'agent' ? 'agent' : 'client',
         rate:
           u.discountRate ||
-          (u.role === 'agent' ? appSettings.agentDiscountPercent : appSettings.clientDiscountPercent),
+          (u.role === 'agent' ? appSettings?.agentDiscountPercent || 70 : appSettings?.clientDiscountPercent || 80),
         tag: getRoleArabicLabel(u.role),
       });
     }
-    for (const c of customers) {
+    for (const c of customers || []) {
+      if (!c) continue;
       opts.push({
         key: `cust_${c.id}`,
         id: '',
-        name: c.name,
+        name: c.name || 'عميل',
         phone: c.phone || '',
         role: 'client',
-        rate: appSettings.clientDiscountPercent || 80,
+        rate: appSettings?.clientDiscountPercent || 80,
         tag: c.category || 'عميل',
       });
     }
@@ -182,10 +183,11 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
 
   const pendingDeliverySales = useMemo(
     () =>
-      sales.filter(
+      (sales || []).filter(
         (s) =>
+          s &&
           s.saleType === (isElectronic ? 'electronic_wholesale' : 'paper_invoice') &&
-          s.deliveredCards < s.totalCards
+          (s.deliveredCards ?? 0) < (s.totalCards ?? 0)
       ),
     [sales, isElectronic]
   );
@@ -397,8 +399,8 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
         </div>
       </div>
 
-      {/* Recipient + Pricing + Payment Configuration Card */}
-      <div className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37]/70 p-3.5 shadow-md space-y-3">
+      {/* Recipient + Pricing + Payment Configuration Card — Vivid Color-Coded Borders */}
+      <div className="royal-card-frame rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] p-3 shadow-md space-y-2.5">
         <div className="flex items-center justify-between gap-2">
           <span className="text-xs font-extrabold text-[#1A365D] dark:text-[#FDE68A]">
             بيانات المستلم والتسعير التلقائي
@@ -406,19 +408,19 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
           <button
             type="button"
             onClick={() => setShowNewRecipientModal(true)}
-            className="min-h-[34px] px-3 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-[#D4AF37] text-[#1A365D] dark:text-[#FDE68A] text-[11px] font-extrabold flex items-center gap-1"
+            className="min-h-[34px] px-3 rounded-xl bg-amber-50 dark:bg-amber-950/40 border-2 border-[#D4AF37] text-[#1A365D] dark:text-[#FDE68A] text-[11px] font-extrabold flex items-center gap-1 shadow-xs active:scale-95 transition-transform"
           >
             <UserPlus className="w-3.5 h-3.5" />
             <span>+ إضافة مستلم جديد</span>
           </button>
         </div>
 
-        {/* Saved Recipient Dropdown */}
+        {/* Saved Recipient Dropdown — Crisp Royal Navy Border */}
         {recipientOptions.length > 0 && (
           <select
             value={selectedRecipientKey}
             onChange={(e) => handleSelectRecipient(e.target.value)}
-            className="w-full min-h-[42px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold focus:border-[#D4AF37] focus:outline-none"
+            className="w-full min-h-[42px] rounded-xl border-2 border-[#1A365D]/70 dark:border-[#60A5FA]/70 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-extrabold text-slate-900 dark:text-white shadow-xs focus:border-[#D4AF37] focus:outline-none"
           >
             <option value="">-- اختر من الوكلاء أو العملاء المسجلين --</option>
             {recipientOptions.map((o) => (
@@ -429,22 +431,25 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
           </select>
         )}
 
-        {/* Direct Name + Phone + Contact Picker */}
+        {/* Direct Name + Phone + Contact Picker — Crisp Royal Navy Borders */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
           <input
             type="text"
+            autoComplete="off"
             value={customName}
             onChange={(e) => setCustomName(e.target.value)}
             placeholder="اسم الوكيل / العميل / المحل"
-            className="min-h-[42px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold focus:border-[#D4AF37] focus:outline-none"
+            className="min-h-[42px] rounded-xl border-2 border-[#1A365D]/70 dark:border-[#60A5FA]/70 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-extrabold text-slate-900 dark:text-white shadow-xs focus:border-[#D4AF37] focus:outline-none"
           />
           <div className="flex items-center gap-1.5">
             <input
               type="tel"
+              inputMode="numeric"
+              autoComplete="off"
               value={customPhone}
               onChange={(e) => setCustomPhone(e.target.value)}
               placeholder="رقم الهاتف"
-              className="flex-1 min-h-[42px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold tabular-nums focus:border-[#D4AF37] focus:outline-none"
+              className="flex-1 min-h-[42px] rounded-xl border-2 border-[#1A365D]/70 dark:border-[#60A5FA]/70 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-extrabold text-slate-900 dark:text-white tabular-nums shadow-xs focus:border-[#D4AF37] focus:outline-none"
             />
             <ContactPickerButton
               onSelect={(c) => {
@@ -456,11 +461,11 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
           </div>
         </div>
 
-        {/* Auto Pricing Tier Pills (70% Agent / 80% Client / 100% Consumer) */}
+        {/* Auto Pricing Tier Pills (70% Agent / 80% Client / 100% Consumer) — Balanced Blue/Navy Borders */}
         <div className="grid grid-cols-3 gap-1.5">
           {[
-            { role: 'agent' as const, rate: appSettings.agentDiscountPercent || 70, label: `وكيل (${appSettings.agentDiscountPercent || 70}%)` },
-            { role: 'client' as const, rate: appSettings.clientDiscountPercent || 80, label: `عميل (${appSettings.clientDiscountPercent || 80}%)` },
+            { role: 'agent' as const, rate: appSettings?.agentDiscountPercent || 70, label: `وكيل (${appSettings?.agentDiscountPercent || 70}%)` },
+            { role: 'client' as const, rate: appSettings?.clientDiscountPercent || 80, label: `عميل (${appSettings?.clientDiscountPercent || 80}%)` },
             { role: 'consumer' as const, rate: 100, label: 'سعر كامل (100%)' },
           ].map((tier) => (
             <button
@@ -470,10 +475,10 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
                 setBuyerRole(tier.role);
                 setDiscountRate(tier.rate);
               }}
-              className={`min-h-[38px] rounded-xl border text-[11px] font-extrabold transition-all ${
+              className={`min-h-[38px] rounded-xl border-2 text-[11px] font-extrabold transition-all shadow-xs ${
                 buyerRole === tier.role && discountRate === tier.rate
-                  ? 'bg-[#1A365D] text-[#FDE68A] border-[#D4AF37] shadow'
-                  : 'bg-slate-50 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300'
+                  ? 'bg-[#1A365D] text-[#FDE68A] border-[#D4AF37] shadow-md'
+                  : 'bg-blue-50/75 dark:bg-slate-800 border-blue-700/70 dark:border-blue-400/70 text-[#1A365D] dark:text-blue-100'
               }`}
             >
               {tier.label}
@@ -481,7 +486,7 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
           ))}
         </div>
 
-        {/* Payment Method & Delivery Mode */}
+        {/* Payment Method Buttons — Balanced Emerald Borders */}
         <div className="grid grid-cols-3 gap-1.5">
           {(
             [
@@ -494,10 +499,10 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
               key={pm.id}
               type="button"
               onClick={() => setPaymentMethod(pm.id)}
-              className={`min-h-[36px] rounded-xl border text-xs font-extrabold ${
+              className={`min-h-[36px] rounded-xl border-2 text-xs font-extrabold transition-all shadow-xs ${
                 paymentMethod === pm.id
-                  ? 'bg-emerald-600 text-white border-emerald-700 shadow'
-                  : 'bg-slate-50 dark:bg-slate-800 border-slate-200 dark:border-slate-700'
+                  ? 'bg-emerald-600 text-white border-emerald-800 shadow-md'
+                  : 'bg-emerald-50/65 dark:bg-slate-800 border-emerald-600/70 dark:border-emerald-400/70 text-emerald-900 dark:text-emerald-100'
               }`}
             >
               {pm.label}
@@ -507,27 +512,32 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
 
         {paymentMethod === 'partial' && (
           <input
-            type="number"
-            min={0}
-            value={paidAmountInput}
-            onChange={(e) => setPaidAmountInput(e.target.value)}
+            type="text"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            autoComplete="off"
+            value={paidAmountInput === '0' ? '' : paidAmountInput}
+            onChange={(e) => setPaidAmountInput(e.target.value.replace(/[^\d.]/g, ''))}
             placeholder={`المبلغ المدفوع مقدماً (من أصل ${totalAmount} ر.ي)`}
-            className="w-full min-h-[40px] rounded-xl border border-[#D4AF37] bg-amber-50/40 dark:bg-slate-800 px-3 text-xs font-extrabold tabular-nums"
+            className="w-full min-h-[40px] rounded-xl border-2 border-[#D4AF37] bg-amber-50/60 dark:bg-slate-800 px-3 text-xs font-extrabold text-slate-900 dark:text-white tabular-nums shadow-xs focus:outline-none"
           />
         )}
 
+        {/* Delivery Mechanism Box — Calm Sky-Blue Prominent Border */}
         {isElectronic && (
-          <div className="flex items-center justify-between gap-2 rounded-xl bg-slate-50 dark:bg-slate-800 p-2 border border-slate-200 dark:border-slate-700">
-            <span className="text-[11px] font-extrabold flex items-center gap-1">
-              <Truck className="w-3.5 h-3.5 text-[#D4AF37]" />
+          <div className="flex items-center justify-between gap-2 rounded-xl bg-sky-50/85 dark:bg-sky-950/35 p-2 border-2 border-sky-600/75 dark:border-sky-400/75 shadow-xs">
+            <span className="text-[11px] font-extrabold text-sky-950 dark:text-sky-100 flex items-center gap-1">
+              <Truck className="w-3.5 h-3.5 text-sky-700 dark:text-[#FDE68A]" />
               آلية التسليم:
             </span>
             <div className="flex items-center gap-1.5">
               <button
                 type="button"
                 onClick={() => setDeliveryMode('full')}
-                className={`px-2.5 py-1 rounded-lg text-[11px] font-extrabold ${
-                  deliveryMode === 'full' ? 'bg-[#1A365D] text-[#FDE68A]' : 'bg-white dark:bg-slate-700'
+                className={`px-2.5 py-1 rounded-lg border-[1.5px] text-[11px] font-extrabold shadow-xs ${
+                  deliveryMode === 'full'
+                    ? 'bg-[#1A365D] text-[#FDE68A] border-[#D4AF37]'
+                    : 'bg-white dark:bg-slate-800 border-sky-600/65 dark:border-sky-400/65 text-sky-900 dark:text-sky-100'
                 }`}
               >
                 كامل الآن
@@ -535,8 +545,10 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
               <button
                 type="button"
                 onClick={() => setDeliveryMode('partial')}
-                className={`px-2.5 py-1 rounded-lg text-[11px] font-extrabold ${
-                  deliveryMode === 'partial' ? 'bg-orange-600 text-white' : 'bg-white dark:bg-slate-700'
+                className={`px-2.5 py-1 rounded-lg border-[1.5px] text-[11px] font-extrabold shadow-xs ${
+                  deliveryMode === 'partial'
+                    ? 'bg-orange-600 text-white border-orange-800'
+                    : 'bg-white dark:bg-slate-800 border-sky-600/65 dark:border-sky-400/65 text-sky-900 dark:text-sky-100'
                 }`}
               >
                 على دفعات
@@ -545,7 +557,7 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
                 <select
                   value={partialDeliverRatio}
                   onChange={(e) => setPartialDeliverRatio(e.target.value)}
-                  className="rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 px-1.5 py-1 text-[11px] font-bold"
+                  className="rounded-lg border-2 border-sky-600/75 dark:border-sky-400/75 bg-white dark:bg-slate-900 px-1.5 py-1 text-[11px] font-extrabold text-sky-950 dark:text-white"
                 >
                   <option value="25">25%</option>
                   <option value="50">50%</option>
@@ -557,11 +569,11 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
         )}
       </div>
 
-      {/* Update 15: Unified 8-Package Grid (Electronic & Paper Modes) */}
-      <div className="grid grid-cols-2 gap-2.5">
-        {displayPackages.map((pkg) => {
+      {/* Unified Compact 8-Package Grid (Exact Direct-Sale Colors + Compact Wholesale Density) */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        {(displayPackages || []).map((pkg) => {
           const qty = cart[pkg.id] || 0;
-          const unitPrice = Math.round((pkg.price * discountRate) / 100);
+          const unitPrice = Math.round(((pkg.price ?? 0) * discountRate) / 100);
           return (
             <PackageCardTile
               key={pkg.id}
@@ -570,6 +582,8 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
               hideNumbers={hideNumbers}
               effectiveUnitPrice={unitPrice}
               showStock={isElectronic}
+              compact={true}
+              confirmVariant="royal"
               confirmLabel={
                 qty > 0
                   ? isElectronic
@@ -577,7 +591,7 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
                     : `إصدار الفاتورة (${qty})`
                   : 'تأكيد البيع (+10)'
               }
-              disabledConfirm={submitting || (isElectronic && pkg.availableCount <= 0)}
+              disabledConfirm={submitting}
               canEdit={false}
               onIncrement={handleIncrement}
               onDecrement={handleDecrement}
@@ -589,49 +603,69 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
         })}
       </div>
 
-      {/* NORMAL-FLOW BATCH SUMMARY CARD (Directly below the 8th package / 3000 YER card — never fixed/sticky) */}
+      {/* NORMAL-FLOW VERTICAL BATCH SUMMARY CARD (Directly below the 8th package / 3000 YER — never fixed/sticky) */}
       {selectedItems.length > 0 && (
         <div className="w-full !mt-[16px] !mb-[28px]">
-          <div className="rounded-2xl royal-header-3d border-2 border-[#D4AF37] p-3 shadow-2xl flex flex-wrap items-center justify-between gap-2">
-            <div className="min-w-0">
-              <div className="text-xs font-extrabold text-[#FDE68A] tabular-nums">
-                {selectedItems.length} باقات · {totalCards} كرت ({getBuyerRoleArabicLabel(buyerRole, isElectronic ? 'electronic_wholesale' : 'paper_invoice')} {discountRate}%)
-              </div>
-              <div className="text-sm font-extrabold text-white tabular-nums">
-                الإجمالي: {formatYER(totalAmount, hideNumbers)}
-              </div>
-              {!hideNumbers && (
-                <div className="text-[10px] font-bold text-slate-200 tabular-nums truncate mt-0.5">
-                  {selectedItems
-                    .map((x) => {
-                      const u = Math.round((x.pkg.price * discountRate) / 100);
-                      return `فئة ${x.pkg.price}: ${x.qty}×${u}=${formatNumEn(x.qty * u)}`;
-                    })
-                    .join(' | ')}
+          <div className="rounded-2xl royal-header-3d border-2 border-[#D4AF37] p-[14px] shadow-2xl flex flex-col gap-[12px]">
+            {/* Top Row: Single clear summary line on right + independent close (×) button on left */}
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0 flex-1 space-y-0.5">
+                <div className="text-xs sm:text-sm font-extrabold text-white tabular-nums leading-snug">
+                  <span className="text-[#FDE68A]">
+                    {selectedItems.length} باقات • {totalCards} كرت
+                  </span>
+                  <span className="mx-1.5 text-[#D4AF37]">|</span>
+                  <span>الإجمالي: {formatYER(totalAmount, hideNumbers)}</span>
                 </div>
-              )}
+                {!hideNumbers && (
+                  <div className="text-[10.5px] font-bold text-slate-200 tabular-nums truncate">
+                    {getBuyerRoleArabicLabel(
+                      buyerRole,
+                      isElectronic ? 'electronic_wholesale' : 'paper_invoice'
+                    )}{' '}
+                    ({discountRate}%):{' '}
+                    {selectedItems
+                      .map((x) => {
+                        const u = Math.round((x.pkg.price * discountRate) / 100);
+                        return `فئة ${x.pkg.price}: ${x.qty}×${u}=${formatNumEn(x.qty * u)}`;
+                      })
+                      .join(' | ')}
+                  </div>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => setCart({})}
+                className="w-8 h-8 rounded-xl bg-white/15 hover:bg-red-600/80 border border-[#D4AF37]/70 text-white flex items-center justify-center shrink-0 active:scale-95 transition-transform"
+                aria-label="مسح التحديد"
+                title="مسح التحديد"
+              >
+                <X className="w-4 h-4" />
+              </button>
             </div>
-            <div className="flex items-center gap-1.5">
+
+            {/* Bottom Row: Full-width confirmation button(s) */}
+            <div className={`grid gap-2 ${!isElectronic ? 'grid-cols-1 sm:grid-cols-2' : 'grid-cols-1'}`}>
+              <button
+                type="button"
+                disabled={submitting}
+                onClick={() => handleExecuteWholesale(false)}
+                className="w-full min-h-[44px] px-3.5 rounded-xl gold-btn-3d border-2 border-[#92400E] text-[#0F172A] text-xs sm:text-sm font-extrabold flex items-center justify-center gap-1.5 disabled:opacity-60"
+              >
+                <ShoppingBag className="w-4 h-4 shrink-0" />
+                <span>تأكيد وإرسال الدفعة المحددة</span>
+              </button>
               {!isElectronic && (
                 <button
                   type="button"
                   disabled={submitting}
                   onClick={() => handleExecuteWholesale(true)}
-                  className="min-h-[42px] px-3 rounded-xl bg-white/15 border border-[#D4AF37] text-white text-xs font-extrabold flex items-center gap-1"
+                  className="w-full min-h-[44px] px-3 rounded-xl bg-white/15 hover:bg-white/25 border-2 border-[#D4AF37] text-white text-xs sm:text-sm font-extrabold flex items-center justify-center gap-1.5 disabled:opacity-60"
                 >
-                  <Printer className="w-4 h-4 text-[#FDE68A]" />
+                  <Printer className="w-4 h-4 text-[#FDE68A] shrink-0" />
                   <span>حفظ وطباعة</span>
                 </button>
               )}
-              <button
-                type="button"
-                disabled={submitting}
-                onClick={() => handleExecuteWholesale(false)}
-                className="min-h-[42px] px-3.5 rounded-xl gold-btn-3d text-[#0F172A] text-xs font-extrabold flex items-center gap-1.5"
-              >
-                <ShoppingBag className="w-4 h-4" />
-                <span>تأكيد وإرسال الدفعة المحددة ({selectedItems.length} باقات)</span>
-              </button>
             </div>
           </div>
         </div>
@@ -708,18 +742,21 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
             <input
               type="text"
               required
+              autoComplete="off"
               value={newRecName}
               onChange={(e) => setNewRecName(e.target.value)}
               placeholder="الاسم الكامل أو اسم البقالة"
-              className="w-full min-h-[42px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold"
+              className="w-full min-h-[42px] rounded-xl border-2 border-[#1A365D]/70 dark:border-[#60A5FA]/70 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-extrabold focus:border-[#D4AF37] focus:outline-none"
             />
             <div className="flex items-center gap-1.5">
               <input
                 type="tel"
+                inputMode="numeric"
+                autoComplete="off"
                 value={newRecPhone}
                 onChange={(e) => setNewRecPhone(e.target.value)}
                 placeholder="رقم الهاتف"
-                className="flex-1 min-h-[42px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold tabular-nums"
+                className="flex-1 min-h-[42px] rounded-xl border-2 border-[#1A365D]/70 dark:border-[#60A5FA]/70 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-extrabold tabular-nums focus:border-[#D4AF37] focus:outline-none"
               />
               <ContactPickerButton
                 onSelect={(c) => {
@@ -775,7 +812,7 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
                 ))}
               </div>
 
-              <div className="rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 p-3 text-xs font-bold whitespace-pre-wrap leading-relaxed max-h-56 overflow-y-auto">
+              <div className="rounded-xl bg-slate-50 dark:bg-slate-800 border-2 border-[#1A365D]/50 dark:border-[#D4AF37]/50 p-3 text-xs font-bold whitespace-pre-wrap leading-relaxed max-h-56 overflow-y-auto">
                 {buildWholesaleMessage(completedSale)}
               </div>
 

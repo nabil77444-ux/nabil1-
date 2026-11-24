@@ -275,7 +275,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
   return (
     <div
       dir="rtl"
-      className="h-[100dvh] w-full overflow-hidden flex flex-col bg-slate-100 dark:bg-[#0B1220] text-slate-900 dark:text-slate-100 select-none"
+      className="taibah-app-frame h-[100dvh] w-full overflow-hidden flex flex-col bg-slate-100 dark:bg-[#0B1220] text-slate-900 dark:text-slate-100 select-none"
     >
       {/* 1. TOP ROYAL HEADER with Safe Area Top Inset */}
       <header className="royal-header-3d safe-top shrink-0 px-3 z-20 border-b-2 border-[#D4AF37]">
@@ -413,12 +413,12 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
       </div>
 
       {/* MAIN CONTENT BODY — Strictly 100% Viewport Fitted with Balanced 4-Sided Margins (ZERO SCROLL!) */}
-      <main className="flex-1 min-h-0 flex flex-col w-full max-w-5xl mx-auto px-3.5 pt-2 pb-2 gap-1.5 overflow-hidden safe-x">
-        {/* 3. CONFIGURABLE HERO SLIDER */}
+      <main className="flex-1 min-h-0 flex flex-col w-full max-w-5xl mx-auto px-3 pt-2 pb-2 gap-1.5 overflow-hidden safe-x">
+        {/* 3. CONFIGURABLE HERO SLIDER (Enlarged slightly for richer presence while keeping zero scroll) */}
         {sliderEnabled && (
           <section
             aria-label="معرض راوتر MikroTik وشبكة طيبة نت"
-            className="relative shrink-0 h-[13vh] min-h-[78px] max-h-[132px] sm:h-[15.5vh] rounded-2xl overflow-hidden border-2 border-[#D4AF37] shadow-lg bg-[#0F172A]"
+            className="relative shrink-0 h-[16.5vh] min-h-[96px] max-h-[158px] sm:h-[18.5vh] rounded-2xl overflow-hidden border-2 border-[#D4AF37] shadow-lg bg-[#0F172A]"
           >
             {slides.map((slide, idx) => (
               <div
@@ -518,7 +518,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
           )}
         </section>
 
-        {/* 5. THE 8-ICON 3D ROYAL GRID — Compact Balanced Tiles + Full 4-Sided Visible Gold Borders (ZERO SCROLL!) */}
+        {/* 5. THE 8-ICON 3D ROYAL GRID — Prominent White 3D Cards + Gold Border + Sharper Larger Text (ZERO SCROLL!) */}
         <section
           aria-label="الأيقونات الرئيسية الثماني"
           className="flex-1 min-h-0 grid grid-cols-2 md:grid-cols-4 auto-rows-fr gap-2 sm:gap-2.5 py-0.5 px-0.5"
@@ -528,19 +528,19 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
               key={tile.route}
               type="button"
               onClick={() => onNavigate(tile.route)}
-              className="royal-tile-3d relative w-full h-full min-h-0 rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] px-2 py-1 sm:px-2.5 sm:py-1.5 flex items-center justify-between gap-1 overflow-hidden group"
+              className="royal-tile-3d relative w-full h-full min-h-0 rounded-2xl bg-gradient-to-b from-white via-white to-slate-50 dark:from-slate-900 dark:via-slate-900 dark:to-[#0F172A] border-2 border-[#D4AF37] px-2 py-1 sm:px-2.5 sm:py-1.5 flex items-center justify-between gap-1.5 overflow-hidden group"
             >
-              {/* Right (RTL): Compact Black Circle with Gold Border Number */}
-              <span className="w-5 h-5 sm:w-6 sm:h-6 rounded-full bg-slate-950 border-2 border-[#D4AF37] text-[#FDE68A] text-[9.5px] sm:text-[10.5px] font-extrabold flex items-center justify-center shadow shrink-0 tabular-nums">
+              {/* Right (RTL): Crisp Black Circle with Gold Border Number */}
+              <span className="w-5.5 h-5.5 sm:w-6.5 sm:h-6.5 rounded-full bg-slate-950 border-2 border-[#D4AF37] text-[#FDE68A] text-[10px] sm:text-[11px] font-extrabold flex items-center justify-center shadow shrink-0 tabular-nums">
                 {tile.number}
               </span>
 
-              {/* Center: Crisp Arabic Title */}
-              <span className="flex-1 min-w-0 text-center text-[12.5px] sm:text-[14px] font-extrabold text-slate-900 dark:text-white leading-tight line-clamp-2 px-0.5">
+              {/* Center: Larger, Sharper Crisp Arabic Title with zero clipping */}
+              <span className="flex-1 min-w-0 text-center text-[13.5px] sm:text-[15px] font-extrabold text-[#0F172A] dark:text-white leading-snug line-clamp-2 px-0.5">
                 {tile.title}
               </span>
 
-              {/* Left (RTL): Compact Custom 3D Colored Icon Artwork */}
+              {/* Left (RTL): Prominent Custom 3D Colored Icon Artwork */}
               <div className="shrink-0 group-hover:scale-105 transition-transform">
                 <TileIconArtwork index={tile.number} />
               </div>
@@ -548,7 +548,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
               {/* Live Alert / Stock Counter Badge Top-Left */}
               {tile.badgeCount !== undefined && (
                 <span
-                  className={`absolute top-1 left-1 min-w-[18px] h-[16px] px-1 rounded-full text-[9.5px] font-extrabold flex items-center justify-center shadow tabular-nums ${
+                  className={`absolute top-1 left-1 min-w-[19px] h-[17px] px-1.5 rounded-full text-[9.5px] font-extrabold flex items-center justify-center shadow tabular-nums border border-white/40 ${
                     tile.badgeVariant === 'emerald'
                       ? 'bg-emerald-600 text-white'
                       : 'bg-[#DC2626] text-white'
