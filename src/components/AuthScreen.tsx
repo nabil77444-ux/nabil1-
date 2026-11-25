@@ -770,6 +770,9 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
       }
 
       setBioBusy(true);
+      const safetyTimer = window.setTimeout(() => {
+        setBioBusy(false);
+      }, 8500);
       try {
         const result = await verifyDeviceBiometric(undefined, 'unified');
         if (result.requiresPin) {
@@ -787,7 +790,15 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
         } else if (result.errorMessage && !isAutoLaunch) {
           notifyWarning('لم يكتمل التحقق الحيوي', result.errorMessage);
         }
+      } catch {
+        if (!isAutoLaunch) {
+          notifyWarning(
+            'لم يكتمل التحقق الحيوي',
+            'تعذر فتح نافذة التحقق الحيوي — حاول مرة أخرى أو استخدم كلمة المرور.'
+          );
+        }
       } finally {
+        window.clearTimeout(safetyTimer);
         setBioBusy(false);
       }
     },

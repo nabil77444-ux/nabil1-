@@ -1,17 +1,78 @@
-import { Capacitor } from '@capacitor/core';
+import { Capacitor, registerPlugin } from '@capacitor/core';
 import {
   findVaultAccountByIdentifier,
   setVaultAccountBiometricEnabled,
 } from './localAuthVault';
 
+interface TaibahBiometricAvailability {
+  available: boolean;
+  hasBiometric: boolean;
+  hasDeviceCredential: boolean;
+  statusCode?: number;
+  reason?: string;
+}
+
+interface TaibahBiometricAuthResult {
+  verified: boolean;
+  authenticationType?: number;
+}
+
+interface TaibahBiometricPluginInterface {
+  checkAvailability(): Promise<TaibahBiometricAvailability>;
+  authenticate(options: {
+    title?: string;
+    subtitle?: string;
+    description?: string;
+  }): Promise<TaibahBiometricAuthResult>;
+}
+
+const TaibahBiometric = registerPlugin<TaibahBiometricPluginInterface>('TaibahBiometric');
+
+const BIOMETRIC_OP_TIMEOUT_MS = 8000;
+
+function runWithBiometricTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  timeoutMessage = 'انتهت مهلة نافذة التحقق الحيوي — حاول مرة أخرى.'
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      reject(new Error(timeoutMessage));
+    }, timeoutMs);
+    promise.then(
+      (value) => {
+        window.clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        window.clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
+function isPluginUnimplementedError(err: unknown): boolean {
+  const msg = (err instanceof Error ? err.message : String(err || '')).toLowerCase();
+  const code =
+    err && typeof err === 'object' && 'code' in err
+      ? String((err as { code?: unknown }).code || '').toLowerCase()
+      : '';
+  return (
+    code === 'unimplemented' ||
+    msg.includes('not implemented') ||
+    msg.includes('taibahbiometric') && msg.includes('not found')
+  );
+}
+
 /**
- * Real Native Android Fingerprint & Face Unlock Engine (`@capgo/capacitor-native-biometric`)
- * + Encrypted Hardware Keystore (`server: "taibahnet.app"`).
+ * Native AndroidX BiometricPrompt Engine (`TaibahBiometric` plugin — API 23–35+)
+ * with legacy APK fallback to `@capgo/capacitor-native-biometric` + `localAuthVault`.
  *
  * - On Android APK:
- *   1. Enabling Fingerprint or Face Unlock inside Settings runs:
- *      `NativeBiometric.isAvailable()` -> `NativeBiometric.verifyIdentity(...)` ->
- *      `NativeBiometric.setCredentials({ username, password, server: "taibahnet.app" })`.
+ *   1. Checks device security via `TaibahBiometric.checkAvailability()` (Fingerprint / Face / Device PIN).
+ *   2. Launches native `BiometricPrompt` via `TaibahBiometric.authenticate(...)` with 8s safety guard.
+ *   3. Persists biometric flag immediately in `localAuthVault` + `localStorage` for <0.1s instant unlock.
  *   2. Signing in via Fingerprint or Face Unlock runs:
  *      `NativeBiometric.verifyIdentity(...)` -> `NativeBiometric.getCredentials({ server: "taibahnet.app" })`
  *      and logs into Firebase Auth immediately with ZERO password prompt.
@@ -422,14 +483,29 @@ export async function isBiometricHardwareAvailable(): Promise<{
   if (typeof window === 'undefined') return { available: false };
   if (isNativeAndroid()) {
     try {
-      const NativeBiometric = await loadNativeBiometric();
-      if (!NativeBiometric) return { available: false };
-      const status = await NativeBiometric.isAvailable();
+      const nativeCheck = await runWithBiometricTimeout(
+        TaibahBiometric.checkAvailability(),
+        3500,
+        'انتهت مهلة فحص أمان الهاتف'
+      );
       return {
-        available: Boolean(status?.isAvailable),
-        biometryType: status?.biometryType,
+        available: Boolean(nativeCheck?.available),
+        biometryType: nativeCheck?.hasBiometric ? 1 : 0,
       };
-    } catch {
+    } catch (err) {
+      if (isPluginUnimplementedError(err)) {
+        try {
+          const NativeBiometric = await loadNativeBiometric();
+          if (!NativeBiometric) return { available: false };
+          const status = await runWithBiometricTimeout(NativeBiometric.isAvailable(), 3500);
+          return {
+            available: Boolean(status?.isAvailable),
+            biometryType: status?.biometryType,
+          };
+        } catch {
+          return { available: false };
+        }
+      }
       return { available: false };
     }
   }
@@ -588,8 +664,8 @@ export function disableBiometricMethod(method: BiometricMethod): BiometricEnroll
 // Self-Healing Biometric Prompt Mutex + Click Debounce
 // Eliminates stuck "نافذة التحقق البيومتري مفتوحة بالفعل" on Android WebView
 // ============================================================================
-const BIOMETRIC_LOCK_TTL_MS = 20000;
-const BIOMETRIC_DEBOUNCE_MS = 650;
+const BIOMETRIC_LOCK_TTL_MS = 9000;
+const BIOMETRIC_DEBOUNCE_MS = 500;
 
 let activeBiometricPrompt = false;
 let activeBiometricLockAt = 0;
@@ -716,55 +792,91 @@ export async function enrollDeviceBiometric(
         : 'ضع إصبعك على المستشعر لحفظ الجلسة مشفرة والدخول الآمن';
 
   try {
-    // Tier 1: Real Native Android BiometricPrompt + Hardware Keystore (`server: "taibahnet.app"`)
+    // Tier 1: Real Native AndroidX BiometricPrompt (`TaibahBiometricPlugin` — API 23–35+)
     if (Capacitor.isNativePlatform() && isNativeAndroid()) {
       try {
-        const NativeBiometric = await loadNativeBiometric();
-        if (!NativeBiometric) {
-          return {
-            success: false,
-            mode: 'android_biometric',
-            hasVault: false,
-            errorMessage: 'وحدة التحقق الحيوي غير متاحة على هذا الإصدار من الجهاز.',
-          };
-        }
-
-        let availability: { isAvailable?: boolean; errorCode?: number } | null = null;
+        let verifiedViaTaibahPlugin = false;
         try {
-          availability = await (
-            NativeBiometric.isAvailable as (opts?: { useFallback?: boolean }) => Promise<{
-              isAvailable: boolean;
-              errorCode?: number;
-            }>
-          )({ useFallback: true });
-        } catch {
-          availability = await NativeBiometric.isAvailable().catch(() => null);
+          const avail = await runWithBiometricTimeout(
+            TaibahBiometric.checkAvailability(),
+            4000,
+            'تعذر فحص حالة البصمة أو قفل الشاشة على الجهاز.'
+          );
+
+          if (!avail?.available) {
+            return {
+              success: false,
+              mode: 'android_biometric',
+              hasVault: false,
+              errorMessage:
+                avail?.reason ||
+                'يرجى إعداد البصمة أو الوجه أو رمز قفل الشاشة في إعدادات أمان الهاتف أولاً ثم إعادة المحاولة.',
+            };
+          }
+
+          const authRes = await runWithBiometricTimeout(
+            TaibahBiometric.authenticate({
+              title: promptTitle,
+              subtitle: promptSubtitle,
+              description: promptDesc,
+            }),
+            BIOMETRIC_OP_TIMEOUT_MS,
+            'انتهت مهلة نافذة التحقق الحيوي — يرجى المحاولة مرة أخرى.'
+          );
+
+          if (!authRes?.verified) {
+            return {
+              success: false,
+              mode: 'android_biometric',
+              hasVault: false,
+              errorMessage: 'لم يكتمل التحقق الحيوي — حاول مجدداً.',
+            };
+          }
+          verifiedViaTaibahPlugin = true;
+        } catch (pluginErr) {
+          if (!isPluginUnimplementedError(pluginErr)) {
+            throw pluginErr;
+          }
         }
 
-        if (!availability?.isAvailable) {
-          return {
-            success: false,
-            mode: 'android_biometric',
-            hasVault: false,
-            errorMessage:
-              'يرجى إعداد البصمة أو الوجه أو رمز قفل الشاشة في إعدادات أمان الهاتف أولاً ثم إعادة المحاولة.',
-          };
+        // Legacy APK fallback (only if an older APK without TaibahBiometricPlugin is installed)
+        if (!verifiedViaTaibahPlugin) {
+          const NativeBiometric = await loadNativeBiometric();
+          if (!NativeBiometric) {
+            return {
+              success: false,
+              mode: 'android_biometric',
+              hasVault: false,
+              errorMessage: 'وحدة التحقق الحيوي غير متاحة على هذا الإصدار من الجهاز.',
+            };
+          }
+          await runWithBiometricTimeout(
+            NativeBiometric.verifyIdentity({
+              title: promptTitle,
+              subtitle: promptSubtitle,
+              description: promptDesc,
+              negativeButtonText: 'إلغاء',
+              useFallback: true,
+            }),
+            BIOMETRIC_OP_TIMEOUT_MS,
+            'انتهت مهلة نافذة التحقق الحيوي — يرجى المحاولة مرة أخرى.'
+          );
         }
 
-        await NativeBiometric.verifyIdentity({
-          title: promptTitle,
-          subtitle: promptSubtitle,
-          description: promptDesc,
-          negativeButtonText: 'إلغاء',
-          useFallback: true,
-        });
-
-        let hasVault = false;
+        // Persist in Hardware Keystore when available (bounded to 2.5s so legacy devices never stall)
+        let hasVault = Boolean(localVaultAccount);
         if (vaultPassword) {
-          hasVault = await saveBiometricVaultCredentials(vaultEmail, vaultPassword);
-        } else {
-          const alreadyStored = await readBiometricVaultCredentials();
-          hasVault = Boolean((alreadyStored?.email && alreadyStored?.password) || localVaultAccount);
+          const keystoreSaved = await runWithBiometricTimeout(
+            saveBiometricVaultCredentials(vaultEmail, vaultPassword),
+            2500
+          ).catch(() => false);
+          hasVault = hasVault || keystoreSaved;
+        } else if (!hasVault) {
+          const alreadyStored = await runWithBiometricTimeout(
+            readBiometricVaultCredentials(),
+            2500
+          ).catch(() => null);
+          hasVault = Boolean(alreadyStored?.email && alreadyStored?.password);
         }
 
         if (!hasVault && !localVaultAccount) {
@@ -798,15 +910,24 @@ export async function enrollDeviceBiometric(
         return { success: true, mode: 'android_biometric', hasVault: true };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err || '');
+        const code =
+          err && typeof err === 'object' && 'code' in err
+            ? String((err as { code?: unknown }).code || '')
+            : '';
         return {
           success: false,
           mode: 'android_biometric',
           hasVault: false,
-          errorMessage: /cancel|negative|dismiss|abort/i.test(msg)
-            ? 'تم إلغاء نافذة التحقق الحيوي'
-            : /enroll|hardware|none|lock|security|available/i.test(msg)
-              ? 'يرجى إعداد البصمة أو الوجه أو رمز قفل الشاشة في إعدادات أمان الهاتف أولاً.'
-              : 'لم يكتمل التحقق الحيوي — تأكد من تفعيل البصمة أو قفل الشاشة في الهاتف وأعد المحاولة.',
+          errorMessage:
+            code === 'USER_CANCELED' || /cancel|negative|dismiss|abort|إلغاء/i.test(msg)
+              ? 'تم إلغاء نافذة التحقق الحيوي'
+              : code === 'NOT_ENROLLED' || /enroll|hardware|none|lock|security|available/i.test(msg)
+                ? 'يرجى إعداد البصمة أو الوجه أو رمز قفل الشاشة في إعدادات أمان الهاتف أولاً.'
+                : /مهلة|timeout/i.test(msg)
+                  ? 'انتهت مهلة التحقق الحيوي — حاول مرة أخرى.'
+                  : msg && /[\u0600-\u06FF]/.test(msg)
+                    ? msg
+                    : 'لم يكتمل التحقق الحيوي — تأكد من تفعيل البصمة أو قفل الشاشة في الهاتف وأعد المحاولة.',
         };
       }
     }
@@ -1017,49 +1138,81 @@ export async function verifyDeviceBiometric(
         : 'ضع إصبعك على مستشعر البصمة للدخول الآمن';
 
   try {
-    // Tier 1: Real Native Android BiometricPrompt + Local Vault / Hardware Keystore (`taibahnet.app`)
+    // Tier 1: Real Native AndroidX BiometricPrompt (`TaibahBiometricPlugin` — API 23–35+)
     if (Capacitor.isNativePlatform() && isNativeAndroid()) {
-      const NativeBiometric = await loadNativeBiometric();
-      if (!NativeBiometric) {
-        return {
-          verified: false,
-          enrollment: saved,
-          errorMessage: 'وحدة التحقق الحيوي غير متاحة على هذا الجهاز.',
-        };
-      }
-
-      let avail: { isAvailable?: boolean } | null = null;
+      let verifiedViaTaibahPlugin = false;
       try {
-        avail = await (
-          NativeBiometric.isAvailable as (opts?: { useFallback?: boolean }) => Promise<{
-            isAvailable: boolean;
-          }>
-        )({ useFallback: true });
-      } catch {
-        avail = await NativeBiometric.isAvailable().catch(() => null);
+        const avail = await runWithBiometricTimeout(
+          TaibahBiometric.checkAvailability(),
+          4000,
+          'تعذر فحص حالة أمان الهاتف.'
+        );
+        if (!avail?.available) {
+          return {
+            verified: false,
+            enrollment: saved,
+            errorMessage:
+              avail?.reason ||
+              'الهاتف لا يحتوي على بصمة أو قفل شاشة مُفعّل — يرجى إعداد أمان الهاتف أولاً أو الدخول بكلمة المرور.',
+          };
+        }
+
+        const authRes = await runWithBiometricTimeout(
+          TaibahBiometric.authenticate({
+            title,
+            subtitle: `مرحباً ${saved.displayName}`,
+            description,
+          }),
+          BIOMETRIC_OP_TIMEOUT_MS,
+          'انتهت مهلة التحقق الحيوي — حاول مرة أخرى أو استخدم كلمة المرور.'
+        );
+
+        if (!authRes?.verified) {
+          return {
+            verified: false,
+            enrollment: saved,
+            errorMessage: 'لم يكتمل التحقق الحيوي — حاول مجدداً أو استخدم كلمة المرور.',
+          };
+        }
+        verifiedViaTaibahPlugin = true;
+      } catch (pluginErr) {
+        if (!isPluginUnimplementedError(pluginErr)) {
+          throw pluginErr;
+        }
       }
 
-      if (!avail?.isAvailable) {
-        return {
-          verified: false,
-          enrollment: saved,
-          errorMessage:
-            'الهاتف لا يحتوي على بصمة أو قفل شاشة مُفعّل — يرجى إعداد أمان الهاتف أولاً أو الدخول بكلمة المرور.',
-        };
+      // Legacy APK fallback (only if running an older APK without TaibahBiometricPlugin)
+      if (!verifiedViaTaibahPlugin) {
+        const NativeBiometric = await loadNativeBiometric();
+        if (!NativeBiometric) {
+          return {
+            verified: false,
+            enrollment: saved,
+            errorMessage: 'وحدة التحقق الحيوي غير متاحة على هذا الجهاز.',
+          };
+        }
+
+        await runWithBiometricTimeout(
+          NativeBiometric.verifyIdentity({
+            title,
+            subtitle: `مرحباً ${saved.displayName}`,
+            description,
+            negativeButtonText: 'إلغاء',
+            useFallback: true,
+          }),
+          BIOMETRIC_OP_TIMEOUT_MS,
+          'انتهت مهلة التحقق الحيوي — حاول مرة أخرى أو استخدم كلمة المرور.'
+        );
       }
 
-      await NativeBiometric.verifyIdentity({
-        title,
-        subtitle: `مرحباً ${saved.displayName}`,
-        description,
-        negativeButtonText: 'إلغاء',
-        useFallback: true,
-      });
-
-      const credentials = await readBiometricVaultCredentials();
       const hasLocalVault = Boolean(
         findVaultAccountByIdentifier(saved.authEmail || saved.identifier)
       );
+      const credentials = await runWithBiometricTimeout(
+        readBiometricVaultCredentials(),
+        2000
+      ).catch(() => null);
+
       if ((!credentials?.email || !credentials?.password) && !hasLocalVault) {
         return {
           verified: false,
@@ -1095,12 +1248,23 @@ export async function verifyDeviceBiometric(
     return { verified: true, enrollment: saved, credentials: credentials || null };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err || '');
+    const code =
+      err && typeof err === 'object' && 'code' in err
+        ? String((err as { code?: unknown }).code || '')
+        : '';
     return {
       verified: false,
       enrollment: null,
-      errorMessage: /cancel|negative|dismiss|abort/i.test(msg)
-        ? 'تم إلغاء التحقق الحيوي'
-        : 'لم يكتمل التحقق الحيوي — حاول مجدداً أو استخدم كلمة المرور.',
+      errorMessage:
+        code === 'USER_CANCELED' || /cancel|negative|dismiss|abort|إلغاء/i.test(msg)
+          ? 'تم إلغاء التحقق الحيوي'
+          : code === 'NOT_ENROLLED'
+            ? 'الهاتف لا يحتوي على بصمة أو قفل شاشة مُفعّل — استخدم كلمة المرور.'
+            : /مهلة|timeout/i.test(msg)
+              ? 'انتهت مهلة التحقق الحيوي — حاول مرة أخرى أو استخدم كلمة المرور.'
+              : msg && /[\u0600-\u06FF]/.test(msg)
+                ? msg
+                : 'لم يكتمل التحقق الحيوي — حاول مجدداً أو استخدم كلمة المرور.',
     };
   } finally {
     releaseBiometricLock();

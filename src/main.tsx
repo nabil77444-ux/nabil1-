@@ -1,6 +1,14 @@
 import { createRoot } from 'react-dom/client';
 import App from './App.tsx';
 import './index.css';
+import { notifyUpdaterReady } from './services/updaterService';
+
+// Confirm active OTA bundle immediately at native app startup so @capgo/capacitor-updater never rolls back
+try {
+  notifyUpdaterReady();
+} catch {
+  // Non-fatal on web preview
+}
 
 // Global resilience guard: prevent transient Firestore offline/quota/assertion or
 // native-plugin web-preview promise rejections from crashing the UI or kicking out the user.

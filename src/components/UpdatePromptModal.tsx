@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { BellRing, DownloadCloud, Loader2, Sparkles, X } from 'lucide-react';
+import { BellRing, DownloadCloud, ExternalLink, Loader2, Sparkles, X } from 'lucide-react';
 import {
   downloadAndApplyAppUpdate,
   saveUpdateSnooze,
@@ -42,12 +42,20 @@ export const UpdatePromptModal: React.FC<UpdatePromptModalProps> = ({
         (pct) => setProgress(pct)
       );
       if (!result.ok) {
-        setErrorText(result.message || 'تعذر تثبيت التحديث — حاول مجدداً.');
+        setErrorText(result.message || 'تعذر تثبيت التحديث الخفيف — يمكنك تحميل ملف APK المباشر بالأسفل.');
+        setDownloading(false);
+      } else if (result.mode === 'apk') {
         setDownloading(false);
       }
     } catch {
-      setErrorText('حدث خطأ غير متوقع أثناء تحميل التحديث.');
+      setErrorText('حدث خطأ غير متوقع أثناء تحميل التحديث — حاول مجدداً أو حمّل ملف APK المباشر.');
       setDownloading(false);
+    }
+  };
+
+  const handleFallbackApk = () => {
+    if (manifest.apkUrl && /^https?:\/\//i.test(manifest.apkUrl)) {
+      window.location.href = manifest.apkUrl;
     }
   };
 
@@ -70,13 +78,14 @@ export const UpdatePromptModal: React.FC<UpdatePromptModalProps> = ({
               </div>
             </div>
             <div className="min-w-0">
-              <h3 className="text-sm sm:text-base font-extrabold text-white flex items-center gap-1.5">
+              <h3 className="text-[13.5px] sm:text-sm font-extrabold text-white flex items-center gap-1.5 leading-snug">
                 <Sparkles className="w-4 h-4 text-[#FDE68A] shrink-0" />
-                <span>يوجد تحديث جديد للتطبيق</span>
+                <span>يتوفر تحديث جديد لتطبيق طيبة نت</span>
               </h3>
               <p className="text-[11px] font-bold text-[#FDE68A] tabular-nums">
                 الإصدار: v{manifest.version}
-                {manifest.sizeMb ? ` • حجم التحديث: ${manifest.sizeMb.toFixed(1)} ميجا` : ''}
+                {manifest.buildNumber ? ` (#${manifest.buildNumber})` : ''}
+                {manifest.sizeMb ? ` • ${manifest.sizeMb.toFixed(1)} ميجا` : ''}
               </p>
             </div>
           </div>
@@ -116,7 +125,11 @@ export const UpdatePromptModal: React.FC<UpdatePromptModalProps> = ({
               <div className="flex items-center justify-between text-xs font-extrabold text-[#1A365D] dark:text-[#FDE68A] tabular-nums">
                 <span className="flex items-center gap-1.5">
                   <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  <span>{progress >= 100 ? 'جاري التثبيت وإعادة التشغيل...' : 'جاري تحميل التحديث الخفيف...'}</span>
+                  <span>
+                    {progress >= 100
+                      ? 'جاري التثبيت وإعادة التشغيل...'
+                      : 'جاري تحميل التحديث...'}
+                  </span>
                 </span>
                 <span>{progress}%</span>
               </div>
@@ -130,12 +143,24 @@ export const UpdatePromptModal: React.FC<UpdatePromptModalProps> = ({
           )}
 
           {errorText && (
-            <div className="rounded-xl bg-red-50 dark:bg-red-950/40 border-2 border-red-500 px-3 py-2 text-xs font-extrabold text-red-700 dark:text-red-300">
-              {errorText}
+            <div className="rounded-xl bg-red-50 dark:bg-red-950/40 border-2 border-red-500 p-2.5 space-y-2">
+              <p className="text-xs font-extrabold text-red-700 dark:text-red-300 leading-relaxed">
+                {errorText}
+              </p>
+              {manifest.apkUrl && /^https?:\/\//i.test(manifest.apkUrl) && (
+                <button
+                  type="button"
+                  onClick={handleFallbackApk}
+                  className="w-full min-h-[38px] rounded-lg bg-[#1A365D] text-[#FDE68A] border border-[#D4AF37] text-[11.5px] font-extrabold flex items-center justify-center gap-1.5"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  <span>تحميل ملف APK المباشر كبديل</span>
+                </button>
+              )}
             </div>
           )}
 
-          {/* Action Buttons: تحميل التحديث + تذكير لاحقاً */}
+          {/* Action Buttons: تحميل التحديث الآن + لاحقاً */}
           <div className="grid grid-cols-2 gap-2 pt-1">
             <button
               type="button"
@@ -148,7 +173,7 @@ export const UpdatePromptModal: React.FC<UpdatePromptModalProps> = ({
               ) : (
                 <DownloadCloud className="w-4 h-4 text-[#FDE68A]" />
               )}
-              <span>{downloading ? 'جاري التحميل...' : 'تحميل التحديث'}</span>
+              <span>{downloading ? 'جاري التحميل...' : 'تحميل التحديث الآن'}</span>
             </button>
 
             <button
@@ -158,7 +183,7 @@ export const UpdatePromptModal: React.FC<UpdatePromptModalProps> = ({
               className="min-h-[44px] rounded-xl bg-amber-50 dark:bg-slate-800 border-2 border-[#1A365D]/60 dark:border-[#D4AF37]/70 text-[#1A365D] dark:text-[#FDE68A] text-xs font-extrabold flex items-center justify-center gap-1 active:scale-[0.98] disabled:opacity-45"
             >
               <BellRing className="w-3.5 h-3.5 shrink-0" />
-              <span>تذكير لاحقاً</span>
+              <span>لاحقاً</span>
             </button>
           </div>
         </div>

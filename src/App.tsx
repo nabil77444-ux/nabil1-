@@ -92,7 +92,7 @@ const TaibahAppShell: React.FC = () => {
   } | null>(null);
 
   const runUpdateCheck = useCallback(
-    async (silent: boolean) => {
+    async (silent: boolean): Promise<void> => {
       try {
         const result = await checkForAppUpdate({
           apkDownloadUrl: appSettings?.apkDownloadUrl,
@@ -107,15 +107,23 @@ const TaibahAppShell: React.FC = () => {
             manifest: result.manifest,
             requiresNativeApk: result.requiresNativeApk,
           });
+          if (!silent) {
+            notifyInfo(
+              'يتوفر تحديث جديد لتطبيق طيبة نت',
+              `الإصدار الجديد: v${result.manifest.version}`
+            );
+          }
         } else if (!silent) {
           if (result.error) {
-            notifyInfo('تحديثات التطبيق', result.error);
+            notifyInfo('تعذر الاتصال بسيرفر التحديثات', result.error);
           } else {
-            notifySuccess(`التطبيق محدّث على آخر إصدار (v${result.currentVersion}) ✅`);
+            notifySuccess(`تطبيقك محدّث إلى آخر إصدار (v${result.currentVersion}) ✅`);
           }
         }
       } catch {
-        // Non-fatal: never crash app or disturb user on update check failures
+        if (!silent) {
+          notifyInfo('تعذر الاتصال بسيرفر التحديثات', 'يرجى التحقق من الإنترنت والمحاولة مجدداً.');
+        }
       }
     },
     [appSettings?.apkDownloadUrl, notifyInfo, notifySuccess]
@@ -177,34 +185,36 @@ const TaibahAppShell: React.FC = () => {
     return () => window.clearTimeout(preloadTimer);
   }, [isFullyVerifiedSession]);
 
-  // 3. Silent OTA Update Check ONLY after login (never blocks or runs during AuthScreen typing!)
+  // 3. Automatic Silent Update Check 3 seconds after entering the workspace (ALL users: Admin, Agent, Client)
   useEffect(() => {
-    if (!isNativePlatformSafe() || !isFullyVerifiedSession) return;
+    if (!isFullyVerifiedSession) return;
 
     let cancelled = false;
     const initialCheckTimer = window.setTimeout(() => {
       if (!cancelled) void runUpdateCheck(true);
-    }, 2200);
+    }, 3000);
 
     let appStateHandle: { remove: () => Promise<void> } | null = null;
-    void import('@capacitor/app')
-      .then(({ App: CapacitorApp }) => {
-        if (cancelled) return;
-        return CapacitorApp.addListener('appStateChange', ({ isActive }) => {
-          if (!cancelled && isActive) {
-            void runUpdateCheck(true);
-          }
-        }).then((handle) => {
-          if (cancelled) {
-            void handle.remove().catch(() => {});
-          } else {
-            appStateHandle = handle;
-          }
+    if (isNativePlatformSafe()) {
+      void import('@capacitor/app')
+        .then(({ App: CapacitorApp }) => {
+          if (cancelled) return;
+          return CapacitorApp.addListener('appStateChange', ({ isActive }) => {
+            if (!cancelled && isActive) {
+              void runUpdateCheck(true);
+            }
+          }).then((handle) => {
+            if (cancelled) {
+              void handle.remove().catch(() => {});
+            } else {
+              appStateHandle = handle;
+            }
+          });
+        })
+        .catch(() => {
+          // non-fatal on web preview
         });
-      })
-      .catch(() => {
-        // non-fatal on web preview
-      });
+    }
 
     return () => {
       cancelled = true;
@@ -346,7 +356,7 @@ const TaibahAppShell: React.FC = () => {
           isDark={isDark}
           onToggleTheme={toggleTheme}
           hideNumbers={hideNumbers}
-          onManualCheckUpdate={() => void runUpdateCheck(false)}
+          onManualCheckUpdate={() => runUpdateCheck(false)}
         />
       )}
 

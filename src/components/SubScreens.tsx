@@ -216,7 +216,7 @@ interface ActiveSubScreenProps {
   isDark: boolean;
   onToggleTheme: () => void;
   hideNumbers: boolean;
-  onManualCheckUpdate?: () => void;
+  onManualCheckUpdate?: () => void | Promise<void>;
 }
 
 export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
@@ -288,6 +288,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
   const [pendingBioMethod, setPendingBioMethod] = useState<BiometricMethod | null>(null);
   const [settingsBioPass, setSettingsBioPass] = useState('');
   const [enrollingSettingsBio, setEnrollingSettingsBio] = useState(false);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
 
   // Super Admin Only: App Data Reset & Account Recovery States
   const [resetScope, setResetScope] = useState<'sales_only' | 'full_reset' | null>(null);
@@ -645,7 +646,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
         subtitle={SUPER_ADMIN_CONFIG.developerCredit}
         onBack={onBack}
       >
-        <div className="space-y-3.5 safe-bottom-clear">
+        <div className="space-y-3.5 pb-[calc(env(safe-area-inset-bottom,0px)+96px)]">
           {/* Device & Security Preferences */}
           <div className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37]/70 p-3.5 shadow-md space-y-2.5">
             <h2 className="text-sm font-extrabold text-[#1A365D] dark:text-[#FDE68A] flex items-center gap-2">
@@ -693,6 +694,9 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                     return;
                   }
                   setEnrollingSettingsBio(true);
+                  const safetyTimer = window.setTimeout(() => {
+                    setEnrollingSettingsBio(false);
+                  }, 8500);
                   try {
                     const result = await enrollDeviceBiometric(
                       profile.uid,
@@ -711,7 +715,13 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                     } else if (result.errorMessage) {
                       notifyError('تعذر تفعيل الدخول الحيوي', result.errorMessage);
                     }
+                  } catch {
+                    notifyError(
+                      'تعذر تفعيل الدخول الحيوي',
+                      'حدث خطأ أثناء فتح نافذة التحقق الحيوي — حاول مرة أخرى.'
+                    );
                   } finally {
+                    window.clearTimeout(safetyTimer);
                     setEnrollingSettingsBio(false);
                   }
                 }}
@@ -769,11 +779,28 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
             </p>
             <button
               type="button"
-              onClick={() => onManualCheckUpdate?.()}
-              className="w-full min-h-[44px] rounded-xl bg-gradient-to-b from-[#1E3A8A] via-[#1A365D] to-[#0F172A] border-2 border-[#D4AF37] text-white text-xs font-extrabold flex items-center justify-center gap-2 shadow active:scale-[0.99] transition-transform"
+              disabled={checkingUpdate}
+              onClick={async () => {
+                if (checkingUpdate || !onManualCheckUpdate) return;
+                setCheckingUpdate(true);
+                const updateGuard = window.setTimeout(() => setCheckingUpdate(false), 12000);
+                try {
+                  await onManualCheckUpdate();
+                } finally {
+                  window.clearTimeout(updateGuard);
+                  setCheckingUpdate(false);
+                }
+              }}
+              className="w-full min-h-[44px] rounded-xl bg-gradient-to-b from-[#1E3A8A] via-[#1A365D] to-[#0F172A] border-2 border-[#D4AF37] text-white text-xs font-extrabold flex items-center justify-center gap-2 shadow active:scale-[0.99] transition-transform disabled:opacity-70"
             >
-              <DownloadCloud className="w-4 h-4 text-[#FDE68A]" />
-              <span>التحقق من وجود تحديث خفيف</span>
+              {checkingUpdate ? (
+                <Loader2 className="w-4 h-4 animate-spin text-[#FDE68A]" />
+              ) : (
+                <DownloadCloud className="w-4 h-4 text-[#FDE68A]" />
+              )}
+              <span>
+                {checkingUpdate ? 'جاري فحص التحديثات...' : 'التحقق من وجود تحديث خفيف'}
+              </span>
             </button>
           </div>
 
@@ -784,6 +811,9 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                   e.preventDefault();
                   if (!settingsBioPass) return;
                   setEnrollingSettingsBio(true);
+                  const safetyTimer = window.setTimeout(() => {
+                    setEnrollingSettingsBio(false);
+                  }, 8500);
                   try {
                     const result = await enrollDeviceBiometric(
                       profile.uid,
@@ -806,7 +836,13 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                         result.errorMessage || 'تأكد من إعداد البصمة أو الوجه في أمان الهاتف.'
                       );
                     }
+                  } catch {
+                    notifyError(
+                      'تعذر تفعيل الدخول الحيوي',
+                      'حدث خطأ أثناء تفعيل التحقق الحيوي — حاول مجدداً.'
+                    );
                   } finally {
+                    window.clearTimeout(safetyTimer);
                     setEnrollingSettingsBio(false);
                   }
                 }}

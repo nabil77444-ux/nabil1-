@@ -1,7 +1,7 @@
 # ==============================================================================
 # Taibah Net Cards (كروت طيبة نت) — Android Release R8 / ProGuard Rules
 # Safely shrinks APK size while preserving Capacitor 7, Native Plugins,
-# AndroidX BiometricPrompt, Contacts, OTA Updater, Firebase & WebView Bridges.
+# TaibahBiometricPlugin, AndroidX BiometricPrompt, Contacts, OTA Updater & Firebase.
 # ==============================================================================
 
 -optimizationpasses 3
@@ -9,29 +9,31 @@
 -dontskipnonpubliclibraryclasses
 -verbose
 
-# Preserve annotations, generics, and native entry points
+# Preserve annotations, generics, inner classes, enclosing methods & exceptions
 -keepattributes *Annotation*,Signature,InnerClasses,EnclosingMethod,Exceptions
+-keepattributes RuntimeVisibleAnnotations,AnnotationDefault
 
-# 1. Capacitor 7 Core & Plugin Bridge
--keep class com.getcapacitor.** { *; }
--keep interface com.getcapacitor.** { *; }
+# 1. Capacitor 7 Core, Custom Native Plugins & FragmentActivity Host
 -keep class * extends com.getcapacitor.Plugin { *; }
--keepclassmembers class * extends com.getcapacitor.Plugin {
+-keepclassmembers class * {
     @com.getcapacitor.PluginMethod <methods>;
 }
+-keep class com.getcapacitor.** { *; }
+-keep interface com.getcapacitor.** { *; }
+-keep class * extends androidx.fragment.app.FragmentActivity { *; }
+-keep class net.taibah.wireless.** { *; }
 -keepclassmembers class * {
     @android.webkit.JavascriptInterface <methods>;
 }
 
-# 2. Capgo Capacitor Updater (OTA Live Updates)
--keep class ee.forgr.capacitor_updater.** { *; }
+# 2. Capgo Plugins (OTA Updater + Native Biometric)
+-keep class ee.forgr.** { *; }
 -keep class app.capgo.** { *; }
 
-# 3. Capgo Native Biometric + AndroidX BiometricPrompt & Hardware Keystore
--keep class ee.forgr.biometric.** { *; }
--keep class com.epicshaggy.biometric.** { *; }
+# 3. AndroidX BiometricPrompt & Hardware Keystore
 -keep class androidx.biometric.** { *; }
 -keep class androidx.security.crypto.** { *; }
+-keep class com.epicshaggy.biometric.** { *; }
 
 # 4. Official Capacitor Plugins (Contacts, App, Filesystem, Share, StatusBar, Push, Haptics)
 -keep class com.getcapacitor.community.contacts.** { *; }
@@ -48,7 +50,6 @@
 
 # 6. JSON / HTTP Serialization (Gson / OkHttp / Kotlin)
 -keep class com.google.gson.** { *; }
--keepattributes RuntimeVisibleAnnotations,AnnotationDefault
 -dontwarn okhttp3.**
 -dontwarn okio.**
 -dontwarn javax.annotation.**
@@ -58,4 +59,5 @@
 -dontwarn com.google.errorprone.annotations.**
 -dontwarn com.getcapacitor.**
 -dontwarn ee.forgr.**
+-dontwarn androidx.biometric.**
 -dontwarn com.google.firebase.**

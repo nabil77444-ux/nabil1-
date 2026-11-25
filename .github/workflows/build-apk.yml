@@ -45,6 +45,7 @@ jobs:
           VITE_GITHUB_REPO: ${{ github.repository }}
           VITE_APP_VERSION: 2.0.${{ github.run_number }}
           VITE_NATIVE_VERSION: 2.0.${{ github.run_number }}
+          VITE_APP_BUILD_NUMBER: ${{ github.run_number }}
         run: |
           set -euo pipefail
           npm run lint
@@ -56,8 +57,10 @@ jobs:
           cat > version.json <<EOF
           {
             "version": "2.0.${GITHUB_RUN_NUMBER}",
+            "buildNumber": ${GITHUB_RUN_NUMBER},
             "sizeMb": ${OTA_SIZE_MB},
-            "notes": "تحديث خفيف وسريع لتطبيق كروت طيبة نت — تحسينات الواجهة والأداء والمزامنة السحابية.",
+            "notes": "تحديث خفيف وسريع لتطبيق كروت طيبة نت — تحسينات الأداء والبصمة ونظام التحديث التلقائي.",
+            "bundleUrl": "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/update.zip",
             "otaUrl": "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/update.zip",
             "apkUrl": "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/TaibahNet-Cards.apk",
             "minNativeVersion": "2.0.0",
@@ -78,10 +81,73 @@ jobs:
             @capacitor/push-notifications@7 \
             @capacitor/haptics@7 \
             @capacitor/assets@3
-          if [ ! -d "android" ]; then
+          if [ ! -f "android/gradlew" ]; then
+            rm -rf android
             npx cap add android
           fi
           npx cap sync android
+
+          # Integrate Native AndroidX BiometricPrompt Plugin (TaibahBiometricPlugin.java)
+          JAVA_PKG_DIR="android/app/src/main/java/net/taibah/wireless"
+          mkdir -p "$JAVA_PKG_DIR"
+          cp -f native-android/TaibahBiometricPlugin.java "$JAVA_PKG_DIR/TaibahBiometricPlugin.java"
+          test -s "$JAVA_PKG_DIR/TaibahBiometricPlugin.java" || { echo "::error::TaibahBiometricPlugin.java copy failed"; exit 1; }
+
+          # Register TaibahBiometricPlugin in MainActivity BEFORE super.onCreate(savedInstanceState)
+          python3 - <<'PYEOF'
+          import os, re
+          main_activity = "android/app/src/main/java/net/taibah/wireless/MainActivity.java"
+          if not os.path.exists(main_activity):
+              raise FileNotFoundError(f"MainActivity.java not found at {main_activity}")
+
+          with open(main_activity, "r", encoding="utf-8") as f:
+              src = f.read()
+
+          if "TaibahBiometricPlugin.class" not in src:
+              if "import android.os.Bundle;" not in src:
+                  src = re.sub(
+                      r'(package\s+net\.taibah\.wireless;\s*)',
+                      '\\1\nimport android.os.Bundle;\n',
+                      src,
+                      count=1
+                  )
+              if re.search(r'super\.onCreate\s*\(\s*savedInstanceState\s*\)\s*;', src):
+                  src = re.sub(
+                      r'(super\.onCreate\s*\(\s*savedInstanceState\s*\)\s*;)',
+                      'registerPlugin(TaibahBiometricPlugin.class);\n        \\1',
+                      src,
+                      count=1
+                  )
+              else:
+                  src = re.sub(
+                      r'(public\s+class\s+MainActivity\s+extends\s+BridgeActivity\s*\{)',
+                      '\\1\n    @Override\n    public void onCreate(Bundle savedInstanceState) {\n        registerPlugin(TaibahBiometricPlugin.class);\n        super.onCreate(savedInstanceState);\n    }\n',
+                      src,
+                      count=1
+                  )
+              with open(main_activity, "w", encoding="utf-8") as f:
+                  f.write(src)
+          print("=== Verified MainActivity.java ===")
+          print(src)
+          PYEOF
+
+          # Ensure androidx.biometric:biometric:1.1.0 dependency is declared in android/app/build.gradle
+          python3 - <<'PYEOF'
+          import re
+          gradle_path = "android/app/build.gradle"
+          with open(gradle_path, "r", encoding="utf-8") as f:
+              txt = f.read()
+          if "androidx.biometric:biometric:" not in txt:
+              txt = re.sub(
+                  r'(dependencies\s*\{)',
+                  '\\1\n    implementation "androidx.biometric:biometric:1.1.0"',
+                  txt,
+                  count=1
+              )
+              with open(gradle_path, "w", encoding="utf-8") as f:
+                  f.write(txt)
+          print("Verified androidx.biometric:biometric:1.1.0 in android/app/build.gradle")
+          PYEOF
 
       - name: Generate Full Circular Uncropped Android Adaptive Icon, Round Launcher & Splash
         run: |
