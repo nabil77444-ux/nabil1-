@@ -476,7 +476,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
     return (
       <SubScreenShell
         title="مركز التقارير الشامل"
-        subtitle="تصدير ومشاركة PDF و HD و Excel و SMS وواتساب"
+        subtitle="التقارير الأربعة • مشاركة PDF وواتساب"
         onBack={onBack}
         fixedViewport
       >

@@ -95,10 +95,10 @@ export default defineConfig(({ mode }) => {
           ],
         },
         devOptions: {
-          // vite-plugin-pwa dev SW registration relies on Vite HMR (`import.meta.hot.send`),
-          // so only enable devOptions when HMR is active; production builds always include full PWA.
-          enabled: process.env.DISABLE_HMR !== 'true',
-          type: 'module',
+          // Disable dev-mode SW registration to prevent vite-plugin-pwa from calling
+          // import.meta.hot.send() when WebSocket HMR is unavailable in cloud preview iframes.
+          // Production builds (`npm run build`) always generate the full PWA manifest & SW.
+          enabled: false,
         },
       }),
       // Copies src/assets into dist/ if present.

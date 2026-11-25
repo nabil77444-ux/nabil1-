@@ -7,12 +7,9 @@ import {
   ChevronUp,
   CreditCard,
   FileDown,
-  FileSpreadsheet,
   Filter,
-  ImageDown,
   Layers,
-  MessageSquare,
-  Printer,
+  Package,
   RefreshCw,
   Scale,
   Search,
@@ -30,11 +27,7 @@ import { useDebounce } from '../hooks/useDebounce';
 import { normalizeDigits } from '../lib/firebase';
 import {
   exportAsArabicPDF,
-  exportAsExcel,
-  exportAsHDImage,
-  openSmsShare,
   openWhatsAppShare,
-  printRoyalDocument,
   type ExportShareResult,
   type PrintableDocumentPayload,
 } from '../lib/exportUtils';
@@ -48,7 +41,6 @@ import {
   formatYER,
   getRoleArabicLabel,
   SUPER_ADMIN_CONFIG,
-  TAIBAH_ASSETS,
   type PackageDoc,
   type SaleDoc,
   type UserProfile,
@@ -70,8 +62,8 @@ type ReportId =
   | 'entity_cards_detail'
   | 'accounting_full_inventory';
 
-type InventoryGranularity = 'daily' | 'monthly';
-type SalesPeriodTab = 'today' | 'week' | 'month' | 'all';
+type InventoryGranularity = 'all' | 'daily' | 'monthly';
+type SalesPeriodTab = 'all' | 'today' | 'week' | 'month';
 type ActivityFilterType = 'all' | 'receive' | 'sale' | 'payment' | 'return';
 
 interface ReportCardMeta {
@@ -92,7 +84,7 @@ const FOUR_CORE_REPORTS: ReportCardMeta[] = [
     num: 1,
     title: 'الجرد اليومي والشهري',
     hubTitle: 'الجرد اليومي والشهري',
-    shortTitle: 'الجرد اليومي والشهري',
+    shortTitle: 'الجرد',
     subtitle: 'تفصيل الباقات الثماني لكل وكيل وعميل باليوم والشهر',
     badge: 'يومي • شهري',
     accent: 'from-[#1A365D] via-blue-800 to-[#1E3A8A]',
@@ -103,7 +95,7 @@ const FOUR_CORE_REPORTS: ReportCardMeta[] = [
     num: 2,
     title: 'مبيعات اليوم والأسبوع والشهر',
     hubTitle: 'مبيعات اليوم والشهر',
-    shortTitle: 'مبيعات الفترات',
+    shortTitle: 'المبيعات',
     subtitle: 'مبيعات كل وكيل وعميل وفواتيره والعمولة والصافي',
     badge: 'يوم • أسبوع • شهر',
     accent: 'from-emerald-600 via-emerald-700 to-teal-800',
@@ -114,7 +106,7 @@ const FOUR_CORE_REPORTS: ReportCardMeta[] = [
     num: 3,
     title: 'بيانات وكروت الوكيل والعميل',
     hubTitle: 'كشف الوكيل والعميل',
-    shortTitle: 'كشف الوكيل والعميل',
+    shortTitle: 'الوكيل',
     subtitle: 'استلم/باع/متبقي وسجل لمن باع وكامل الحركات',
     badge: 'تفصيل ممل',
     accent: 'from-purple-700 via-indigo-800 to-slate-900',
@@ -125,7 +117,7 @@ const FOUR_CORE_REPORTS: ReportCardMeta[] = [
     num: 4,
     title: 'التقارير المحاسبية وجرد الكروت',
     hubTitle: 'التقارير المحاسبية',
-    shortTitle: 'التقارير المحاسبية',
+    shortTitle: 'المحاسبة',
     subtitle: 'معادلة المطابقة وحق الإدارة وحق الوكيل وحق العميل',
     badge: 'محاسبة شاملة',
     accent: 'from-[#B4860B] via-[#8B6508] to-[#1A365D]',
@@ -297,21 +289,23 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
   const debouncedSearch = useDebounce(search, 180);
   const [visibleRowsCount, setVisibleRowsCount] = useState(PAGE_SIZE);
 
-  // Report 1 state (Daily / Monthly Inventory)
-  const [invGranularity, setInvGranularity] = useState<InventoryGranularity>('daily');
+  // Report 1 state (All / Daily / Monthly Inventory — default 'all' for instant real data)
+  const [invGranularity, setInvGranularity] = useState<InventoryGranularity>('all');
   const [selectedDayIso, setSelectedDayIso] = useState<string>(() => toLocalIsoDate(new Date()));
   const [selectedMonthIso, setSelectedMonthIso] = useState<string>(() => toLocalIsoMonth(new Date()));
   const [expandedInvPersonKey, setExpandedInvPersonKey] = useState<string | null>(null);
 
-  // Report 2 state (Today / Week / Month / All Sales)
-  const [salesPeriod, setSalesPeriod] = useState<SalesPeriodTab>('today');
+  // Report 2 state (All / Today / Week / Month Sales — default 'all' for instant real data)
+  const [salesPeriod, setSalesPeriod] = useState<SalesPeriodTab>('all');
   const [customFromDate, setCustomFromDate] = useState('');
   const [customToDate, setCustomToDate] = useState('');
   const [focusedSalesPersonKey, setFocusedSalesPersonKey] = useState<string | null>(null);
 
+  // On-demand toggles for compact calendar & search controls (hidden until tapped)
+  const [showDatePicker, setShowDatePicker] = useState(false);
+  const [showSearchInput, setShowSearchInput] = useState(false);
+
   // Report 3 state (Entity Detail)
-  const [entitySearch, setEntitySearch] = useState('');
-  const debouncedEntitySearch = useDebounce(entitySearch, 160);
   const [activityFilter, setActivityFilter] = useState<ActivityFilterType>('all');
   const [detailActivityVisible, setDetailActivityVisible] = useState(PAGE_SIZE);
 
@@ -396,11 +390,14 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
   // =========================================================================
   const inventoryData = useMemo(() => {
     const startMs =
-      invGranularity === 'daily'
-        ? new Date(`${selectedDayIso}T00:00:00`).getTime()
-        : new Date(`${selectedMonthIso}-01T00:00:00`).getTime();
+      invGranularity === 'all'
+        ? 0
+        : invGranularity === 'daily'
+          ? new Date(`${selectedDayIso}T00:00:00`).getTime()
+          : new Date(`${selectedMonthIso}-01T00:00:00`).getTime();
 
     const endMs = (() => {
+      if (invGranularity === 'all') return Infinity;
       if (invGranularity === 'daily') {
         return new Date(`${selectedDayIso}T23:59:59.999`).getTime();
       }
@@ -413,7 +410,7 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
     const q = debouncedSearch.trim().toLowerCase();
     const periodSales = entityScopedSales.filter((sale) => {
       const ms = getSaleTimestampMs(sale);
-      if (ms < startMs || ms > endMs) return false;
+      if (invGranularity !== 'all' && (ms < startMs || ms > endMs)) return false;
       if (!q) return true;
       return (
         (sale.buyerName || '').toLowerCase().includes(q) ||
@@ -650,9 +647,11 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
       .sort((a, b) => b.totalAmount + b.soldCards * 10 - (a.totalAmount + a.soldCards * 10));
 
     const periodLabel =
-      invGranularity === 'daily'
-        ? `جرد يوم ${selectedDayIso.split('-').reverse().join('/')}`
-        : `جرد شهر ${selectedMonthIso.split('-').reverse().join('/')}`;
+      invGranularity === 'all'
+        ? 'الجرد الشامل (الكل)'
+        : invGranularity === 'daily'
+          ? `جرد يوم ${selectedDayIso.split('-').reverse().join('/')}`
+          : `جرد شهر ${selectedMonthIso.split('-').reverse().join('/')}`;
 
     return {
       periodLabel,
@@ -896,18 +895,9 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
   const effectiveDetailUser: UserProfile | null = useMemo(() => {
     if (selectedAccount) return selectedAccount;
     if (!isAdmin && !isAgent && profile) return profile;
-    return null;
-  }, [selectedAccount, isAdmin, isAgent, profile]);
-
-  const filteredEntityChoices = useMemo(() => {
-    const q = debouncedEntitySearch.trim().toLowerCase();
-    if (!q) return selectableAccounts;
-    return selectableAccounts.filter(
-      (u) =>
-        u.name.toLowerCase().includes(q) ||
-        normalizeDigits(u.phone || '').includes(normalizeDigits(q))
-    );
-  }, [selectableAccounts, debouncedEntitySearch]);
+    if (selectableAccounts.length > 0) return selectableAccounts[0];
+    return profile || null;
+  }, [selectedAccount, isAdmin, isAgent, profile, selectableAccounts]);
 
   const detailActivityLog = useMemo(() => {
     if (!effectiveDetailUser) return [];
@@ -1513,7 +1503,7 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
     return null;
   };
 
-  const handleExport = async (kind: 'pdf' | 'image' | 'excel' | 'print' | 'whatsapp' | 'sms') => {
+  const handleExport = async (kind: 'pdf' | 'whatsapp') => {
     const payload = buildActiveExportPayload();
     if (!payload) {
       notifyError('اختر حساباً أولاً', 'يرجى تحديد الوكيل أو العميل قبل التصدير.');
@@ -1525,24 +1515,8 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
         const res = await exportAsArabicPDF(payload);
         if (res && !res.sharedNatively) setExportPreview(res);
         notifySuccess('تم إنشاء ملف PDF العربي بنجاح');
-      } else if (kind === 'image') {
-        const res = await exportAsHDImage(payload);
-        if (res && !res.sharedNatively) setExportPreview(res);
-        notifySuccess('تم تجهيز صورة التقرير عالية الدقة بنجاح');
-      } else if (kind === 'excel') {
-        await exportAsExcel(
-          payload.title,
-          payload.tableHeaders,
-          payload.tableRows,
-          payload.fileName
-        );
-        notifySuccess('تم تصدير ملف Excel بنجاح');
-      } else if (kind === 'print') {
-        void printRoyalDocument(payload);
       } else if (kind === 'whatsapp') {
         openWhatsAppShare(payload.sharePhone, payload.shareText || payload.title);
-      } else if (kind === 'sms') {
-        openSmsShare(payload.sharePhone || '', payload.shareText || payload.title);
       }
     } catch {
       notifyError('تعذر إتمام التصدير', 'يرجى المحاولة مرة أخرى.');
@@ -1606,7 +1580,7 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
         {/* Slim Single-Row KPI Summary Strip */}
         <div className="grid grid-cols-4 gap-1.5">
           <div className="rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 px-1.5 py-1.5 text-center shadow-sm">
-            <p className="text-[9.5px] font-bold text-slate-500 truncate">مبيعات اليوم</p>
+            <p className="text-[9.5px] font-bold text-slate-500 truncate">المبيعات</p>
             <p className="text-[11px] font-extrabold text-[#1A365D] dark:text-[#FDE68A] tabular-nums truncate mt-0.5">
               {formatMoney(periodSalesData.totalAmount)}
             </p>
@@ -1640,21 +1614,13 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
                 key={rep.id}
                 type="button"
                 onClick={() => setActiveReportId(rep.id)}
-                className="royal-tile-3d relative rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37]/75 hover:border-[#D4AF37] h-[118px] sm:h-[124px] p-3 shadow-md hover:shadow-lg active:scale-[0.98] transition flex flex-col items-center justify-center gap-2.5 text-center"
+                className="royal-tile-3d rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37]/75 hover:border-[#D4AF37] h-[118px] sm:h-[124px] p-3 shadow-md hover:shadow-lg active:scale-[0.98] transition flex flex-col items-center justify-center gap-2.5 text-center"
               >
-                {/* Minimal Elegant Corner Number */}
-                <span className="absolute top-2 left-2 w-5 h-5 rounded-full bg-amber-50 dark:bg-slate-800 border border-[#D4AF37]/70 text-[10px] font-black text-[#1A365D] dark:text-[#FDE68A] flex items-center justify-center tabular-nums">
-                  {rep.num}
-                </span>
-
-                {/* Prominent Luxury Gradient Icon */}
                 <div
                   className={`w-13 h-13 rounded-2xl bg-gradient-to-br ${rep.accent} text-white flex items-center justify-center border-2 border-[#D4AF37]/80 shadow-md`}
                 >
                   <IconComp className="w-7 h-7 text-[#FDE68A]" />
                 </div>
-
-                {/* Concise Bold Arabic Title Only */}
                 <h3 className="text-xs sm:text-sm font-extrabold text-[#0F172A] dark:text-white leading-tight px-1">
                   {rep.hubTitle}
                 </h3>
@@ -1668,67 +1634,62 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
     );
   }
 
-  const activeMeta = FOUR_CORE_REPORTS.find((r) => r.id === activeReportId)!;
+  // Helper for computing Admin & Agent/Client shares per sale row
+  const getSaleShares = (sale: SaleDoc) => {
+    const nominal = computeSaleNominalFaceValue(sale);
+    const buyerUser = sale.buyerId ? usersByUid.get(sale.buyerId) : undefined;
+    const rate = Number(
+      sale.discountRate ||
+        buyerUser?.discountRate ||
+        (buyerUser?.role === 'agent' ? 70 : buyerUser?.role === 'client' ? 80 : 100)
+    );
+    const adminShare = Math.round((nominal * Math.min(100, Math.max(0, rate))) / 100);
+    const entityShare = Math.max(0, nominal - adminShare);
+    return { nominal, adminShare, entityShare };
+  };
 
   // =========================================================================
-  // ACTIVE REPORT DETAILED SCREEN (pb-24 so footer never overlaps)
+  // ACTIVE REPORT DETAILED SCREEN (Ultra-Compact Blue Box + Instant Details + pb-20)
   // =========================================================================
   return (
-    <div dir="rtl" className="space-y-3.5 pb-24">
-      {/* Compact Sticky-Style Report Header + 4-Tab Switcher + Persistent Filter + Exports */}
-      <div className="rounded-2xl bg-gradient-to-br from-[#1A365D] via-[#0F172A] to-[#1A365D] text-white p-3 border-2 border-[#D4AF37]/80 shadow-lg space-y-2.5">
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 min-w-0">
-            <button
-              type="button"
-              onClick={() => setActiveReportId(null)}
-              className="w-9 h-9 rounded-xl bg-white/15 hover:bg-white/25 text-white flex items-center justify-center shrink-0 transition"
-              aria-label="العودة لمركز التقارير"
-            >
-              <ArrowRight className="w-5 h-5 text-[#FDE68A]" />
-            </button>
-            <div className="min-w-0">
-              <h2 className="text-sm font-extrabold truncate">{activeMeta.title}</h2>
-              <p className="text-[10.5px] font-bold text-[#FDE68A]/90 truncate">
-                {selectedAccount
-                  ? `مصفّى على: ${selectedAccount.name} (${getRoleArabicLabel(selectedAccount.role)})`
-                  : activeMeta.subtitle}
-              </p>
-            </div>
-          </div>
-
-          <img
-            src={TAIBAH_ASSETS.logo}
-            alt="شعار طيبة نت"
-            className="w-9 h-9 rounded-xl object-cover border border-[#D4AF37] shrink-0 hidden sm:block"
-          />
-        </div>
-
-        {/* Fast Switcher Between the 4 Reports */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+    <div dir="rtl" className="flex-1 min-h-0 overflow-y-auto space-y-2 pb-20">
+      {/* Ultra-Compact Royal Blue Top Bar (<= 15% of screen: 1-row 4 tabs + 1-row entity filter & WA/PDF) */}
+      <div className="rounded-2xl bg-gradient-to-br from-[#1A365D] via-[#0F172A] to-[#1A365D] text-white p-2 border border-[#D4AF37]/80 shadow-md space-y-1.5">
+        {/* Row 1: Single Slim 4-Tab Bar */}
+        <div className="grid grid-cols-4 gap-1">
           {FOUR_CORE_REPORTS.map((r) => (
             <button
               key={r.id}
               type="button"
               onClick={() => setActiveReportId(r.id)}
-              className={`px-2 py-1.5 rounded-xl text-[11px] font-extrabold transition truncate border ${
+              className={`py-1.5 px-1 rounded-xl text-[11px] font-bold transition truncate border ${
                 activeReportId === r.id
-                  ? 'bg-[#D4AF37] text-[#0F172A] border-[#FDE68A]'
+                  ? 'bg-[#D4AF37] text-[#0F172A] border-[#FDE68A] font-extrabold'
                   : 'bg-white/10 text-white border-white/15 hover:bg-white/20'
               }`}
             >
-              {r.num}. {r.shortTitle}
+              {r.shortTitle}
             </button>
           ))}
         </div>
 
-        {/* Persistent Filter + Universal Export Bar */}
-        <div className="flex flex-col md:flex-row items-stretch md:items-center gap-2">
-          {(isAdmin || isAgent) && selectableAccounts.length > 0 && (
+        {/* Row 2: Back-to-Hub + Entity Dropdown + ONLY WhatsApp & PDF Icons */}
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => setActiveReportId(null)}
+            className="w-8 h-9 rounded-xl bg-white/15 hover:bg-white/25 text-white flex items-center justify-center shrink-0 transition"
+            aria-label="العودة لمركز التقارير"
+          >
+            <ArrowRight className="w-4 h-4 text-[#FDE68A]" />
+          </button>
+
+          {(isAdmin || isAgent) && selectableAccounts.length > 0 ? (
             <select
               value={selectedEntityUid}
               onChange={(e) => setSelectedEntityUid(e.target.value)}
-              className="md:w-64 rounded-xl bg-white text-[#0F172A] px-2.5 py-1.5 text-xs font-extrabold border border-[#D4AF37] focus:outline-none"
+              aria-label="اختيار الوكيل أو العميل"
+              className="flex-1 min-w-0 h-9 rounded-xl bg-white text-[#0F172A] px-2 text-xs font-extrabold border border-[#D4AF37] focus:outline-none"
             >
               <option value="all">الكل (الإدارة وجميع الوكلاء والعملاء)</option>
               {selectableAccounts.map((acc) => (
@@ -1737,205 +1698,237 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
                 </option>
               ))}
             </select>
+          ) : (
+            <div className="flex-1 min-w-0 h-9 rounded-xl bg-white/10 border border-white/15 px-2.5 flex items-center text-xs font-extrabold text-[#FDE68A] truncate">
+              {profile?.name || 'حسابي'}
+            </div>
           )}
 
-          <div className="flex flex-wrap items-center gap-1.5 flex-1 justify-end">
-            <button
-              type="button"
-              disabled={Boolean(exportingKind)}
-              onClick={() => void handleExport('pdf')}
-              className="px-2.5 py-1.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-[11px] font-extrabold flex items-center gap-1"
-            >
-              <FileDown className="w-3.5 h-3.5" />
-              <span>PDF</span>
-            </button>
-            <button
-              type="button"
-              disabled={Boolean(exportingKind)}
-              onClick={() => void handleExport('image')}
-              className="px-2.5 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-[11px] font-extrabold flex items-center gap-1"
-            >
-              <ImageDown className="w-3.5 h-3.5" />
-              <span>صورة HD</span>
-            </button>
-            <button
-              type="button"
-              disabled={Boolean(exportingKind)}
-              onClick={() => void handleExport('excel')}
-              className="px-2.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-extrabold flex items-center gap-1"
-            >
-              <FileSpreadsheet className="w-3.5 h-3.5" />
-              <span>Excel</span>
-            </button>
-            <button
-              type="button"
-              disabled={Boolean(exportingKind)}
-              onClick={() => void handleExport('print')}
-              className="px-2.5 py-1.5 rounded-xl bg-slate-700 hover:bg-slate-600 text-white text-[11px] font-extrabold flex items-center gap-1"
-            >
-              <Printer className="w-3.5 h-3.5" />
-              <span>طباعة</span>
-            </button>
-            <button
-              type="button"
-              disabled={Boolean(exportingKind)}
-              onClick={() => void handleExport('whatsapp')}
-              className="px-2.5 py-1.5 rounded-xl bg-green-600 hover:bg-green-700 text-white text-[11px] font-extrabold flex items-center gap-1"
-            >
-              <Send className="w-3.5 h-3.5" />
-              <span>واتساب</span>
-            </button>
-            <button
-              type="button"
-              disabled={Boolean(exportingKind)}
-              onClick={() => void handleExport('sms')}
-              className="px-2.5 py-1.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-[11px] font-extrabold flex items-center gap-1"
-            >
-              <MessageSquare className="w-3.5 h-3.5" />
-              <span>SMS</span>
-            </button>
-          </div>
+          <button
+            type="button"
+            disabled={Boolean(exportingKind)}
+            onClick={() => void handleExport('whatsapp')}
+            className="h-9 px-2.5 rounded-xl bg-green-600 hover:bg-green-700 text-white text-[11px] font-extrabold flex items-center justify-center gap-1 shrink-0 transition"
+            aria-label="مشاركة عبر واتساب"
+          >
+            <Send className="w-3.5 h-3.5" />
+            <span>واتساب</span>
+          </button>
+
+          <button
+            type="button"
+            disabled={Boolean(exportingKind)}
+            onClick={() => void handleExport('pdf')}
+            className="h-9 px-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-[11px] font-extrabold flex items-center justify-center gap-1 shrink-0 transition"
+            aria-label="تصدير PDF"
+          >
+            <FileDown className="w-3.5 h-3.5" />
+            <span>PDF</span>
+          </button>
         </div>
       </div>
 
       {/* ================================================================= */}
-      {/* ICON 1: الجرد اليومي والشهري (تفصيل كل فئة وكل شخص على حدة)       */}
+      {/* TAB 1: الجرد (الكل / يومي / شهري + 4 أيقونات + الباقات الثماني)  */}
       {/* ================================================================= */}
       {activeReportId === 'daily_monthly_inventory' && (
-        <div className="space-y-3.5">
-          {/* Toggle Daily / Monthly + Picker + Search */}
-          <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-3 shadow-sm flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5">
-            <div className="grid grid-cols-2 gap-1.5 sm:w-52">
-              <button
-                type="button"
-                onClick={() => setInvGranularity('daily')}
-                className={`py-2 rounded-xl text-xs font-extrabold border transition ${
-                  invGranularity === 'daily'
-                    ? 'bg-[#1A365D] text-white border-[#D4AF37]'
-                    : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-transparent'
-                }`}
-              >
-                الجرد اليومي
-              </button>
-              <button
-                type="button"
-                onClick={() => setInvGranularity('monthly')}
-                className={`py-2 rounded-xl text-xs font-extrabold border transition ${
-                  invGranularity === 'monthly'
-                    ? 'bg-[#1A365D] text-white border-[#D4AF37]'
-                    : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-transparent'
-                }`}
-              >
-                الجرد الشهري
-              </button>
+        <div className="space-y-2">
+          {/* Single Ultra-Slim Filter Row (h-8): الكل | يومي | شهري + 📅 + 🔍 */}
+          <div className="flex items-center gap-1">
+            <div className="grid grid-cols-3 gap-1 flex-1">
+              {(
+                [
+                  { id: 'all', label: 'الكل' },
+                  { id: 'daily', label: 'يومي' },
+                  { id: 'monthly', label: 'شهري' },
+                ] as Array<{ id: InventoryGranularity; label: string }>
+              ).map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setInvGranularity(tab.id)}
+                  className={`h-8 rounded-xl text-[11px] font-extrabold border transition ${
+                    invGranularity === tab.id
+                      ? 'bg-[#1A365D] text-white border-[#D4AF37]'
+                      : 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-800'
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
             </div>
 
-            <div className="flex items-center gap-2">
-              <label className="text-xs font-extrabold text-slate-600 dark:text-slate-300 shrink-0">
-                {invGranularity === 'daily' ? 'التاريخ:' : 'الشهر:'}
-              </label>
-              {invGranularity === 'daily' ? (
-                <input
-                  type="date"
-                  value={selectedDayIso}
-                  onChange={(e) => setSelectedDayIso(e.target.value)}
-                  className="rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 py-1.5 text-xs font-extrabold text-slate-900 dark:text-white"
-                />
-              ) : (
+            <button
+              type="button"
+              onClick={() => {
+                if (invGranularity === 'all') setInvGranularity('daily');
+                setShowDatePicker((v) => !v);
+              }}
+              aria-label="اختيار التاريخ"
+              className={`w-8 h-8 rounded-xl border flex items-center justify-center shrink-0 transition ${
+                showDatePicker || invGranularity !== 'all'
+                  ? 'bg-[#D4AF37] text-[#0F172A] border-[#B4860B]'
+                  : 'bg-white dark:bg-slate-900 text-[#1A365D] dark:text-[#FDE68A] border-slate-200 dark:border-slate-800'
+              }`}
+            >
+              <Calendar className="w-3.5 h-3.5" />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setShowSearchInput((v) => !v)}
+              aria-label="بحث"
+              className={`w-8 h-8 rounded-xl border flex items-center justify-center shrink-0 transition ${
+                showSearchInput || search
+                  ? 'bg-[#1A365D] text-[#FDE68A] border-[#D4AF37]'
+                  : 'bg-white dark:bg-slate-900 text-[#1A365D] dark:text-[#FDE68A] border-slate-200 dark:border-slate-800'
+              }`}
+            >
+              <Search className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          {/* Collapsible Date Picker (opens ONLY when 📅 clicked) */}
+          {showDatePicker && (
+            <div className="rounded-xl bg-white dark:bg-slate-900 border border-[#D4AF37]/60 p-2 flex items-center gap-2">
+              <span className="text-[11px] font-extrabold text-slate-600 dark:text-slate-300 shrink-0">
+                {invGranularity === 'monthly' ? 'الشهر:' : 'التاريخ:'}
+              </span>
+              {invGranularity === 'monthly' ? (
                 <input
                   type="month"
                   value={selectedMonthIso}
-                  onChange={(e) => setSelectedMonthIso(e.target.value)}
-                  className="rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 py-1.5 text-xs font-extrabold text-slate-900 dark:text-white"
+                  onChange={(e) => {
+                    setInvGranularity('monthly');
+                    setSelectedMonthIso(e.target.value);
+                  }}
+                  className="flex-1 h-8 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-2 text-xs font-bold text-slate-900 dark:text-white"
+                />
+              ) : (
+                <input
+                  type="date"
+                  value={selectedDayIso}
+                  onChange={(e) => {
+                    setInvGranularity('daily');
+                    setSelectedDayIso(e.target.value);
+                  }}
+                  className="flex-1 h-8 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-2 text-xs font-bold text-slate-900 dark:text-white"
                 />
               )}
+              <button
+                type="button"
+                onClick={() => setShowDatePicker(false)}
+                className="w-7 h-7 rounded-lg bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-500"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
             </div>
+          )}
 
-            <div className="relative flex-1">
-              <Search className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2" />
+          {/* Collapsible Search Input (opens ONLY when 🔍 clicked) */}
+          {showSearchInput && (
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute right-2.5 top-1/2 -translate-y-1/2" />
               <input
                 type="text"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                placeholder="بحث باسم الوكيل أو العميل أو الرقم..."
-                className="w-full pr-9 pl-3 py-1.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-bold text-slate-900 dark:text-white"
+                placeholder="بحث باسم الوكيل أو العميل أو الهاتف..."
+                className="w-full h-8 pr-8 pl-8 rounded-xl border border-[#D4AF37]/70 bg-white dark:bg-slate-900 text-xs font-bold text-slate-900 dark:text-white focus:outline-none"
+                autoFocus
               />
+              {search && (
+                <button
+                  type="button"
+                  onClick={() => setSearch('')}
+                  className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
             </div>
-          </div>
+          )}
 
-          {/* KPI Summary */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-            <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-3">
-              <p className="text-[11px] font-bold text-slate-500">الكروت المباعة/المسلّمة</p>
-              <p className="text-base font-extrabold text-[#1A365D] dark:text-[#FDE68A] mt-0.5 tabular-nums">
-                {formatNum(inventoryData.totalCards)} كرت
-              </p>
-              <p className="text-[10px] font-bold text-slate-400">
-                {formatNum(inventoryData.periodSales.length)} عملية
+          {/* 4 Beautiful Compact Summary Icons: المستلم | الباقي | باع | المحاسبة والرصيد */}
+          <div className="grid grid-cols-4 gap-1.5">
+            <div className="rounded-xl bg-[#1A365D] text-white border border-[#D4AF37]/80 px-1.5 py-2 text-center shadow-sm">
+              <div className="flex items-center justify-center gap-1 text-[10px] font-bold text-[#FDE68A]">
+                <Layers className="w-3 h-3 shrink-0" />
+                <span className="truncate">المستلم</span>
+              </div>
+              <p className="text-sm font-black mt-0.5 tabular-nums">
+                {formatNum(inventoryData.packageRows.reduce((s, r) => s + r.receivedQty, 0))}
               </p>
             </div>
-            <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-3">
-              <p className="text-[11px] font-bold text-slate-500">القيمة المالية الإجمالية</p>
-              <p className="text-base font-extrabold text-emerald-700 dark:text-emerald-400 mt-0.5 tabular-nums">
+            <div className="rounded-xl bg-amber-500 text-[#0F172A] border border-amber-700/70 px-1.5 py-2 text-center shadow-sm">
+              <div className="flex items-center justify-center gap-1 text-[10px] font-extrabold">
+                <Package className="w-3 h-3 shrink-0" />
+                <span className="truncate">الباقي</span>
+              </div>
+              <p className="text-sm font-black mt-0.5 tabular-nums">
+                {formatNum(inventoryData.totalAvailableStock)}
+              </p>
+            </div>
+            <div className="rounded-xl bg-emerald-600 text-white border border-emerald-400/80 px-1.5 py-2 text-center shadow-sm">
+              <div className="flex items-center justify-center gap-1 text-[10px] font-bold text-emerald-100">
+                <TrendingUp className="w-3 h-3 shrink-0" />
+                <span className="truncate">باع</span>
+              </div>
+              <p className="text-sm font-black mt-0.5 tabular-nums">
+                {formatNum(inventoryData.totalCards)}
+              </p>
+            </div>
+            <div className="rounded-xl bg-gradient-to-br from-[#0F172A] to-indigo-950 text-white border border-[#D4AF37]/70 px-1.5 py-2 text-center shadow-sm">
+              <div className="flex items-center justify-center gap-1 text-[10px] font-bold text-[#FDE68A]">
+                <Wallet className="w-3 h-3 shrink-0" />
+                <span className="truncate">المحاسبة</span>
+              </div>
+              <p className="text-[11px] font-black mt-0.5 tabular-nums truncate">
                 {formatMoney(inventoryData.totalRevenue)}
               </p>
-              <p className="text-[10px] font-bold text-emerald-600">
-                محصّل: {formatMoney(inventoryData.totalPaid)}
-              </p>
-            </div>
-            <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-3">
-              <p className="text-[11px] font-bold text-slate-500">المتبقي (آجل)</p>
-              <p className="text-base font-extrabold text-red-600 dark:text-red-400 mt-0.5 tabular-nums">
-                {formatMoney(inventoryData.totalRemaining)}
-              </p>
-              <p className="text-[10px] font-bold text-slate-400">{inventoryData.periodLabel}</p>
-            </div>
-            <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-3">
-              <p className="text-[11px] font-bold text-slate-500">المتبقي في المخزن</p>
-              <p className="text-base font-extrabold text-blue-700 dark:text-sky-400 mt-0.5 tabular-nums">
-                {formatNum(inventoryData.totalAvailableStock)} كرت
-              </p>
-              <p className="text-[10px] font-bold text-slate-400">عبر الباقات الثماني</p>
             </div>
           </div>
 
-          {/* 8 Packages Breakdown Table */}
-          <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden">
-            <div className="px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800/70 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Layers className="w-4 h-4 text-[#D4AF37]" />
-                <h3 className="text-xs font-extrabold text-slate-900 dark:text-white">
-                  جرد الباقات الثماني (100 → 3000) — {inventoryData.periodLabel}
+          {/* 8 Packages Breakdown Table — Immediately Visible Below Summary */}
+          <div className="rounded-2xl bg-white dark:bg-slate-900 border border-[#D4AF37]/50 shadow-sm overflow-hidden">
+            <div className="px-2.5 py-1.5 bg-slate-50 dark:bg-slate-800/70 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+              <div className="flex items-center gap-1.5">
+                <Layers className="w-3.5 h-3.5 text-[#D4AF37]" />
+                <h3 className="text-[11px] font-extrabold text-slate-900 dark:text-white">
+                  الباقات الثماني — {inventoryData.periodLabel}
                 </h3>
               </div>
+              <span className="text-[10px] font-bold text-red-600 dark:text-red-400 tabular-nums">
+                متبقي آجل: {formatMoney(inventoryData.totalRemaining)}
+              </span>
             </div>
             <div className="overflow-x-auto">
-              <table className="w-full text-right text-xs">
+              <table className="w-full text-right text-[11px]">
                 <thead className="bg-[#1A365D] text-white">
                   <tr>
-                    <th className="py-2 px-2.5 font-extrabold">الفئة والباقة</th>
-                    <th className="py-2 px-2.5 font-extrabold">المستلم</th>
-                    <th className="py-2 px-2.5 font-extrabold">المباع</th>
-                    <th className="py-2 px-2.5 font-extrabold">المتبقي</th>
-                    <th className="py-2 px-2.5 font-extrabold">القيمة المالية</th>
+                    <th className="py-1.5 px-2 font-extrabold">الفئة</th>
+                    <th className="py-1.5 px-2 font-extrabold text-center">استلم</th>
+                    <th className="py-1.5 px-2 font-extrabold text-center">باع</th>
+                    <th className="py-1.5 px-2 font-extrabold text-center">باقي</th>
+                    <th className="py-1.5 px-2 font-extrabold">القيمة</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                   {inventoryData.packageRows.map((row) => (
                     <tr key={row.pkg.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
-                      <td className="py-2 px-2.5 font-extrabold text-slate-900 dark:text-white whitespace-nowrap">
-                        فئة {row.pkg.price} ({row.pkg.dataLabel})
+                      <td className="py-1.5 px-2 font-extrabold text-slate-900 dark:text-white whitespace-nowrap">
+                        {row.pkg.price} ({row.pkg.dataLabel})
                       </td>
-                      <td className="py-2 px-2.5 font-bold text-slate-600 dark:text-slate-300 tabular-nums">
+                      <td className="py-1.5 px-2 font-bold text-center text-slate-600 dark:text-slate-300 tabular-nums">
                         {formatNum(row.receivedQty)}
                       </td>
-                      <td className="py-2 px-2.5 font-extrabold text-emerald-700 dark:text-emerald-400 tabular-nums">
+                      <td className="py-1.5 px-2 font-extrabold text-center text-emerald-700 dark:text-emerald-400 tabular-nums">
                         {formatNum(row.soldQty)}
                       </td>
-                      <td className="py-2 px-2.5 font-extrabold text-blue-700 dark:text-sky-400 tabular-nums">
+                      <td className="py-1.5 px-2 font-extrabold text-center text-blue-700 dark:text-sky-400 tabular-nums">
                         {formatNum(row.remainingQty)}
                       </td>
-                      <td className="py-2 px-2.5 font-extrabold text-slate-900 dark:text-white tabular-nums">
+                      <td className="py-1.5 px-2 font-extrabold text-slate-900 dark:text-white tabular-nums whitespace-nowrap">
                         {formatMoney(row.revenue)}
                       </td>
                     </tr>
@@ -1943,19 +1936,19 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
                 </tbody>
                 <tfoot className="bg-amber-50/70 dark:bg-slate-800/90 border-t-2 border-[#D4AF37]">
                   <tr>
-                    <td className="py-2.5 px-2.5 font-black text-[#1A365D] dark:text-[#FDE68A]">
+                    <td className="py-1.5 px-2 font-black text-[#1A365D] dark:text-[#FDE68A]">
                       الإجمالي
                     </td>
-                    <td className="py-2.5 px-2.5 font-black tabular-nums">
+                    <td className="py-1.5 px-2 font-black text-center tabular-nums">
                       {formatNum(inventoryData.packageRows.reduce((s, r) => s + r.receivedQty, 0))}
                     </td>
-                    <td className="py-2.5 px-2.5 font-black text-emerald-700 dark:text-emerald-400 tabular-nums">
+                    <td className="py-1.5 px-2 font-black text-center text-emerald-700 dark:text-emerald-400 tabular-nums">
                       {formatNum(inventoryData.totalCards)}
                     </td>
-                    <td className="py-2.5 px-2.5 font-black text-blue-700 dark:text-sky-400 tabular-nums">
+                    <td className="py-1.5 px-2 font-black text-center text-blue-700 dark:text-sky-400 tabular-nums">
                       {formatNum(inventoryData.totalAvailableStock)}
                     </td>
-                    <td className="py-2.5 px-2.5 font-black tabular-nums">
+                    <td className="py-1.5 px-2 font-black tabular-nums whitespace-nowrap">
                       {formatMoney(inventoryData.totalRevenue)}
                     </td>
                   </tr>
@@ -1965,17 +1958,14 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
           </div>
 
           {/* Per-Person Detailed Cards & 8-Package Breakdown */}
-          <div className="space-y-2.5">
+          <div className="space-y-2">
             <div className="flex items-center justify-between px-1">
-              <div className="flex items-center gap-2">
-                <Users className="w-4 h-4 text-[#D4AF37]" />
-                <h3 className="text-xs font-extrabold text-slate-900 dark:text-white">
-                  جرد تفصيلي باسم كل شخص على حدة ({formatNumEn(inventoryData.personRows.length)})
+              <div className="flex items-center gap-1.5">
+                <Users className="w-3.5 h-3.5 text-[#D4AF37]" />
+                <h3 className="text-[11px] font-extrabold text-slate-900 dark:text-white">
+                  جرد تفصيلي لكل شخص ({formatNumEn(inventoryData.personRows.length)})
                 </h3>
               </div>
-              <span className="text-[10.5px] font-bold text-slate-500">
-                اضغط لعرض تفصيل الباقات الثماني
-              </span>
             </div>
 
             {inventoryData.personRows.slice(0, visibleRowsCount).map((person) => {
@@ -1983,30 +1973,30 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
               return (
                 <div
                   key={person.key}
-                  className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37]/50 shadow-sm overflow-hidden"
+                  className="rounded-2xl bg-white dark:bg-slate-900 border border-[#D4AF37]/50 shadow-sm overflow-hidden"
                 >
-                  <div className="p-3 flex flex-col gap-2">
+                  <div className="p-2.5 flex flex-col gap-1.5">
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-1.5 flex-wrap">
-                          <span className="text-sm font-extrabold text-slate-900 dark:text-white leading-snug break-words">
+                          <span className="text-xs font-extrabold text-slate-900 dark:text-white leading-snug break-words">
                             {person.name}
                           </span>
-                          <span className="px-2 py-0.5 rounded-lg bg-[#1A365D]/10 dark:bg-white/10 text-[#1A365D] dark:text-[#FDE68A] text-[10px] font-extrabold whitespace-nowrap">
+                          <span className="px-1.5 py-0.5 rounded-md bg-[#1A365D]/10 dark:bg-white/10 text-[#1A365D] dark:text-[#FDE68A] text-[10px] font-extrabold whitespace-nowrap">
                             {person.roleLabel}
                           </span>
                         </div>
-                        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[11px] font-bold text-slate-500 mt-0.5 tabular-nums">
+                        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10.5px] font-bold text-slate-500 mt-0.5 tabular-nums">
                           <span>{person.phone}</span>
                           <span>•</span>
-                          <span>مستلم: {formatNum(person.receivedCards)}</span>
+                          <span>استلم: {formatNum(person.receivedCards)}</span>
                           <span>•</span>
                           <span className="text-emerald-700 dark:text-emerald-400">
-                            مباع: {formatNum(person.soldCards)}
+                            باع: {formatNum(person.soldCards)}
                           </span>
                           <span>•</span>
                           <span className="text-blue-700 dark:text-sky-400">
-                            متبقي: {formatNum(person.remainingCards)}
+                            باقي: {formatNum(person.remainingCards)}
                           </span>
                         </div>
                       </div>
@@ -2022,23 +2012,23 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-2 gap-2 pt-1.5 border-t border-slate-100 dark:border-slate-800">
+                    <div className="grid grid-cols-2 gap-1.5 pt-1 border-t border-slate-100 dark:border-slate-800">
                       <button
                         type="button"
                         onClick={() =>
                           setExpandedInvPersonKey(isExpanded ? null : person.key)
                         }
-                        className="min-h-[34px] rounded-xl bg-slate-100 dark:bg-slate-800 text-[#1A365D] dark:text-[#FDE68A] text-xs font-extrabold flex items-center justify-center gap-1"
+                        className="h-8 rounded-xl bg-slate-100 dark:bg-slate-800 text-[#1A365D] dark:text-[#FDE68A] text-[11px] font-extrabold flex items-center justify-center gap-1"
                       >
                         {isExpanded ? (
                           <>
                             <ChevronUp className="w-3.5 h-3.5" />
-                            <span>إخفاء تفصيل الفئات</span>
+                            <span>إخفاء الفئات</span>
                           </>
                         ) : (
                           <>
                             <ChevronDown className="w-3.5 h-3.5" />
-                            <span>تفصيل الفئات الثماني</span>
+                            <span>الباقات الثماني</span>
                           </>
                         )}
                       </button>
@@ -2046,45 +2036,45 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
                         <button
                           type="button"
                           onClick={() => openEntityDetailReport(person.uid)}
-                          className="min-h-[34px] rounded-xl bg-[#1A365D] hover:bg-[#0F172A] text-white text-xs font-extrabold flex items-center justify-center gap-1"
+                          className="h-8 rounded-xl bg-[#1A365D] hover:bg-[#0F172A] text-white text-[11px] font-extrabold flex items-center justify-center gap-1"
                         >
                           <CreditCard className="w-3.5 h-3.5 text-[#FDE68A]" />
-                          <span>كشف الكروت الكامل</span>
+                          <span>كشف الكروت</span>
                         </button>
                       ) : (
-                        <div className="min-h-[34px] rounded-xl bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 text-[11px] font-extrabold flex items-center justify-center">
-                          {formatNum(person.salesCount)} عملية في الفترة
+                        <div className="h-8 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 text-[10.5px] font-extrabold flex items-center justify-center">
+                          {formatNum(person.salesCount)} عملية
                         </div>
                       )}
                     </div>
                   </div>
 
                   {isExpanded && (
-                    <div className="border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60 p-2.5 overflow-x-auto">
+                    <div className="border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60 p-2 overflow-x-auto">
                       <table className="w-full text-right text-[11px]">
                         <thead>
                           <tr className="text-slate-500 border-b border-slate-200 dark:border-slate-800">
-                            <th className="py-1.5 px-2 font-extrabold">الفئة</th>
-                            <th className="py-1.5 px-2 font-extrabold">مستلم</th>
-                            <th className="py-1.5 px-2 font-extrabold">مباع</th>
-                            <th className="py-1.5 px-2 font-extrabold">متبقي</th>
-                            <th className="py-1.5 px-2 font-extrabold">القيمة</th>
+                            <th className="py-1 px-1.5 font-extrabold">الفئة</th>
+                            <th className="py-1 px-1.5 font-extrabold text-center">استلم</th>
+                            <th className="py-1 px-1.5 font-extrabold text-center">باع</th>
+                            <th className="py-1 px-1.5 font-extrabold text-center">باقي</th>
+                            <th className="py-1 px-1.5 font-extrabold">القيمة</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-200/70 dark:divide-slate-800">
                           {person.byPackage.map((b) => (
                             <tr key={b.pkgId}>
-                              <td className="py-1.5 px-2 font-extrabold whitespace-nowrap">
+                              <td className="py-1 px-1.5 font-extrabold whitespace-nowrap">
                                 {b.price} ({b.dataLabel})
                               </td>
-                              <td className="py-1.5 px-2 font-bold tabular-nums">{formatNum(b.received)}</td>
-                              <td className="py-1.5 px-2 font-extrabold text-emerald-700 dark:text-emerald-400 tabular-nums">
+                              <td className="py-1 px-1.5 font-bold text-center tabular-nums">{formatNum(b.received)}</td>
+                              <td className="py-1 px-1.5 font-extrabold text-center text-emerald-700 dark:text-emerald-400 tabular-nums">
                                 {formatNum(b.sold)}
                               </td>
-                              <td className="py-1.5 px-2 font-extrabold text-blue-700 dark:text-sky-400 tabular-nums">
+                              <td className="py-1 px-1.5 font-extrabold text-center text-blue-700 dark:text-sky-400 tabular-nums">
                                 {formatNum(b.remaining)}
                               </td>
-                              <td className="py-1.5 px-2 font-extrabold tabular-nums">
+                              <td className="py-1 px-1.5 font-extrabold tabular-nums whitespace-nowrap">
                                 {formatMoney(b.value)}
                               </td>
                             </tr>
@@ -2113,19 +2103,19 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
       )}
 
       {/* ================================================================= */}
-      {/* ICON 2: مبيعات اليوم والأسبوع والشهر (كل شخص + فئاته + فواتيره)   */}
+      {/* TAB 2: المبيعات (الكل/اليوم/أسبوع/شهر + 📅 + 🔍 بسطر واحد نحيف)    */}
       {/* ================================================================= */}
       {activeReportId === 'period_sales' && (
-        <div className="space-y-3.5">
-          {/* Period Tabs + Custom Range + Search */}
-          <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-3 shadow-sm space-y-2.5">
-            <div className="grid grid-cols-4 gap-1.5">
+        <div className="space-y-2">
+          {/* Single Ultra-Slim Row (h-8): الكل | اليوم | أسبوع | شهر + 📅 + 🔍 */}
+          <div className="flex items-center gap-1">
+            <div className="grid grid-cols-4 gap-1 flex-1">
               {(
                 [
-                  { id: 'today', label: 'اليوم' },
-                  { id: 'week', label: 'الأسبوع' },
-                  { id: 'month', label: 'الشهر' },
                   { id: 'all', label: 'الكل' },
+                  { id: 'today', label: 'اليوم' },
+                  { id: 'week', label: 'أسبوع' },
+                  { id: 'month', label: 'شهر' },
                 ] as Array<{ id: SalesPeriodTab; label: string }>
               ).map((tab) => (
                 <button
@@ -2136,10 +2126,10 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
                     setCustomFromDate('');
                     setCustomToDate('');
                   }}
-                  className={`py-2 rounded-xl text-xs font-extrabold border transition ${
+                  className={`h-8 rounded-xl text-[11px] font-extrabold border transition ${
                     salesPeriod === tab.id && !customFromDate && !customToDate
                       ? 'bg-[#1A365D] text-white border-[#D4AF37]'
-                      : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-transparent'
+                      : 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-800'
                   }`}
                 >
                   {tab.label}
@@ -2147,80 +2137,164 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
               ))}
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-              <div className="relative">
-                <Search className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2" />
-                <input
-                  type="text"
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  placeholder="بحث باسم المشتري أو الهاتف أو الفاتورة..."
-                  className="w-full pr-9 pl-3 py-1.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-bold text-slate-900 dark:text-white"
-                />
-              </div>
-              <div className="flex items-center gap-1.5">
-                <span className="text-[11px] font-bold text-slate-500 shrink-0">من:</span>
+            <button
+              type="button"
+              onClick={() => setShowDatePicker((v) => !v)}
+              aria-label="تحديد فترة مخصصة"
+              className={`w-8 h-8 rounded-xl border flex items-center justify-center shrink-0 transition ${
+                showDatePicker || customFromDate || customToDate
+                  ? 'bg-[#D4AF37] text-[#0F172A] border-[#B4860B]'
+                  : 'bg-white dark:bg-slate-900 text-[#1A365D] dark:text-[#FDE68A] border-slate-200 dark:border-slate-800'
+              }`}
+            >
+              <Calendar className="w-3.5 h-3.5" />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setShowSearchInput((v) => !v)}
+              aria-label="بحث في المبيعات"
+              className={`w-8 h-8 rounded-xl border flex items-center justify-center shrink-0 transition ${
+                showSearchInput || search
+                  ? 'bg-[#1A365D] text-[#FDE68A] border-[#D4AF37]'
+                  : 'bg-white dark:bg-slate-900 text-[#1A365D] dark:text-[#FDE68A] border-slate-200 dark:border-slate-800'
+              }`}
+            >
+              <Search className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          {/* On-Demand Custom Date Range (ONLY opens when 📅 clicked) */}
+          {showDatePicker && (
+            <div className="rounded-xl bg-white dark:bg-slate-900 border border-[#D4AF37]/70 p-2 grid grid-cols-2 gap-1.5">
+              <div className="flex items-center gap-1">
+                <span className="text-[10.5px] font-bold text-slate-500 shrink-0">من:</span>
                 <input
                   type="date"
                   value={customFromDate}
                   onChange={(e) => setCustomFromDate(e.target.value)}
-                  className="flex-1 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-2.5 py-1.5 text-xs font-bold text-slate-900 dark:text-white"
+                  className="flex-1 min-w-0 h-8 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-1.5 text-[11px] font-bold text-slate-900 dark:text-white"
                 />
               </div>
-              <div className="flex items-center gap-1.5">
-                <span className="text-[11px] font-bold text-slate-500 shrink-0">إلى:</span>
+              <div className="flex items-center gap-1">
+                <span className="text-[10.5px] font-bold text-slate-500 shrink-0">إلى:</span>
                 <input
                   type="date"
                   value={customToDate}
                   onChange={(e) => setCustomToDate(e.target.value)}
-                  className="flex-1 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-2.5 py-1.5 text-xs font-bold text-slate-900 dark:text-white"
+                  className="flex-1 min-w-0 h-8 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-1.5 text-[11px] font-bold text-slate-900 dark:text-white"
                 />
               </div>
             </div>
-          </div>
+          )}
 
-          {/* Grand Total KPI Strip */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-            <div className="rounded-2xl bg-gradient-to-br from-[#1A365D] to-[#0F172A] text-white p-3 border border-[#D4AF37]/70">
-              <p className="text-[11px] font-bold text-[#FDE68A]">الإجمالي العام ({periodSalesData.periodTitle})</p>
-              <p className="text-base font-extrabold mt-0.5 tabular-nums">
-                {formatMoney(periodSalesData.totalAmount)}
-              </p>
-              <p className="text-[10px] font-bold text-slate-300">
-                {formatNum(periodSalesData.filtered.length)} فاتورة • {formatNum(periodSalesData.totalCards)} كرت
+          {/* On-Demand Search Input (ONLY opens when 🔍 clicked) */}
+          {showSearchInput && (
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute right-2.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="بحث باسم المشتري أو الهاتف أو الفاتورة..."
+                className="w-full h-8 pr-8 pl-8 rounded-xl border border-[#D4AF37]/70 bg-white dark:bg-slate-900 text-xs font-bold text-slate-900 dark:text-white focus:outline-none"
+                autoFocus
+              />
+              {search && (
+                <button
+                  type="button"
+                  onClick={() => setSearch('')}
+                  className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* 4 Beautiful Compact Summary Icons: المستلم/الفواتير | الباقي | باع | المحاسبة والرصيد */}
+          <div className="grid grid-cols-4 gap-1.5">
+            <div className="rounded-xl bg-[#1A365D] text-white border border-[#D4AF37]/80 px-1.5 py-2 text-center shadow-sm">
+              <div className="flex items-center justify-center gap-1 text-[10px] font-bold text-[#FDE68A]">
+                <Layers className="w-3 h-3 shrink-0" />
+                <span className="truncate">المستلم</span>
+              </div>
+              <p className="text-sm font-black mt-0.5 tabular-nums">
+                {formatNum(periodSalesData.filtered.length)}
               </p>
             </div>
-            <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-3">
-              <p className="text-[11px] font-bold text-slate-500">المبيعات النقدية</p>
-              <p className="text-base font-extrabold text-emerald-700 dark:text-emerald-400 mt-0.5 tabular-nums">
-                {formatMoney(periodSalesData.cashTotal)}
-              </p>
-              <p className="text-[10px] font-bold text-emerald-600">
-                محصّل: {formatMoney(periodSalesData.paidTotal)}
-              </p>
-            </div>
-            <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-3">
-              <p className="text-[11px] font-bold text-slate-500">المبيعات الآجلة</p>
-              <p className="text-base font-extrabold text-amber-600 dark:text-amber-400 mt-0.5 tabular-nums">
-                {formatMoney(periodSalesData.creditTotal)}
-              </p>
-              <p className="text-[10px] font-bold text-slate-400">آجل وجزئي</p>
-            </div>
-            <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-3">
-              <p className="text-[11px] font-bold text-slate-500">المتبقي للتحصيل</p>
-              <p className="text-base font-extrabold text-red-600 dark:text-red-400 mt-0.5 tabular-nums">
+            <div className="rounded-xl bg-amber-500 text-[#0F172A] border border-amber-700/70 px-1.5 py-2 text-center shadow-sm">
+              <div className="flex items-center justify-center gap-1 text-[10px] font-extrabold">
+                <Package className="w-3 h-3 shrink-0" />
+                <span className="truncate">الباقي</span>
+              </div>
+              <p className="text-[11px] font-black mt-0.5 tabular-nums truncate">
                 {formatMoney(periodSalesData.remainingTotal)}
               </p>
-              <p className="text-[10px] font-bold text-slate-400">مجموع المتبقي</p>
+            </div>
+            <div className="rounded-xl bg-emerald-600 text-white border border-emerald-400/80 px-1.5 py-2 text-center shadow-sm">
+              <div className="flex items-center justify-center gap-1 text-[10px] font-bold text-emerald-100">
+                <TrendingUp className="w-3 h-3 shrink-0" />
+                <span className="truncate">باع</span>
+              </div>
+              <p className="text-sm font-black mt-0.5 tabular-nums">
+                {formatNum(periodSalesData.totalCards)}
+              </p>
+            </div>
+            <div className="rounded-xl bg-gradient-to-br from-[#0F172A] to-indigo-950 text-white border border-[#D4AF37]/70 px-1.5 py-2 text-center shadow-sm">
+              <div className="flex items-center justify-center gap-1 text-[10px] font-bold text-[#FDE68A]">
+                <Wallet className="w-3 h-3 shrink-0" />
+                <span className="truncate">المحاسبة</span>
+              </div>
+              <p className="text-[11px] font-black mt-0.5 tabular-nums truncate">
+                {formatMoney(periodSalesData.totalAmount)}
+              </p>
             </div>
           </div>
 
-          {/* Per-Person Sales Breakdown (Tap any person to inspect their invoices!) */}
-          <div className="space-y-2">
+          {/* 8-Package Strip for Active Sales Period */}
+          <div className="rounded-2xl bg-white dark:bg-slate-900 border border-[#D4AF37]/50 p-2 shadow-sm">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-[11px] font-extrabold text-[#1A365D] dark:text-[#FDE68A] flex items-center gap-1">
+                <Layers className="w-3.5 h-3.5 text-[#D4AF37]" />
+                الباقات الثماني ({periodSalesData.periodTitle})
+              </span>
+              <span className="text-[10px] font-bold text-emerald-700 dark:text-emerald-400 tabular-nums">
+                نقدي: {formatMoney(periodSalesData.cashTotal)}
+              </span>
+            </div>
+            <div className="grid grid-cols-4 sm:grid-cols-8 gap-1">
+              {displayPackages.map((pkg) => {
+                const soldQty = periodSalesData.denomBreakdown
+                  .filter((d) => d.denomination === pkg.price)
+                  .reduce((acc, d) => acc + Number(d.quantity || 0), 0);
+                const remQty = Number(pkg.availableCount || 0);
+                return (
+                  <div
+                    key={pkg.id}
+                    className="rounded-lg bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 p-1 text-center"
+                  >
+                    <p className="text-[10px] font-black text-[#1A365D] dark:text-[#FDE68A] tabular-nums">
+                      {pkg.price}
+                    </p>
+                    <p className="text-[9.5px] font-bold text-emerald-700 dark:text-emerald-400 tabular-nums">
+                      باع: {formatNum(soldQty)}
+                    </p>
+                    <p className="text-[9px] font-bold text-slate-500 dark:text-slate-400 tabular-nums">
+                      باقي: {formatNum(remQty)}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Per-Person Sales Breakdown */}
+          <div className="space-y-1.5">
             <div className="flex items-center justify-between px-1">
-              <h3 className="text-xs font-extrabold text-slate-900 dark:text-white flex items-center gap-1.5">
-                <Users className="w-4 h-4 text-[#D4AF37]" />
-                <span>مبيعات كل شخص على حدة ({formatNumEn(periodSalesData.byPerson.length)})</span>
+              <h3 className="text-[11px] font-extrabold text-slate-900 dark:text-white flex items-center gap-1.5">
+                <Users className="w-3.5 h-3.5 text-[#D4AF37]" />
+                <span>مبيعات كل شخص ({formatNumEn(periodSalesData.byPerson.length)})</span>
               </h3>
               {focusedSalesPersonKey && (
                 <button
@@ -2228,23 +2302,23 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
                   onClick={() => setFocusedSalesPersonKey(null)}
                   className="text-[11px] font-extrabold text-red-600 hover:underline"
                 >
-                  عرض فواتير الجميع ✕
+                  عرض الجميع ✕
                 </button>
               )}
             </div>
 
             {periodSalesData.byPerson.length === 0 ? (
-              <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-6 text-center text-xs font-bold text-slate-500">
+              <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-5 text-center text-xs font-bold text-slate-500">
                 لا توجد مبيعات مسجلة في {periodSalesData.periodTitle}.
               </div>
             ) : (
-              <div className="space-y-2">
+              <div className="space-y-1.5">
                 {periodSalesData.byPerson.slice(0, 35).map((person) => {
                   const isFocused = focusedSalesPersonKey === person.key;
                   return (
                     <div
                       key={person.key}
-                      className={`rounded-2xl bg-white dark:bg-slate-900 border-2 p-3 shadow-sm transition space-y-2 ${
+                      className={`rounded-2xl bg-white dark:bg-slate-900 border p-2.5 shadow-sm transition space-y-1.5 ${
                         isFocused
                           ? 'border-[#D4AF37] ring-2 ring-[#D4AF37]/30'
                           : 'border-slate-200 dark:border-slate-800 hover:border-[#D4AF37]/70'
@@ -2253,14 +2327,14 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
                       <div className="flex items-start justify-between gap-2">
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-1.5 flex-wrap">
-                            <span className="text-sm font-extrabold text-slate-900 dark:text-white break-words">
+                            <span className="text-xs font-extrabold text-slate-900 dark:text-white break-words">
                               {person.name}
                             </span>
-                            <span className="px-2 py-0.5 rounded-lg bg-[#1A365D]/10 dark:bg-white/10 text-[#1A365D] dark:text-[#FDE68A] text-[10px] font-extrabold">
+                            <span className="px-1.5 py-0.5 rounded-md bg-[#1A365D]/10 dark:bg-white/10 text-[#1A365D] dark:text-[#FDE68A] text-[10px] font-extrabold">
                               {person.roleLabel}
                             </span>
                           </div>
-                          <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[11px] font-bold text-slate-500 mt-0.5 tabular-nums">
+                          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10.5px] font-bold text-slate-500 mt-0.5 tabular-nums">
                             <span>{person.phone}</span>
                             <span>•</span>
                             <span>{formatNum(person.salesCount)} فاتورة</span>
@@ -2268,61 +2342,58 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
                             <span className="text-[#1A365D] dark:text-[#FDE68A]">
                               {formatNum(person.cardsCount)} كرت
                             </span>
-                            <span>•</span>
-                            <span>الخصم/العمولة: {person.commissionPercent}%</span>
                           </div>
                         </div>
                         <div className="text-left shrink-0">
                           <p className="text-xs font-extrabold text-emerald-700 dark:text-emerald-400 tabular-nums">
-                            صافي: {formatMoney(person.netTotal)}
+                            {formatMoney(person.netTotal)}
                           </p>
-                          <p className="text-[10px] font-bold text-slate-500 tabular-nums">
-                            اسمي: {formatMoney(person.nominalTotal)}
+                          <p className="text-[10px] font-bold text-blue-700 dark:text-sky-400 tabular-nums">
+                            عمولة: {formatMoney(person.commissionValue)}
                           </p>
                         </div>
                       </div>
 
-                      {/* Sold Cards Per Denomination Chips */}
                       {person.byPkgCounts.length > 0 && (
-                        <div className="flex flex-wrap items-center gap-1.5">
+                        <div className="flex flex-wrap items-center gap-1">
                           {person.byPkgCounts.map((pk) => (
                             <span
                               key={pk.pkgId}
-                              className="px-2 py-0.5 rounded-lg bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-[10.5px] font-extrabold text-slate-700 dark:text-slate-200 tabular-nums"
+                              className="px-1.5 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-[10px] font-extrabold text-slate-700 dark:text-slate-200 tabular-nums"
                             >
-                              فئة {pk.price}: {formatNum(pk.count)} كرت
+                              {pk.price}: {formatNum(pk.count)}
                             </span>
                           ))}
                         </div>
                       )}
 
-                      <div className="grid grid-cols-2 gap-2 pt-1.5 border-t border-slate-100 dark:border-slate-800">
+                      <div className="grid grid-cols-2 gap-1.5 pt-1 border-t border-slate-100 dark:border-slate-800">
                         <button
                           type="button"
                           onClick={() =>
                             setFocusedSalesPersonKey(isFocused ? null : person.key)
                           }
-                          className={`min-h-[34px] rounded-xl text-xs font-extrabold flex items-center justify-center gap-1 ${
+                          className={`h-8 rounded-xl text-[11px] font-extrabold flex items-center justify-center gap-1 ${
                             isFocused
                               ? 'bg-[#D4AF37] text-[#0F172A]'
                               : 'bg-slate-100 dark:bg-slate-800 text-[#1A365D] dark:text-[#FDE68A]'
                           }`}
                         >
                           <span>
-                            {isFocused ? 'معروض أسفل الصفحة ✓' : `استعراض الفواتير (${person.salesCount})`}
+                            {isFocused ? 'معروض بالأسفل ✓' : `الفواتير (${person.salesCount})`}
                           </span>
                         </button>
                         {person.uid ? (
                           <button
                             type="button"
                             onClick={() => openEntityDetailReport(person.uid)}
-                            className="min-h-[34px] rounded-xl bg-[#1A365D] hover:bg-[#0F172A] text-white text-xs font-extrabold flex items-center justify-center gap-1"
+                            className="h-8 rounded-xl bg-[#1A365D] hover:bg-[#0F172A] text-white text-[11px] font-extrabold flex items-center justify-center gap-1"
                           >
                             <CreditCard className="w-3.5 h-3.5 text-[#FDE68A]" />
                             <span>كشف الكروت</span>
                           </button>
                         ) : (
-                          <div className="min-h-[34px] rounded-xl bg-slate-50 dark:bg-slate-800/50 text-[11px] font-bold text-slate-500 flex items-center justify-center">
+                          <div className="h-8 rounded-xl bg-slate-50 dark:bg-slate-800/50 text-[10.5px] font-bold text-slate-500 flex items-center justify-center">
                             نقدي: {formatMoney(person.cashTotal)}
                           </div>
                         )}
@@ -2334,73 +2405,91 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
             )}
           </div>
 
-          {/* Invoices & Operations Table */}
+          {/* Complete "لمن باع" Invoices & Operations Table */}
           <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden">
-            <div className="px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800/70 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2">
-              <h3 className="text-xs font-extrabold text-slate-900 dark:text-white truncate">
+            <div className="px-2.5 py-2 bg-slate-50 dark:bg-slate-800/70 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2">
+              <h3 className="text-[11px] font-extrabold text-slate-900 dark:text-white truncate">
                 {focusedSalesPersonKey
-                  ? `فواتير وعمليات: ${
+                  ? `تفاصيل «لمن باع» — ${
                       periodSalesData.byPerson.find((p) => p.key === focusedSalesPersonKey)?.name || ''
                     }`
-                  : `سجل الفواتير والعمليات — ${periodSalesData.periodTitle}`}
+                  : `تفاصيل المبيعات و«لمن باع» — ${periodSalesData.periodTitle}`}
               </h3>
-              <span className="text-[11px] font-extrabold text-[#1A365D] dark:text-[#FDE68A] shrink-0">
+              <span className="text-[10.5px] font-extrabold text-[#1A365D] dark:text-[#FDE68A] shrink-0">
                 {formatNumEn(displayedSalesList.length)} عملية
               </span>
             </div>
             {displayedSalesList.length === 0 ? (
-              <div className="p-6 text-center text-xs font-bold text-slate-500">
+              <div className="p-5 text-center text-xs font-bold text-slate-500">
                 لا توجد عمليات مطابقة.
               </div>
             ) : (
               <div className="overflow-x-auto">
-                <table className="w-full text-right text-xs">
-                  <thead className="bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200">
+                <table className="w-full text-right text-[11px]">
+                  <thead className="bg-[#1A365D] text-white">
                     <tr>
-                      <th className="py-2 px-2.5 font-extrabold">التاريخ</th>
-                      <th className="py-2 px-2.5 font-extrabold">المشتري</th>
-                      <th className="py-2 px-2.5 font-extrabold">النوع</th>
-                      <th className="py-2 px-2.5 font-extrabold">الكروت</th>
-                      <th className="py-2 px-2.5 font-extrabold">الإجمالي</th>
-                      <th className="py-2 px-2.5 font-extrabold">المتبقي</th>
+                      <th className="py-1.5 px-2 font-extrabold">المشتري (لمن باع)</th>
+                      <th className="py-1.5 px-2 font-extrabold">الكرت / الفئة</th>
+                      <th className="py-1.5 px-2 font-extrabold">التاريخ والوقت</th>
+                      <th className="py-1.5 px-2 font-extrabold">السعر</th>
+                      <th className="py-1.5 px-2 font-extrabold">حق الإدارة</th>
+                      <th className="py-1.5 px-2 font-extrabold">حق الوكيل/العميل</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                    {displayedSalesList.slice(0, visibleRowsCount).map((sale) => (
-                      <tr key={sale.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
-                        <td className="py-2 px-2.5 font-bold text-slate-600 dark:text-slate-300 whitespace-nowrap tabular-nums">
-                          {formatDateDDMMYYYY(sale.createdAt)}
-                        </td>
-                        <td className="py-2 px-2.5">
-                          <div className="font-extrabold text-slate-900 dark:text-white">
-                            {sale.buyerName || 'مستهلك مباشر'}
-                          </div>
-                          <div className="text-[10px] font-bold text-slate-500">
-                            {sale.buyerPhone || sale.invoiceNumber || '—'} • {paymentMethodLabelAr(sale.paymentMethod)}
-                          </div>
-                        </td>
-                        <td className="py-2 px-2.5 font-bold whitespace-nowrap">
-                          {saleTypeLabelAr(sale.saleType)}
-                        </td>
-                        <td className="py-2 px-2.5 font-extrabold text-[#1A365D] dark:text-[#FDE68A] tabular-nums">
-                          {formatNum(sale.totalCards)}
-                        </td>
-                        <td className="py-2 px-2.5 font-extrabold text-slate-900 dark:text-white tabular-nums">
-                          {formatMoney(sale.totalAmount)}
-                        </td>
-                        <td className="py-2 px-2.5 font-extrabold text-red-600 dark:text-red-400 tabular-nums">
-                          {formatMoney(sale.remainingAmount)}
-                        </td>
-                      </tr>
-                    ))}
+                    {displayedSalesList.slice(0, visibleRowsCount).map((sale) => {
+                      const { nominal, adminShare, entityShare } = getSaleShares(sale);
+                      const firstCard = sale.cardNumbers?.[0];
+                      const pkgSummary =
+                        sale.items && sale.items.length > 0
+                          ? sale.items.map((it) => `${it.price}×${it.quantity}`).join('، ')
+                          : `${formatNum(sale.totalCards)} كرت`;
+                      return (
+                        <tr key={sale.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
+                          <td className="py-1.5 px-2 whitespace-nowrap">
+                            <div className="font-extrabold text-slate-900 dark:text-white">
+                              {sale.buyerName || 'مستهلك مباشر'}
+                            </div>
+                            <div className="text-[10px] font-bold text-slate-500 tabular-nums">
+                              {sale.buyerPhone || '—'} • {paymentMethodLabelAr(sale.paymentMethod)}
+                            </div>
+                          </td>
+                          <td className="py-1.5 px-2 whitespace-nowrap">
+                            <div className="font-extrabold text-[#1A365D] dark:text-[#FDE68A] tabular-nums">
+                              {pkgSummary}
+                            </div>
+                            {firstCard && (
+                              <div className="text-[10px] font-mono font-bold text-slate-500 tabular-nums">
+                                {firstCard}
+                                {(sale.cardNumbers?.length || 0) > 1
+                                  ? ` (+${(sale.cardNumbers?.length || 1) - 1})`
+                                  : ''}
+                              </div>
+                            )}
+                          </td>
+                          <td className="py-1.5 px-2 font-bold text-slate-600 dark:text-slate-300 whitespace-nowrap tabular-nums">
+                            {formatDateTimeAr(sale.createdAt)}
+                          </td>
+                          <td className="py-1.5 px-2 font-extrabold text-slate-900 dark:text-white tabular-nums whitespace-nowrap">
+                            {formatMoney(nominal)}
+                          </td>
+                          <td className="py-1.5 px-2 font-extrabold text-blue-700 dark:text-sky-400 tabular-nums whitespace-nowrap">
+                            {formatMoney(adminShare)}
+                          </td>
+                          <td className="py-1.5 px-2 font-extrabold text-emerald-700 dark:text-emerald-400 tabular-nums whitespace-nowrap">
+                            {formatMoney(entityShare)}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
                 {displayedSalesList.length > visibleRowsCount && (
-                  <div className="p-3 text-center border-t border-slate-100 dark:border-slate-800">
+                  <div className="p-2.5 text-center border-t border-slate-100 dark:border-slate-800">
                     <button
                       type="button"
                       onClick={() => setVisibleRowsCount((v) => v + PAGE_SIZE)}
-                      className="px-4 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 text-xs font-extrabold text-[#1A365D] dark:text-[#FDE68A]"
+                      className="px-4 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 text-xs font-extrabold text-[#1A365D] dark:text-[#FDE68A]"
                     >
                       عرض المزيد ({formatNumEn(displayedSalesList.length - visibleRowsCount)} متبقي)
                     </button>
@@ -2413,164 +2502,65 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
       )}
 
       {/* ================================================================= */}
-      {/* ICON 3: بيانات وكروت الوكيل والعميل (بالتفصيل الممل)              */}
+      {/* TAB 3: الوكيل (الأيقونات الأربع + الباقات الثماني + لمن باع فوراً) */}
       {/* ================================================================= */}
       {activeReportId === 'entity_cards_detail' && (
-        <div className="space-y-3.5">
-          {/* Interactive Searchable List of ALL Agents & Clients */}
-          {(isAdmin || isAgent) && (
-            <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-3 shadow-sm space-y-2.5">
-              <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <UserCheck className="w-4 h-4 text-[#D4AF37]" />
-                  <h3 className="text-xs font-extrabold text-slate-900 dark:text-white">
-                    اضغط على أي وكيل أو عميل لعرض صفحته التفصيلية الكاملة ({selectableAccounts.length})
-                  </h3>
-                </div>
-                <div className="relative sm:w-64">
-                  <Search className="w-3.5 h-3.5 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2" />
-                  <input
-                    type="text"
-                    value={entitySearch}
-                    onChange={(e) => setEntitySearch(e.target.value)}
-                    placeholder="ابحث بالاسم أو رقم الهاتف..."
-                    className="w-full pr-8 pl-3 py-1.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-bold text-slate-900 dark:text-white"
-                  />
-                </div>
-              </div>
-
-              {filteredEntityChoices.length === 0 ? (
-                <p className="text-xs font-bold text-slate-500 text-center py-4">
-                  لا يوجد وكلاء أو عملاء مطابقون للبحث.
-                </p>
-              ) : (
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 max-h-56 overflow-y-auto p-0.5">
-                  {filteredEntityChoices.map((acc) => {
-                    const isSelected = effectiveDetailUser?.uid === acc.uid;
-                    return (
-                      <button
-                        key={acc.uid}
-                        type="button"
-                        onClick={() => setSelectedEntityUid(acc.uid)}
-                        className={`text-right p-2.5 rounded-xl border-2 transition flex items-center justify-between gap-2 ${
-                          isSelected
-                            ? 'bg-[#1A365D] text-white border-[#D4AF37] shadow'
-                            : 'bg-slate-50 dark:bg-slate-800/70 text-slate-900 dark:text-white border-slate-200 dark:border-slate-700 hover:border-[#D4AF37]'
-                        }`}
-                      >
-                        <div className="min-w-0 flex-1">
-                          <div className="text-xs font-extrabold leading-snug break-words">
-                            {acc.name}
-                          </div>
-                          <div
-                            className={`text-[10.5px] font-bold mt-0.5 tabular-nums ${
-                              isSelected ? 'text-[#FDE68A]' : 'text-slate-500 dark:text-slate-400'
-                            }`}
-                          >
-                            {getRoleArabicLabel(acc.role)} • {acc.phone || '—'} • {acc.discountRate || 80}%
-                          </div>
-                        </div>
-                        <div className="text-left shrink-0 flex flex-col items-end gap-1">
-                          <span
-                            className={`text-[10px] font-extrabold px-2 py-0.5 rounded-lg whitespace-nowrap ${
-                              acc.status === 'suspended'
-                                ? 'bg-red-600 text-white'
-                                : isSelected
-                                  ? 'bg-white/20 text-[#FDE68A]'
-                                  : 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300'
-                            }`}
-                          >
-                            {acc.status === 'suspended' ? 'موقوف' : 'نشط'}
-                          </span>
-                          <span className="text-[10px] font-extrabold tabular-nums">
-                            {formatMoney(acc.balance || 0)}
-                          </span>
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Selected Agent/Client Full Detailed Page (4 Complete Subsections) */}
+        <div className="space-y-2">
           {effectiveDetailUser ? (
-            <div className="space-y-3.5">
-              {/* 1. Profile & Financial Summary Header */}
-              <div className="rounded-2xl bg-gradient-to-l from-[#1A365D] to-[#0F172A] text-white p-3.5 border-2 border-[#D4AF37]/80 shadow flex flex-col gap-2.5">
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <h3 className="text-base font-extrabold break-words">
-                        {effectiveDetailUser.name}
-                      </h3>
-                      <span className="px-2 py-0.5 rounded-lg text-[10px] font-extrabold bg-[#D4AF37] text-[#0F172A] whitespace-nowrap">
-                        {getRoleArabicLabel(effectiveDetailUser.role)}
-                      </span>
-                      {effectiveDetailUser.status === 'suspended' && (
-                        <span className="px-2 py-0.5 rounded-lg text-[10px] font-extrabold bg-red-600 text-white whitespace-nowrap">
-                          موقوف مؤقتاً
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-xs font-bold text-[#FDE68A] mt-1 tabular-nums">
-                      الهاتف: {effectiveDetailUser.phone || '—'} • نسبة التسعير:{' '}
-                      {effectiveDetailUser.discountRate ||
-                        (effectiveDetailUser.role === 'agent' ? 70 : 80)}
-                      %
-                    </p>
-                  </div>
-                  <div className="rounded-xl bg-white/10 px-3 py-1.5 text-center border border-[#D4AF37]/50 shrink-0">
-                    <p className="text-[10px] font-bold text-slate-300">الرصيد المالي</p>
-                    <p className="text-sm font-extrabold text-[#FDE68A] tabular-nums">
-                      {formatMoney(effectiveDetailUser.balance || 0)}
-                    </p>
-                  </div>
+            <>
+              {/* Ultra-Slim 1-Line Account Identity Strip (zero wasted vertical space) */}
+              <div className="h-8 px-2.5 rounded-xl bg-white dark:bg-slate-900 border border-[#D4AF37]/60 flex items-center justify-between gap-2 text-[11px] font-extrabold shadow-xs">
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <UserCheck className="w-3.5 h-3.5 text-[#D4AF37] shrink-0" />
+                  <span className="text-[#1A365D] dark:text-white truncate">
+                    {effectiveDetailUser.name}
+                  </span>
+                  <span className="px-1.5 py-0.5 rounded bg-[#1A365D]/10 dark:bg-white/10 text-[#1A365D] dark:text-[#FDE68A] text-[9.5px] shrink-0">
+                    {getRoleArabicLabel(effectiveDetailUser.role)}
+                  </span>
                 </div>
+                <span className="text-[10.5px] font-bold text-slate-500 dark:text-slate-400 tabular-nums shrink-0">
+                  {effectiveDetailUser.phone || '—'}
+                </span>
               </div>
 
-              {/* 2 & 3. Embedded Complete Card Inventory Audit:
-                  - Summary (Received / Sold / Remaining / Recalled)
-                  - 8-Package Breakdown (100..3000)
-                  - Exhaustive "Sold To Whom" log (Card #, Package, Buyer Name & Phone, Date/Time, Price/Method, Instant Search) */}
+              {/* Immediately Renders: 4 Summary Icons -> 8-Package Strip -> Full 'لمن باع' & Remaining Cards */}
               <AgentCardAuditModal
                 targetUser={effectiveDetailUser}
                 hideNumbers={hideNumbers}
                 mode="inline"
               />
 
-              {/* 4. Complete Chronological Activity Log (Receive / Sale / Payment / Recall-Return) */}
+              {/* Complete Chronological Activity Log (Receive / Sale / Payment / Recall-Return) */}
               <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden">
-                <div className="px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800/70 border-b border-slate-200 dark:border-slate-800 space-y-2">
+                <div className="px-2.5 py-2 bg-slate-50 dark:bg-slate-800/70 border-b border-slate-200 dark:border-slate-800 space-y-1.5">
                   <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                      <CreditCard className="w-4 h-4 text-[#D4AF37]" />
-                      <h3 className="text-xs font-extrabold text-slate-900 dark:text-white">
-                        سجل كافة الأعمال والحركات بالتاريخ والوقت
+                    <div className="flex items-center gap-1.5">
+                      <CreditCard className="w-3.5 h-3.5 text-[#D4AF37]" />
+                      <h3 className="text-[11px] font-extrabold text-slate-900 dark:text-white">
+                        سجل الحركات بالتاريخ والوقت
                       </h3>
                     </div>
-                    <span className="text-[11px] font-extrabold text-[#1A365D] dark:text-[#FDE68A]">
+                    <span className="text-[10.5px] font-extrabold text-[#1A365D] dark:text-[#FDE68A]">
                       {formatNumEn(filteredDetailActivity.length)} حركة
                     </span>
                   </div>
 
-                  {/* Activity Category Filter Tabs */}
-                  <div className="flex flex-wrap items-center gap-1.5">
+                  <div className="flex flex-wrap items-center gap-1">
                     {(
                       [
                         { id: 'all', label: 'الكل' },
-                        { id: 'receive', label: 'استلام كروت' },
+                        { id: 'receive', label: 'استلام' },
                         { id: 'sale', label: 'مبيعات' },
-                        { id: 'payment', label: 'سداد ودفعات' },
-                        { id: 'return', label: 'سحب ومرتجع' },
+                        { id: 'payment', label: 'سداد' },
+                        { id: 'return', label: 'مرتجع' },
                       ] as Array<{ id: ActivityFilterType; label: string }>
                     ).map((f) => (
                       <button
                         key={f.id}
                         type="button"
                         onClick={() => setActivityFilter(f.id)}
-                        className={`px-2.5 py-1 rounded-lg text-[11px] font-extrabold transition ${
+                        className={`px-2 py-1 rounded-lg text-[10.5px] font-extrabold transition ${
                           activityFilter === f.id
                             ? 'bg-[#1A365D] text-[#FDE68A]'
                             : 'bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700'
@@ -2583,7 +2573,7 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
                 </div>
 
                 {filteredDetailActivity.length === 0 ? (
-                  <div className="p-6 text-center text-xs font-bold text-slate-500">
+                  <div className="p-5 text-center text-xs font-bold text-slate-500">
                     لا توجد حركات مطابقة لهذا التصنيف حالياً.
                   </div>
                 ) : (
@@ -2591,12 +2581,12 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
                     {filteredDetailActivity.slice(0, detailActivityVisible).map((ev) => (
                       <div
                         key={ev.id}
-                        className="px-3.5 py-2.5 flex items-start justify-between gap-2.5 hover:bg-slate-50 dark:hover:bg-slate-800/40"
+                        className="px-2.5 py-2 flex items-start justify-between gap-2 hover:bg-slate-50 dark:hover:bg-slate-800/40"
                       >
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-1.5 flex-wrap">
                             <span
-                              className={`px-2 py-0.5 rounded-md text-[10px] font-extrabold whitespace-nowrap ${
+                              className={`px-1.5 py-0.5 rounded text-[9.5px] font-extrabold whitespace-nowrap ${
                                 ev.category === 'sale'
                                   ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300'
                                   : ev.category === 'receive'
@@ -2612,7 +2602,7 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
                               {ev.title}
                             </p>
                           </div>
-                          <p className="text-[11px] font-bold text-slate-500 dark:text-slate-400 mt-0.5 break-words">
+                          <p className="text-[10.5px] font-bold text-slate-500 dark:text-slate-400 mt-0.5 break-words">
                             {ev.subtitle}
                           </p>
                           <p className="text-[10px] font-bold text-slate-400 mt-0.5 tabular-nums">
@@ -2628,11 +2618,11 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
                       </div>
                     ))}
                     {filteredDetailActivity.length > detailActivityVisible && (
-                      <div className="p-3 text-center">
+                      <div className="p-2.5 text-center">
                         <button
                           type="button"
                           onClick={() => setDetailActivityVisible((v) => v + PAGE_SIZE)}
-                          className="px-4 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 text-xs font-extrabold text-[#1A365D] dark:text-[#FDE68A]"
+                          className="px-4 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 text-xs font-extrabold text-[#1A365D] dark:text-[#FDE68A]"
                         >
                           عرض المزيد (
                           {formatNumEn(filteredDetailActivity.length - detailActivityVisible)} متبقي)
@@ -2642,15 +2632,12 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
                   </div>
                 )}
               </div>
-            </div>
+            </>
           ) : (
-            <div className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-dashed border-[#D4AF37]/70 p-6 text-center space-y-2">
-              <UserCheck className="w-9 h-9 mx-auto text-[#D4AF37]" />
-              <p className="text-sm font-extrabold text-slate-800 dark:text-white">
-                اضغط على أي وكيل أو عميل من القائمة أعلاه
-              </p>
-              <p className="text-xs font-bold text-slate-500 dark:text-slate-400">
-                سيظهر فوراً ملفه الكامل: كم استلم وكم باع وكم بقي من كل فئة، سجل «لمن باع» لكل كرت، وسجل كافة أعماله وحركاته بالتاريخ والوقت.
+            <div className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-dashed border-[#D4AF37]/70 p-5 text-center space-y-1.5">
+              <UserCheck className="w-8 h-8 mx-auto text-[#D4AF37]" />
+              <p className="text-xs font-extrabold text-slate-800 dark:text-white">
+                اختر أي وكيل أو عميل من القائمة أعلاه لعرض كشفه الكامل فوراً
               </p>
             </div>
           )}
@@ -2658,196 +2645,202 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
       )}
 
       {/* ================================================================= */}
-      {/* ICON 4: التقارير المحاسبية الشاملة وجرد الكروت                     */}
+      {/* TAB 4: المحاسبة (4 أيقونات + الحقوق + مطابقة الباقات الثماني)      */}
       {/* ================================================================= */}
       {activeReportId === 'accounting_full_inventory' && (
-        <div className="space-y-3.5">
-          {/* Reconciliation Formula Banner (Zero Lost Cards) */}
-          <div className="rounded-2xl bg-gradient-to-l from-[#0F172A] via-[#1A365D] to-[#0F172A] text-white p-3.5 border-2 border-[#D4AF37] shadow space-y-2">
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <ShieldCheck className="w-5 h-5 text-emerald-400 shrink-0" />
-                <h3 className="text-xs sm:text-sm font-extrabold">
-                  معادلة جرد ومطابقة الكروت الكاملة (منع أي ضياع)
-                </h3>
-              </div>
-              <span className="px-2 py-0.5 rounded-lg bg-emerald-600/30 border border-emerald-400/60 text-emerald-300 text-[10px] font-extrabold whitespace-nowrap">
-                مطابقة 100% ✓
+        <div className="space-y-2">
+          {/* Ultra-Slim 1-Line Status & Search Icon Row (h-8) */}
+          <div className="flex items-center justify-between gap-1.5 h-8 px-2.5 rounded-xl bg-white dark:bg-slate-900 border border-[#D4AF37]/60">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
+              <span className="text-[11px] font-extrabold text-[#1A365D] dark:text-[#FDE68A] truncate">
+                مطابقة جرد الكروت الكاملة — 100% ✓
               </span>
             </div>
-            <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5 text-center">
-              <div className="rounded-xl bg-white/10 p-2 border border-white/15">
-                <p className="text-[10px] font-bold text-[#FDE68A]">إجمالي المستورد</p>
-                <p className="text-sm font-black tabular-nums mt-0.5">
-                  {formatNum(accountingData.totalUploadedCards)}
-                </p>
-              </div>
-              <div className="rounded-xl bg-white/10 p-2 border border-emerald-400/40">
-                <p className="text-[10px] font-bold text-emerald-300">المتاح بالمخزن</p>
-                <p className="text-sm font-black tabular-nums mt-0.5">
-                  {formatNum(accountingData.totalAvailableCards)}
-                </p>
-              </div>
-              <div className="rounded-xl bg-white/10 p-2 border border-sky-400/40">
-                <p className="text-[10px] font-bold text-sky-300">المسلّم للوكلاء (متبقي)</p>
-                <p className="text-sm font-black tabular-nums mt-0.5">
-                  {formatNum(accountingData.totalDeliveredRemaining)}
-                </p>
-              </div>
-              <div className="rounded-xl bg-white/10 p-2 border border-amber-400/40">
-                <p className="text-[10px] font-bold text-amber-300">إجمالي المباع</p>
-                <p className="text-sm font-black tabular-nums mt-0.5">
-                  {formatNum(accountingData.totalSoldCards)}
-                </p>
-              </div>
-              <div className="rounded-xl bg-white/10 p-2 border border-red-400/40 col-span-2 sm:col-span-1">
-                <p className="text-[10px] font-bold text-red-300">المسحوب / المرتجع</p>
-                <p className="text-sm font-black tabular-nums mt-0.5">
-                  {formatNum(accountingData.totalReturnedCards)}
-                </p>
-              </div>
-            </div>
+            <button
+              type="button"
+              onClick={() => setShowSearchInput((v) => !v)}
+              aria-label="بحث في الكشف المحاسبي"
+              className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 transition ${
+                showSearchInput || search
+                  ? 'bg-[#1A365D] text-[#FDE68A]'
+                  : 'bg-slate-100 dark:bg-slate-800 text-[#1A365D] dark:text-[#FDE68A]'
+              }`}
+            >
+              <Search className="w-3.5 h-3.5" />
+            </button>
           </div>
 
-          {/* Executive Financial Rights Summary (حق الإدارة / حق الوكيل / حق العميل / المدفوع / الديون / المرتجع) */}
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
-            <div className="rounded-2xl bg-gradient-to-br from-[#1A365D] to-[#0F172A] text-white p-3 border border-[#D4AF37]/80">
-              <p className="text-[10.5px] font-bold text-[#FDE68A]">كم حق الإدارة</p>
+          {showSearchInput && (
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute right-2.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="بحث باسم الوكيل أو العميل أو الرقم..."
+                className="w-full h-8 pr-8 pl-8 rounded-xl border border-[#D4AF37]/70 bg-white dark:bg-slate-900 text-xs font-bold text-slate-900 dark:text-white focus:outline-none"
+                autoFocus
+              />
+              {search && (
+                <button
+                  type="button"
+                  onClick={() => setSearch('')}
+                  className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* 4 Beautiful Compact Summary Icons: المستلم/المستورد | الباقي | باع | حق الإدارة */}
+          <div className="grid grid-cols-4 gap-1.5">
+            <div className="rounded-xl bg-[#1A365D] text-white border border-[#D4AF37]/80 px-1.5 py-2 text-center shadow-sm">
+              <div className="flex items-center justify-center gap-1 text-[10px] font-bold text-[#FDE68A]">
+                <Layers className="w-3 h-3 shrink-0" />
+                <span className="truncate">المستلم</span>
+              </div>
               <p className="text-sm font-black mt-0.5 tabular-nums">
+                {formatNum(accountingData.totalUploadedCards)}
+              </p>
+            </div>
+            <div className="rounded-xl bg-amber-500 text-[#0F172A] border border-amber-700/70 px-1.5 py-2 text-center shadow-sm">
+              <div className="flex items-center justify-center gap-1 text-[10px] font-extrabold">
+                <Package className="w-3 h-3 shrink-0" />
+                <span className="truncate">الباقي</span>
+              </div>
+              <p className="text-sm font-black mt-0.5 tabular-nums">
+                {formatNum(accountingData.totalAvailableCards)}
+              </p>
+            </div>
+            <div className="rounded-xl bg-emerald-600 text-white border border-emerald-400/80 px-1.5 py-2 text-center shadow-sm">
+              <div className="flex items-center justify-center gap-1 text-[10px] font-bold text-emerald-100">
+                <TrendingUp className="w-3 h-3 shrink-0" />
+                <span className="truncate">باع</span>
+              </div>
+              <p className="text-sm font-black mt-0.5 tabular-nums">
+                {formatNum(accountingData.totalSoldCards)}
+              </p>
+            </div>
+            <div className="rounded-xl bg-gradient-to-br from-[#0F172A] to-indigo-950 text-white border border-[#D4AF37]/70 px-1.5 py-2 text-center shadow-sm">
+              <div className="flex items-center justify-center gap-1 text-[10px] font-bold text-[#FDE68A]">
+                <Wallet className="w-3 h-3 shrink-0" />
+                <span className="truncate">حق الإدارة</span>
+              </div>
+              <p className="text-[11px] font-black mt-0.5 tabular-nums truncate">
                 {formatMoney(accountingData.totals.adminShare)}
               </p>
             </div>
-            <div className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-emerald-500/40 p-3">
-              <p className="text-[10.5px] font-bold text-emerald-700 dark:text-emerald-400">
-                كم حق الوكيل
+          </div>
+
+          {/* Compact Financial Rights Strip */}
+          <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5">
+            <div className="rounded-xl bg-white dark:bg-slate-900 border border-[#D4AF37]/60 p-2 text-center">
+              <p className="text-[9.5px] font-bold text-slate-500">حق الإدارة</p>
+              <p className="text-[11px] font-black text-[#1A365D] dark:text-[#FDE68A] tabular-nums truncate mt-0.5">
+                {formatMoney(accountingData.totals.adminShare)}
               </p>
-              <p className="text-sm font-black text-emerald-700 dark:text-emerald-400 mt-0.5 tabular-nums">
+            </div>
+            <div className="rounded-xl bg-white dark:bg-slate-900 border border-emerald-500/40 p-2 text-center">
+              <p className="text-[9.5px] font-bold text-emerald-700 dark:text-emerald-400">حق الوكيل</p>
+              <p className="text-[11px] font-black text-emerald-700 dark:text-emerald-400 tabular-nums truncate mt-0.5">
                 {formatMoney(accountingData.totals.agentShare)}
               </p>
             </div>
-            <div className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-amber-500/40 p-3">
-              <p className="text-[10.5px] font-bold text-amber-700 dark:text-amber-400">
-                كم حق العميل
-              </p>
-              <p className="text-sm font-black text-amber-700 dark:text-amber-400 mt-0.5 tabular-nums">
+            <div className="rounded-xl bg-white dark:bg-slate-900 border border-amber-500/40 p-2 text-center">
+              <p className="text-[9.5px] font-bold text-amber-700 dark:text-amber-400">حق العميل</p>
+              <p className="text-[11px] font-black text-amber-700 dark:text-amber-400 tabular-nums truncate mt-0.5">
                 {formatMoney(accountingData.totals.clientShare)}
               </p>
             </div>
-            <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-3">
-              <p className="text-[10.5px] font-bold text-slate-500">إجمالي المدفوع</p>
-              <p className="text-sm font-black text-sky-700 dark:text-sky-400 mt-0.5 tabular-nums">
+            <div className="rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-2 text-center">
+              <p className="text-[9.5px] font-bold text-slate-500">المدفوع</p>
+              <p className="text-[11px] font-black text-sky-700 dark:text-sky-400 tabular-nums truncate mt-0.5">
                 {formatMoney(accountingData.totals.paidAmount)}
               </p>
             </div>
-            <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-3">
-              <p className="text-[10.5px] font-bold text-slate-500">المتبقي والديون</p>
-              <p className="text-sm font-black text-red-600 dark:text-red-400 mt-0.5 tabular-nums">
+            <div className="rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-2 text-center">
+              <p className="text-[9.5px] font-bold text-slate-500">الديون</p>
+              <p className="text-[11px] font-black text-red-600 dark:text-red-400 tabular-nums truncate mt-0.5">
                 {formatMoney(accountingData.totals.remainingDebt)}
               </p>
             </div>
-            <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-3">
-              <p className="text-[10.5px] font-bold text-slate-500">قيمة المسحوب/المرتجع</p>
-              <p className="text-sm font-black text-purple-700 dark:text-purple-400 mt-0.5 tabular-nums">
+            <div className="rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-2 text-center">
+              <p className="text-[9.5px] font-bold text-slate-500">المرتجع</p>
+              <p className="text-[11px] font-black text-purple-700 dark:text-purple-400 tabular-nums truncate mt-0.5">
                 {formatMoney(accountingData.totals.returnedValue)}
               </p>
             </div>
           </div>
 
-          {/* Search Bar */}
-          <div className="relative">
-            <Search className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2" />
-            <input
-              type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="بحث باسم الوكيل أو العميل أو الرقم في الكشف المحاسبي..."
-              className="w-full pr-9 pl-9 py-2 rounded-2xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs font-bold text-slate-900 dark:text-white"
-            />
-            {search && (
-              <button
-                type="button"
-                onClick={() => setSearch('')}
-                className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            )}
-          </div>
-
-          {/* Per-Person Accounting Rights Table + Cards */}
+          {/* Per-Person Accounting Rights Table */}
           <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden">
-            <div className="px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800/70 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <Wallet className="w-4 h-4 text-[#D4AF37]" />
-                <h3 className="text-xs font-extrabold text-slate-900 dark:text-white">
-                  التفصيل المحاسبي لكل شخص (حق الإدارة • حق الوكيل • حق العميل • المدفوع • الديون • المرتجع)
+            <div className="px-2.5 py-2 bg-slate-50 dark:bg-slate-800/70 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5">
+                <Wallet className="w-3.5 h-3.5 text-[#D4AF37]" />
+                <h3 className="text-[11px] font-extrabold text-slate-900 dark:text-white">
+                  التفصيل المحاسبي لكل حساب
                 </h3>
               </div>
-              <span className="text-[10.5px] font-extrabold text-emerald-700 dark:text-emerald-400">
+              <span className="text-[10px] font-extrabold text-emerald-700 dark:text-emerald-400 tabular-nums">
                 الدفتر: {formatMoney(accountingData.ledgerTotalDebt)}
               </span>
             </div>
 
             {accountingData.rightsRows.length === 0 ? (
-              <div className="p-6 text-center text-xs font-bold text-slate-500">
+              <div className="p-5 text-center text-xs font-bold text-slate-500">
                 لا توجد بيانات محاسبية مطابقة للبحث.
               </div>
             ) : (
               <div className="overflow-x-auto">
-                <table className="w-full text-right text-xs">
+                <table className="w-full text-right text-[11px]">
                   <thead className="bg-[#1A365D] text-white">
                     <tr>
-                      <th className="py-2 px-2.5 font-extrabold">الحساب</th>
-                      <th className="py-2 px-2.5 font-extrabold">الكروت</th>
-                      <th className="py-2 px-2.5 font-extrabold">حق الإدارة</th>
-                      <th className="py-2 px-2.5 font-extrabold">حق الوكيل</th>
-                      <th className="py-2 px-2.5 font-extrabold">حق العميل</th>
-                      <th className="py-2 px-2.5 font-extrabold">المدفوع</th>
-                      <th className="py-2 px-2.5 font-extrabold">المتبقي/دين</th>
-                      <th className="py-2 px-2.5 font-extrabold">المسحوب/مرتجع</th>
-                      <th className="py-2 px-2.5 font-extrabold">مشاركة</th>
+                      <th className="py-1.5 px-2 font-extrabold">الحساب</th>
+                      <th className="py-1.5 px-2 font-extrabold text-center">الكروت</th>
+                      <th className="py-1.5 px-2 font-extrabold">حق الإدارة</th>
+                      <th className="py-1.5 px-2 font-extrabold">حق الوكيل</th>
+                      <th className="py-1.5 px-2 font-extrabold">حق العميل</th>
+                      <th className="py-1.5 px-2 font-extrabold">المدفوع</th>
+                      <th className="py-1.5 px-2 font-extrabold">المتبقي/دين</th>
+                      <th className="py-1.5 px-2 font-extrabold">المرتجع</th>
+                      <th className="py-1.5 px-2 font-extrabold">واتساب</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                     {accountingData.rightsRows.slice(0, visibleRowsCount).map((row) => (
                       <tr key={row.uid} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
-                        <td className="py-2 px-2.5">
-                          <div className="flex items-center gap-1.5 flex-wrap">
-                            <span className="font-extrabold text-slate-900 dark:text-white">
-                              {row.name}
-                            </span>
-                            {row.status === 'suspended' && (
-                              <span className="px-1.5 py-0.5 rounded bg-red-100 text-red-700 text-[9px] font-extrabold">
-                                موقوف
-                              </span>
-                            )}
+                        <td className="py-1.5 px-2 whitespace-nowrap">
+                          <div className="font-extrabold text-slate-900 dark:text-white">
+                            {row.name}
                           </div>
                           <div className="text-[10px] font-bold text-slate-500">
                             {row.roleLabel} ({row.discountRate}%) • {row.phone}
                           </div>
                         </td>
-                        <td className="py-2 px-2.5 font-extrabold tabular-nums">
+                        <td className="py-1.5 px-2 font-extrabold text-center tabular-nums">
                           {formatNum(row.cardsCount)}
                         </td>
-                        <td className="py-2 px-2.5 font-extrabold text-[#1A365D] dark:text-sky-400 tabular-nums">
+                        <td className="py-1.5 px-2 font-extrabold text-[#1A365D] dark:text-sky-400 tabular-nums whitespace-nowrap">
                           {formatMoney(row.adminShare)}
                         </td>
-                        <td className="py-2 px-2.5 font-extrabold text-emerald-700 dark:text-emerald-400 tabular-nums">
+                        <td className="py-1.5 px-2 font-extrabold text-emerald-700 dark:text-emerald-400 tabular-nums whitespace-nowrap">
                           {formatMoney(row.agentShare)}
                         </td>
-                        <td className="py-2 px-2.5 font-extrabold text-amber-700 dark:text-amber-400 tabular-nums">
+                        <td className="py-1.5 px-2 font-extrabold text-amber-700 dark:text-amber-400 tabular-nums whitespace-nowrap">
                           {formatMoney(row.clientShare)}
                         </td>
-                        <td className="py-2 px-2.5 font-bold text-slate-700 dark:text-slate-300 tabular-nums">
+                        <td className="py-1.5 px-2 font-bold text-slate-700 dark:text-slate-300 tabular-nums whitespace-nowrap">
                           {formatMoney(row.paidAmount)}
                         </td>
-                        <td className="py-2 px-2.5 font-extrabold text-red-600 dark:text-red-400 tabular-nums">
+                        <td className="py-1.5 px-2 font-extrabold text-red-600 dark:text-red-400 tabular-nums whitespace-nowrap">
                           {formatMoney(row.remainingDebt)}
                         </td>
-                        <td className="py-2 px-2.5 font-bold text-purple-700 dark:text-purple-400 tabular-nums">
+                        <td className="py-1.5 px-2 font-bold text-purple-700 dark:text-purple-400 tabular-nums whitespace-nowrap">
                           {formatMoney(row.returnedValue)}
                         </td>
-                        <td className="py-2 px-2.5">
+                        <td className="py-1.5 px-2">
                           <button
                             type="button"
                             onClick={() =>
@@ -2866,40 +2859,40 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
                   </tbody>
                   <tfoot className="bg-amber-50/70 dark:bg-slate-800/90 border-t-2 border-[#D4AF37]">
                     <tr>
-                      <td className="py-2.5 px-2.5 font-black text-[#1A365D] dark:text-[#FDE68A]">
-                        الإجمالي العام
+                      <td className="py-2 px-2 font-black text-[#1A365D] dark:text-[#FDE68A]">
+                        الإجمالي
                       </td>
-                      <td className="py-2.5 px-2.5 font-black tabular-nums">
+                      <td className="py-2 px-2 font-black text-center tabular-nums">
                         {formatNum(accountingData.totals.cardsCount)}
                       </td>
-                      <td className="py-2.5 px-2.5 font-black text-[#1A365D] dark:text-sky-400 tabular-nums">
+                      <td className="py-2 px-2 font-black text-[#1A365D] dark:text-sky-400 tabular-nums whitespace-nowrap">
                         {formatMoney(accountingData.totals.adminShare)}
                       </td>
-                      <td className="py-2.5 px-2.5 font-black text-emerald-700 dark:text-emerald-400 tabular-nums">
+                      <td className="py-2 px-2 font-black text-emerald-700 dark:text-emerald-400 tabular-nums whitespace-nowrap">
                         {formatMoney(accountingData.totals.agentShare)}
                       </td>
-                      <td className="py-2.5 px-2.5 font-black text-amber-700 dark:text-amber-400 tabular-nums">
+                      <td className="py-2 px-2 font-black text-amber-700 dark:text-amber-400 tabular-nums whitespace-nowrap">
                         {formatMoney(accountingData.totals.clientShare)}
                       </td>
-                      <td className="py-2.5 px-2.5 font-black tabular-nums">
+                      <td className="py-2 px-2 font-black tabular-nums whitespace-nowrap">
                         {formatMoney(accountingData.totals.paidAmount)}
                       </td>
-                      <td className="py-2.5 px-2.5 font-black text-red-600 dark:text-red-400 tabular-nums">
+                      <td className="py-2 px-2 font-black text-red-600 dark:text-red-400 tabular-nums whitespace-nowrap">
                         {formatMoney(accountingData.totals.remainingDebt)}
                       </td>
-                      <td className="py-2.5 px-2.5 font-black text-purple-700 dark:text-purple-400 tabular-nums">
+                      <td className="py-2 px-2 font-black text-purple-700 dark:text-purple-400 tabular-nums whitespace-nowrap">
                         {formatMoney(accountingData.totals.returnedValue)}
                       </td>
-                      <td className="py-2.5 px-2.5" />
+                      <td className="py-2 px-2" />
                     </tr>
                   </tfoot>
                 </table>
                 {accountingData.rightsRows.length > visibleRowsCount && (
-                  <div className="p-3 text-center border-t border-slate-100 dark:border-slate-800">
+                  <div className="p-2.5 text-center border-t border-slate-100 dark:border-slate-800">
                     <button
                       type="button"
                       onClick={() => setVisibleRowsCount((v) => v + PAGE_SIZE)}
-                      className="px-4 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 text-xs font-extrabold text-[#1A365D] dark:text-[#FDE68A]"
+                      className="px-4 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 text-xs font-extrabold text-[#1A365D] dark:text-[#FDE68A]"
                     >
                       عرض المزيد ({formatNumEn(accountingData.rightsRows.length - visibleRowsCount)} متبقي)
                     </button>
@@ -2911,50 +2904,50 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
 
           {/* 8-Package Full Card Reconciliation Table */}
           <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden">
-            <div className="px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800/70 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                <h3 className="text-xs font-extrabold text-slate-900 dark:text-white">
-                  مطابقة جرد الفئات الثماني (المستورد = المخزن + المسلّم + المباع + المرتجع)
+            <div className="px-2.5 py-2 bg-slate-50 dark:bg-slate-800/70 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                <h3 className="text-[11px] font-extrabold text-slate-900 dark:text-white">
+                  مطابقة الباقات الثماني (المستورد = المخزن + المسلّم + المباع + المرتجع)
                 </h3>
               </div>
             </div>
 
             <div className="overflow-x-auto">
-              <table className="w-full text-right text-xs">
+              <table className="w-full text-right text-[11px]">
                 <thead className="bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200">
                   <tr>
-                    <th className="py-2 px-2.5 font-extrabold">الفئة</th>
-                    <th className="py-2 px-2.5 font-extrabold">المستورد</th>
-                    <th className="py-2 px-2.5 font-extrabold">بالمخزن</th>
-                    <th className="py-2 px-2.5 font-extrabold">مسلّم متبقي</th>
-                    <th className="py-2 px-2.5 font-extrabold">المباع</th>
-                    <th className="py-2 px-2.5 font-extrabold">مسحوب/مرتجع</th>
-                    <th className="py-2 px-2.5 font-extrabold">قيمة المخزن</th>
+                    <th className="py-1.5 px-2 font-extrabold">الفئة</th>
+                    <th className="py-1.5 px-2 font-extrabold text-center">المستورد</th>
+                    <th className="py-1.5 px-2 font-extrabold text-center">بالمخزن</th>
+                    <th className="py-1.5 px-2 font-extrabold text-center">مسلّم</th>
+                    <th className="py-1.5 px-2 font-extrabold text-center">مباع</th>
+                    <th className="py-1.5 px-2 font-extrabold text-center">مرتجع</th>
+                    <th className="py-1.5 px-2 font-extrabold">قيمة المخزن</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                   {accountingData.inventoryRows.map((row) => (
                     <tr key={row.pkg.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
-                      <td className="py-2 px-2.5 font-extrabold text-slate-900 dark:text-white whitespace-nowrap">
+                      <td className="py-1.5 px-2 font-extrabold text-slate-900 dark:text-white whitespace-nowrap">
                         {row.pkg.price} ({row.pkg.dataLabel})
                       </td>
-                      <td className="py-2 px-2.5 font-extrabold tabular-nums">
+                      <td className="py-1.5 px-2 font-extrabold text-center tabular-nums">
                         {formatNum(row.uploaded)}
                       </td>
-                      <td className="py-2 px-2.5 font-extrabold text-emerald-700 dark:text-emerald-400 tabular-nums">
+                      <td className="py-1.5 px-2 font-extrabold text-center text-emerald-700 dark:text-emerald-400 tabular-nums">
                         {formatNum(row.availableVault)}
                       </td>
-                      <td className="py-2 px-2.5 font-extrabold text-sky-700 dark:text-sky-400 tabular-nums">
+                      <td className="py-1.5 px-2 font-extrabold text-center text-sky-700 dark:text-sky-400 tabular-nums">
                         {formatNum(row.deliveredRemaining)}
                       </td>
-                      <td className="py-2 px-2.5 font-extrabold text-[#1A365D] dark:text-[#FDE68A] tabular-nums">
+                      <td className="py-1.5 px-2 font-extrabold text-center text-[#1A365D] dark:text-[#FDE68A] tabular-nums">
                         {formatNum(row.sold)}
                       </td>
-                      <td className="py-2 px-2.5 font-bold text-red-600 dark:text-red-400 tabular-nums">
+                      <td className="py-1.5 px-2 font-bold text-center text-red-600 dark:text-red-400 tabular-nums">
                         {formatNum(row.returnedOrRecalled)}
                       </td>
-                      <td className="py-2 px-2.5 font-extrabold tabular-nums">
+                      <td className="py-1.5 px-2 font-extrabold tabular-nums whitespace-nowrap">
                         {formatMoney(row.nominalAvailableValue)}
                       </td>
                     </tr>
@@ -2962,35 +2955,30 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
                 </tbody>
                 <tfoot className="bg-slate-50 dark:bg-slate-800/90 border-t-2 border-slate-300 dark:border-slate-700">
                   <tr>
-                    <td className="py-2.5 px-2.5 font-black text-slate-900 dark:text-white">
+                    <td className="py-2 px-2 font-black text-slate-900 dark:text-white">
                       المجموع
                     </td>
-                    <td className="py-2.5 px-2.5 font-black tabular-nums">
+                    <td className="py-2 px-2 font-black text-center tabular-nums">
                       {formatNum(accountingData.totalUploadedCards)}
                     </td>
-                    <td className="py-2.5 px-2.5 font-black text-emerald-700 dark:text-emerald-400 tabular-nums">
+                    <td className="py-2 px-2 font-black text-center text-emerald-700 dark:text-emerald-400 tabular-nums">
                       {formatNum(accountingData.totalAvailableCards)}
                     </td>
-                    <td className="py-2.5 px-2.5 font-black text-sky-700 dark:text-sky-400 tabular-nums">
+                    <td className="py-2 px-2 font-black text-center text-sky-700 dark:text-sky-400 tabular-nums">
                       {formatNum(accountingData.totalDeliveredRemaining)}
                     </td>
-                    <td className="py-2.5 px-2.5 font-black text-[#1A365D] dark:text-[#FDE68A] tabular-nums">
+                    <td className="py-2 px-2 font-black text-center text-[#1A365D] dark:text-[#FDE68A] tabular-nums">
                       {formatNum(accountingData.totalSoldCards)}
                     </td>
-                    <td className="py-2.5 px-2.5 font-black text-red-600 dark:text-red-400 tabular-nums">
+                    <td className="py-2 px-2 font-black text-center text-red-600 dark:text-red-400 tabular-nums">
                       {formatNum(accountingData.totalReturnedCards)}
                     </td>
-                    <td className="py-2.5 px-2.5 font-black tabular-nums">
+                    <td className="py-2 px-2 font-black tabular-nums whitespace-nowrap">
                       {formatMoney(accountingData.totalAvailableValue)}
                     </td>
                   </tr>
                 </tfoot>
               </table>
-            </div>
-
-            <div className="px-3.5 py-2 bg-slate-50 dark:bg-slate-800/40 text-[10px] font-bold text-slate-500 flex items-center justify-between">
-              <span>منظومة كروت طيبة نت — {SUPER_ADMIN_CONFIG.developerCredit}</span>
-              <span>مطابقة فورية من السجلات المعتمدة</span>
             </div>
           </div>
         </div>
