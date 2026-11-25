@@ -1,10 +1,31 @@
-import type { SaleDoc, SaleLineItem } from '../types/taibah';
+import { EXCLUSIVE_PACKAGES, type SaleDoc, type SaleLineItem } from '../types/taibah';
 
 export interface CachedAvailableCard {
   id: string;
   packageId: string;
   cardNumber: string;
   ownerId: string;
+}
+
+/**
+ * Normalize any package identifier or denomination (e.g. `250`, `"250"`, `"pkg_250"`, `"باقة 250"`)
+ * into its canonical exclusive package ID (`"pkg_250"`).
+ */
+export function canonicalPackageId(pkgIdOrPrice: string | number | undefined | null): string {
+  if (pkgIdOrPrice === undefined || pkgIdOrPrice === null) return '';
+  const raw = String(pkgIdOrPrice).trim();
+  if (!raw) return '';
+  const lower = raw.toLowerCase();
+  const exact = EXCLUSIVE_PACKAGES.find(
+    (p) => p.id.toLowerCase() === lower || p.code.toLowerCase() === lower
+  );
+  if (exact) return exact.id;
+  const numeric = Number(raw.replace(/[^\d]/g, ''));
+  if (Number.isFinite(numeric) && numeric > 0) {
+    const byPrice = EXCLUSIVE_PACKAGES.find((p) => p.price === numeric);
+    if (byPrice) return byPrice.id;
+  }
+  return raw;
 }
 
 export interface OfflineQueuedSale {
@@ -116,24 +137,45 @@ export function releaseCardLocksLocally(cardNumbers: string[]): void {
 // Fast in-memory RAM cache per owner so reading/filtering available cards takes <1ms
 const memoryCardPoolByOwner = new Map<string, CachedAvailableCard[]>();
 
-export function saveCachedAvailableCards(ownerId: string, cards: CachedAvailableCard[]): void {
+export function saveCachedAvailableCards(
+  ownerId: string,
+  cards: CachedAvailableCard[],
+  options?: { allowEmpty?: boolean }
+): void {
   if (!ownerId) return;
   const locked = getLocallyLockedCards();
   const seen = new Set<string>();
   const clean: CachedAvailableCard[] = [];
   for (const c of cards) {
     if (!c?.cardNumber || locked.has(c.cardNumber) || seen.has(c.cardNumber)) continue;
+    const normPkg = canonicalPackageId(c.packageId);
+    if (!normPkg) continue;
     seen.add(c.cardNumber);
-    clean.push(c);
-    if (clean.length >= 5000) break;
+    clean.push({
+      id: c.id,
+      packageId: normPkg,
+      cardNumber: c.cardNumber,
+      ownerId: c.ownerId || ownerId,
+    });
+    if (clean.length >= 6000) break;
   }
+
+  // NO EMPTY OVERWRITE GUARD: Never wipe an existing local card pool with an empty array
+  // unless the caller explicitly verified an empty server response (`allowEmpty: true`).
+  if (clean.length === 0 && !options?.allowEmpty) {
+    const existing = getCachedAvailableCards(ownerId);
+    if (existing.length > 0) {
+      return;
+    }
+  }
+
   memoryCardPoolByOwner.set(ownerId, clean);
   try {
     localStorage.setItem(`${CACHED_CARDS_PREFIX}${ownerId}`, JSON.stringify(clean));
   } catch {
-    // If quota exceeded, persist top 2,000 while keeping full 5,000 in RAM
+    // If quota exceeded, persist top 2,500 while keeping full 6,000 in RAM
     try {
-      localStorage.setItem(`${CACHED_CARDS_PREFIX}${ownerId}`, JSON.stringify(clean.slice(0, 2000)));
+      localStorage.setItem(`${CACHED_CARDS_PREFIX}${ownerId}`, JSON.stringify(clean.slice(0, 2500)));
     } catch {
       // Ignore storage quota errors
     }
@@ -157,13 +199,18 @@ export function getCachedAvailableCards(ownerId: string, packageId?: string): Ca
       if (raw) {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed)) {
-          pool = parsed.filter(
-            (c): c is CachedAvailableCard =>
-              !!c &&
-              typeof c.id === 'string' &&
-              typeof c.packageId === 'string' &&
-              typeof c.cardNumber === 'string'
-          );
+          pool = parsed
+            .filter(
+              (c): c is CachedAvailableCard =>
+                !!c &&
+                typeof c.id === 'string' &&
+                typeof c.packageId === 'string' &&
+                typeof c.cardNumber === 'string'
+            )
+            .map((c) => ({
+              ...c,
+              packageId: canonicalPackageId(c.packageId),
+            }));
           memoryCardPoolByOwner.set(ownerId, pool);
         }
       }
@@ -173,9 +220,35 @@ export function getCachedAvailableCards(ownerId: string, packageId?: string): Ca
   }
 
   if (!pool || pool.length === 0) return [];
+  const targetPkg = packageId ? canonicalPackageId(packageId) : '';
   return pool.filter(
-    (c) => !locked.has(c.cardNumber) && (!packageId || c.packageId === packageId)
+    (c) =>
+      !locked.has(c.cardNumber) &&
+      (!targetPkg || canonicalPackageId(c.packageId) === targetPkg)
   );
+}
+
+/**
+ * Retrieve all cached unsold cards matching ANY of the user's owner identifiers
+ * (e.g. `uid`, `linkedSourceId`, normalized phone, email), deduplicated by `cardNumber`.
+ */
+export function getCachedAvailableCardsForOwners(
+  ownerIds: string[],
+  packageId?: string
+): CachedAvailableCard[] {
+  const uniqueOwners = Array.from(new Set(ownerIds.map((o) => (o || '').trim()).filter(Boolean)));
+  if (uniqueOwners.length === 0) return [];
+  const seen = new Set<string>();
+  const combined: CachedAvailableCard[] = [];
+  for (const oid of uniqueOwners) {
+    const list = getCachedAvailableCards(oid, packageId);
+    for (const c of list) {
+      if (seen.has(c.cardNumber)) continue;
+      seen.add(c.cardNumber);
+      combined.push(c);
+    }
+  }
+  return combined;
 }
 
 export function removeCardsFromCache(ownerId: string, cardNumbers: string[]): void {
@@ -184,9 +257,17 @@ export function removeCardsFromCache(ownerId: string, cardNumbers: string[]): vo
   const remaining = getCachedAvailableCards(ownerId).filter((c) => !numSet.has(c.cardNumber));
   memoryCardPoolByOwner.set(ownerId, remaining);
   try {
-    localStorage.setItem(`${CACHED_CARDS_PREFIX}${ownerId}`, JSON.stringify(remaining.slice(0, 5000)));
+    localStorage.setItem(`${CACHED_CARDS_PREFIX}${ownerId}`, JSON.stringify(remaining.slice(0, 6000)));
   } catch {
     // Ignore storage errors
+  }
+}
+
+export function removeCardsFromCacheForOwners(ownerIds: string[], cardNumbers: string[]): void {
+  if (cardNumbers.length === 0) return;
+  const uniqueOwners = Array.from(new Set(ownerIds.map((o) => (o || '').trim()).filter(Boolean)));
+  for (const oid of uniqueOwners) {
+    removeCardsFromCache(oid, cardNumbers);
   }
 }
 
@@ -203,6 +284,22 @@ export function consumeCachedAvailableCards(
     return null;
   }
   removeCardsFromCache(ownerId, pickedNums);
+  return picked;
+}
+
+export function consumeCachedAvailableCardsForOwners(
+  ownerIds: string[],
+  packageId: string,
+  quantity: number
+): CachedAvailableCard[] | null {
+  const pool = getCachedAvailableCardsForOwners(ownerIds, packageId);
+  if (pool.length < quantity) return null;
+  const picked = pool.slice(0, quantity);
+  const pickedNums = picked.map((c) => c.cardNumber);
+  if (!lockCardsLocally(pickedNums)) {
+    return null;
+  }
+  removeCardsFromCacheForOwners(ownerIds, pickedNums);
   return picked;
 }
 

@@ -29,10 +29,10 @@ export const SUPER_ADMIN_CONFIG = {
 } as const;
 
 export const TAIBAH_ASSETS = {
-  logo: '/assets/aistudio/4_0fab49bc.jpg',
-  slideMikrotik: '/src/assets/images/slider_mikrotik_hero_1795259828209.jpg',
-  slideCards: '/src/assets/images/slider_cards_network_1795259829014.jpg',
-  slideNetwork: '/src/assets/images/slider_agents_hub_1795259829125.jpg',
+  logo: '/assets/webp/taibah_logo.webp',
+  slideMikrotik: '/assets/webp/slide_mikrotik.webp',
+  slideCards: '/assets/webp/slide_cards.webp',
+  slideNetwork: '/assets/webp/slide_agents.webp',
 } as const;
 
 export interface UserProfile {

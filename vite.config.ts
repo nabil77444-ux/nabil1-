@@ -8,7 +8,8 @@ import { defineConfig } from 'vite';
 
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
 
-export default defineConfig(() => {
+export default defineConfig(({ mode }) => {
+  const isProd = mode === 'production';
   return {
     plugins: [
       react(),
@@ -16,7 +17,14 @@ export default defineConfig(() => {
       VitePWA({
         registerType: 'autoUpdate',
         manifestFilename: 'manifest.json',
-        includeAssets: ['icon.svg', 'apple-touch-icon.png', 'pwa-192x192.png', 'pwa-512x512.png', 'pwa-maskable-512x512.png'],
+        includeAssets: [
+          'icon.svg',
+          'apple-touch-icon.png',
+          'pwa-192x192.png',
+          'pwa-512x512.png',
+          'pwa-maskable-512x512.png',
+          'assets/webp/*.webp',
+        ],
         manifest: {
           id: '/',
           name: 'كروت طيبة نت — شبكة طيبة نت اللاسلكية',
@@ -52,8 +60,9 @@ export default defineConfig(() => {
           ],
         },
         workbox: {
-          maximumFileSizeToCacheInBytes: 25 * 1024 * 1024,
-          globPatterns: ['**/*.{js,css,html,ico,png,svg,jpg,woff,woff2}'],
+          maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
+          globPatterns: ['**/*.{js,css,html,ico,png,svg,webp,woff2}'],
+          globIgnores: ['**/pdf.worker*', '**/tesseract*'],
           runtimeCaching: [
             {
               urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
@@ -92,9 +101,7 @@ export default defineConfig(() => {
           type: 'module',
         },
       }),
-      // Copies src/assets into dist/ so root-relative URLs like
-      // "/src/assets/images/..." (e.g. generate_image output) still resolve
-      // in production builds. Do not remove.
+      // Copies src/assets into dist/ if present.
       {
         name: 'copy-unbundled-src-assets',
         apply: 'build',
@@ -111,6 +118,46 @@ export default defineConfig(() => {
         },
       },
     ],
+    esbuild: isProd
+      ? {
+          drop: ['console', 'debugger'],
+          legalComments: 'none',
+        }
+      : undefined,
+    build: {
+      target: ['es2019', 'chrome61'],
+      sourcemap: false,
+      minify: 'esbuild',
+      cssCodeSplit: true,
+      chunkSizeWarningLimit: 900,
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (id.includes('node_modules/react/') || id.includes('node_modules/react-dom/')) {
+              return 'vendor-react';
+            }
+            if (id.includes('node_modules/firebase/')) {
+              return 'vendor-firebase';
+            }
+            if (id.includes('node_modules/lucide-react/')) {
+              return 'vendor-icons';
+            }
+            if (id.includes('node_modules/jspdf/') || id.includes('node_modules/html2canvas/')) {
+              return 'vendor-export';
+            }
+            if (id.includes('node_modules/xlsx/')) {
+              return 'vendor-xlsx';
+            }
+            if (id.includes('node_modules/pdfjs-dist/')) {
+              return 'vendor-pdf';
+            }
+            if (id.includes('node_modules/tesseract.js/')) {
+              return 'vendor-ocr';
+            }
+          },
+        },
+      },
+    },
     resolve: {
       alias: {
         '@': path.resolve(rootDir, '.'),

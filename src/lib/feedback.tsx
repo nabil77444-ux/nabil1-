@@ -142,7 +142,7 @@ export const FeedbackProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           return (
             <div
               key={toast.id}
-              className={`pointer-events-auto flex items-start gap-3 rounded-2xl border-2 px-4 py-3 shadow-2xl backdrop-blur-md transition-all duration-200 ${styles}`}
+              className={`pointer-events-auto flex items-start gap-3 rounded-2xl border-2 px-4 py-3 shadow-xl transition-all duration-150 ${styles}`}
             >
               <Icon className="w-5 h-5 shrink-0 mt-0.5 text-[#FDE68A]" />
               <div className="flex-1 min-w-0">

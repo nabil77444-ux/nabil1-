@@ -132,6 +132,12 @@ const TaibahAppShell: React.FC = () => {
     };
   }, []);
 
+  const isFullyVerifiedSession =
+    sessionUnlocked &&
+    Boolean(profile?.uid) &&
+    !needsAdminEmailVerification &&
+    profile?.status === 'active';
+
   useEffect(() => {
     // 1. Immediately confirm active OTA bundle loaded cleanly (native only)
     try {
@@ -157,22 +163,28 @@ const TaibahAppShell: React.FC = () => {
     if (initial !== 'home') {
       setActiveRoute(initial);
     }
-    const timer = window.setTimeout(() => setSplashCapReached(true), 650);
-    const preloadTimer = window.setTimeout(() => preloadCoreSubScreens(), 500);
+    // Ultra-fast 150ms splash cap so AuthScreen / HomeScreen renders immediately
+    const timer = window.setTimeout(() => setSplashCapReached(true), 150);
     return () => {
       window.clearTimeout(timer);
-      window.clearTimeout(preloadTimer);
     };
   }, [setActiveRoute]);
 
-  // 3. Silent OTA Update Check on launch + on resume from background (native guarded)
+  // Preload core sub-screens ONLY after user enters the authenticated workspace (never on AuthScreen!)
   useEffect(() => {
-    if (!isNativePlatformSafe()) return;
+    if (!isFullyVerifiedSession) return;
+    const preloadTimer = window.setTimeout(() => preloadCoreSubScreens(), 600);
+    return () => window.clearTimeout(preloadTimer);
+  }, [isFullyVerifiedSession]);
+
+  // 3. Silent OTA Update Check ONLY after login (never blocks or runs during AuthScreen typing!)
+  useEffect(() => {
+    if (!isNativePlatformSafe() || !isFullyVerifiedSession) return;
 
     let cancelled = false;
     const initialCheckTimer = window.setTimeout(() => {
       if (!cancelled) void runUpdateCheck(true);
-    }, 1800);
+    }, 2200);
 
     let appStateHandle: { remove: () => Promise<void> } | null = null;
     void import('@capacitor/app')
@@ -201,7 +213,7 @@ const TaibahAppShell: React.FC = () => {
         void appStateHandle.remove().catch(() => {});
       }
     };
-  }, [runUpdateCheck]);
+  }, [isFullyVerifiedSession, runUpdateCheck]);
 
   const [isDark, setIsDark] = useState<boolean>(() => {
     try {
@@ -286,7 +298,7 @@ const TaibahAppShell: React.FC = () => {
     />
   );
 
-  // 1. Brief Splash only while Auth boots (<650ms) and no local session is already active
+  // 1. Brief Splash only while Auth boots (<150ms) and no local session is already active
   if (!authReady && !splashCapReached && !(sessionUnlocked && profile?.uid)) {
     return (
       <>
@@ -297,15 +309,6 @@ const TaibahAppShell: React.FC = () => {
   }
 
   // 2. Local-First Authentication Gate:
-  //    - Mandatory on fresh cold start (when sessionStorage is empty)
-  //    - Managed exclusively by local `sessionStorage` + `profile` (never kicks out on
-  //      Firebase Auth fluctuations, blur, keyboard, PDF picker, or visibilitychange)
-  const isFullyVerifiedSession =
-    sessionUnlocked &&
-    Boolean(profile?.uid) &&
-    !needsAdminEmailVerification &&
-    profile?.status === 'active';
-
   if (!isFullyVerifiedSession) {
     return (
       <>

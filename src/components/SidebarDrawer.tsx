@@ -6,7 +6,6 @@ import {
   DatabaseBackup,
   FileClock,
   FileText,
-  Fingerprint,
   Home,
   Layers,
   LogOut,
@@ -19,7 +18,6 @@ import {
   Zap,
 } from 'lucide-react';
 import { useFirebase } from '../contexts/FirebaseContext';
-import { getBiometricMethodStatus } from '../lib/biometric';
 import {
   formatYER,
   getRoleArabicLabel,
@@ -46,8 +44,6 @@ export const SidebarDrawer: React.FC<SidebarDrawerProps> = ({
   const { profile, unreadNotificationsCount, signOutUser } = useFirebase();
 
   if (!open || !profile) return null;
-
-  const bioStatus = getBiometricMethodStatus();
 
   const isAdmin = profile.role === 'super_admin';
   const isAgent = profile.role === 'agent';
@@ -125,7 +121,7 @@ export const SidebarDrawer: React.FC<SidebarDrawerProps> = ({
     },
     {
       route: 'reports',
-      label: isAdmin ? 'منظومة التقارير (10 تقارير)' : 'مركز التقارير الشامل',
+      label: 'التقارير الشاملة (4 تقارير)',
       icon: BarChart3,
       iconBg: 'bg-gradient-to-br from-orange-500 to-amber-700 text-white',
       visible: true,
@@ -253,30 +249,8 @@ export const SidebarDrawer: React.FC<SidebarDrawerProps> = ({
               );
             })}
 
-          {/* Biometric Settings Shortcut + Sign Out Framed Cards */}
+          {/* Sign Out Framed Card */}
           <div className="pt-2.5 mt-2.5 border-t-2 border-[#D4AF37]/40 space-y-2">
-            <button
-              type="button"
-              onClick={() => {
-                onNavigate('settings');
-                onClose();
-              }}
-              className={`w-full min-h-[46px] rounded-2xl border-2 px-3 text-xs font-extrabold flex items-center justify-center gap-2 shadow-sm ${
-                bioStatus.hasAnyEnabled
-                  ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-950/50 text-emerald-900 dark:text-emerald-200'
-                  : 'border-[#D4AF37] bg-amber-50 dark:bg-amber-950/40 text-[#1A365D] dark:text-[#FDE68A]'
-              }`}
-            >
-              <span className="w-7 h-7 rounded-lg bg-gradient-to-br from-[#D4AF37] to-amber-600 text-[#0F172A] flex items-center justify-center shrink-0 shadow-xs">
-                <Fingerprint className="w-4 h-4" />
-              </span>
-              <span>
-                {bioStatus.hasAnyEnabled
-                  ? 'إعدادات البصمة والوجه: مُفعّل ✅'
-                  : 'تفعيل البصمة والوجه من الإعدادات'}
-              </span>
-            </button>
-
             <button
               type="button"
               onClick={() => {

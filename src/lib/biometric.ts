@@ -115,6 +115,93 @@ function simplePinHash(pin: string): string {
   return (hash >>> 0).toString(16);
 }
 
+function getSafeRandomBytes(length: number): Uint8Array<ArrayBuffer> {
+  const out = new Uint8Array(new ArrayBuffer(length));
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    crypto.getRandomValues(out);
+    return out;
+  }
+  for (let i = 0; i < length; i++) {
+    out[i] = Math.floor(Math.random() * 256);
+  }
+  return out;
+}
+
+const FALLBACK_VAULT_SECRET = 'TaibahNet#BioVault@2026!v4';
+
+function xorStreamTransform(bytes: Uint8Array, salt: Uint8Array): Uint8Array {
+  const out = new Uint8Array(bytes.length);
+  let state = 0x811c9dc5;
+  for (let i = 0; i < salt.length; i++) {
+    state = Math.imul(state ^ salt[i], 0x01000193) >>> 0;
+  }
+  for (let i = 0; i < FALLBACK_VAULT_SECRET.length; i++) {
+    state = Math.imul(state ^ FALLBACK_VAULT_SECRET.charCodeAt(i), 0x01000193) >>> 0;
+  }
+  for (let i = 0; i < bytes.length; i++) {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    out[i] = bytes[i] ^ ((state >>> 16) & 0xff);
+  }
+  return out;
+}
+
+function fallbackEncryptJson(payload: StoredVaultCredentials): { fallback: true; salt: number[]; data: number[] } {
+  const salt = getSafeRandomBytes(16);
+  const raw = new TextEncoder().encode(JSON.stringify(payload));
+  const cipher = xorStreamTransform(raw, salt);
+  return {
+    fallback: true,
+    salt: Array.from(salt),
+    data: Array.from(cipher),
+  };
+}
+
+function fallbackDecryptJson(rec: { fallback?: boolean; salt?: number[]; data?: number[] }): StoredVaultCredentials | null {
+  if (!rec?.fallback || !Array.isArray(rec.salt) || !Array.isArray(rec.data)) return null;
+  try {
+    const plainBytes = xorStreamTransform(new Uint8Array(rec.data), new Uint8Array(rec.salt));
+    const parsed = JSON.parse(new TextDecoder().decode(plainBytes)) as StoredVaultCredentials;
+    return parsed?.email && parsed?.password ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+const MANUAL_SIGNOUT_SESSION_KEY = 'taibah_manual_signout_once';
+
+export function markManualSignOutForBiometric(): void {
+  try {
+    sessionStorage.setItem(MANUAL_SIGNOUT_SESSION_KEY, '1');
+  } catch {
+    // ignore
+  }
+}
+
+export function clearManualSignOutForBiometric(): void {
+  try {
+    sessionStorage.removeItem(MANUAL_SIGNOUT_SESSION_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * Returns true when AuthScreen should immediately auto-launch the native Android
+ * Biometric / Face / Device PIN prompt on cold start (< 0.1s unlock).
+ */
+export function shouldAutoTriggerBiometricOnLaunch(): boolean {
+  if (!isNativeAndroid()) return false;
+  try {
+    if (sessionStorage.getItem(MANUAL_SIGNOUT_SESSION_KEY) === '1') {
+      return false;
+    }
+  } catch {
+    // ignore
+  }
+  const status = getBiometricMethodStatus();
+  return Boolean(status.hasAnyEnabled && status.enrollment);
+}
+
 export function isRunningInsideIframe(): boolean {
   try {
     return typeof window !== 'undefined' && window.self !== window.top;
@@ -219,7 +306,7 @@ export async function saveBiometricVaultCredentials(
   try {
     if (typeof crypto !== 'undefined' && crypto.subtle) {
       const key = await getOrCreateWebCryptoKey();
-      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const iv = getSafeRandomBytes(12);
       const payloadBytes = new TextEncoder().encode(
         JSON.stringify({ email: cleanEmail, password })
       );
@@ -235,9 +322,15 @@ export async function saveBiometricVaultCredentials(
       return true;
     }
   } catch {
-    // Vault encryption unavailable in restricted environment
+    // Fall through to Pure-JS fallback on legacy Android WebView / non-HTTPS contexts
   }
-  return false;
+
+  try {
+    await idbSet(IDB_RECORD_ID, fallbackEncryptJson({ email: cleanEmail, password }));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -278,10 +371,19 @@ export async function readBiometricVaultCredentials(): Promise<StoredVaultCreden
   }
 
   try {
-    if (typeof crypto !== 'undefined' && crypto.subtle) {
+    const rec = await idbGet<{
+      iv?: number[];
+      data?: number[];
+      fallback?: boolean;
+      salt?: number[];
+    }>(IDB_RECORD_ID);
+    if (!rec) return null;
+    if (rec.fallback) {
+      return fallbackDecryptJson(rec);
+    }
+    if (typeof crypto !== 'undefined' && crypto.subtle && rec.iv && rec.data) {
       const key = await idbGet<CryptoKey>(IDB_KEY_ID);
-      const rec = await idbGet<{ iv: number[]; data: number[] }>(IDB_RECORD_ID);
-      if (!key || !rec?.iv || !rec?.data) return null;
+      if (!key) return null;
       const plainBuffer = await crypto.subtle.decrypt(
         { name: 'AES-GCM', iv: new Uint8Array(rec.iv) },
         key,
@@ -718,7 +820,7 @@ export async function enrollDeviceBiometric(
 
     if (canTryWebAuthn) {
       try {
-        const challenge = crypto.getRandomValues(new Uint8Array(32));
+        const challenge = getSafeRandomBytes(32);
         const userIdBytes = new TextEncoder().encode(uid.slice(0, 64));
 
         const credential = (await navigator.credentials.create({
@@ -969,7 +1071,7 @@ export async function verifyDeviceBiometric(
     }
 
     // Tier 2: WebAuthn platform verification
-    const challenge = crypto.getRandomValues(new Uint8Array(32));
+    const challenge = getSafeRandomBytes(32);
     const allowCredId = base64UrlToBuffer(saved.credentialId);
 
     const assertion = await navigator.credentials.get({

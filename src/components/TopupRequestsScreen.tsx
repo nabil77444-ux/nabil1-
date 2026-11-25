@@ -272,7 +272,7 @@ export const TopupRequestsScreen: React.FC<TopupRequestsScreenProps> = ({ hideNu
 
       {/* GROUP DETAIL & EXECUTION MODAL */}
       {selectedGroup && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 backdrop-blur-sm p-3 overflow-y-auto">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-3 overflow-y-auto">
           <div className="w-full max-w-lg rounded-3xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] shadow-2xl overflow-hidden my-auto max-h-[90dvh] flex flex-col">
             <div className="royal-header-3d px-4 py-3.5 flex items-center justify-between">
               <div>
@@ -400,7 +400,7 @@ export const TopupRequestsScreen: React.FC<TopupRequestsScreenProps> = ({ hideNu
 
       {/* NEW TOPUP REQUEST COMPOSER MODAL (Agents & Clients) */}
       {showNewModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 backdrop-blur-sm p-3 overflow-y-auto">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-3 overflow-y-auto">
           <div className="w-full max-w-lg rounded-3xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] shadow-2xl overflow-hidden my-auto max-h-[92dvh] flex flex-col">
             <div className="royal-header-3d px-4 py-3.5 flex items-center justify-between">
               <div>
@@ -493,7 +493,7 @@ export const TopupRequestsScreen: React.FC<TopupRequestsScreenProps> = ({ hideNu
 
       {/* REJECT REASON MODAL */}
       {rejectTarget && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 backdrop-blur-sm p-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
           <div className="w-full max-w-sm rounded-3xl bg-white dark:bg-slate-900 border-2 border-red-500 p-5 shadow-2xl space-y-3">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-extrabold text-red-600">سبب رفض طلب التغذية</h3>

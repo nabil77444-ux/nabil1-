@@ -76,20 +76,22 @@ import {
 import { useFeedback } from '../lib/feedback';
 import {
   clearMemorySessionCredentials,
+  markManualSignOutForBiometric,
 } from '../lib/biometric';
 import {
   appendCachedAvailableCards,
+  canonicalPackageId,
   clearAllLocalOfflineCardCaches,
   clearOfflineSalesQueueOnly,
-  consumeCachedAvailableCards,
+  consumeCachedAvailableCardsForOwners,
   enqueueOfflineSale,
-  getCachedAvailableCards,
+  getCachedAvailableCardsForOwners,
   getPendingOfflineSales,
   isCardLocallyLocked,
   lockCardsLocally,
   offlineSaleToSaleDoc,
   releaseCardLocksLocally,
-  removeCardsFromCache,
+  removeCardsFromCacheForOwners,
   removeSyncedOfflineSale,
   saveCachedAvailableCards,
   type CachedAvailableCard,
@@ -175,6 +177,8 @@ interface FirebaseContextValue {
   hasMoreAuditLogs: boolean;
   loadMoreAuditLogs: () => void;
   refreshVerificationStatus: () => Promise<boolean>;
+  isRefreshingInventory: boolean;
+  refreshMyInventory: (forceServer?: boolean) => Promise<number>;
   syncNow: () => Promise<void>;
   signOutUser: () => Promise<void>;
   activateLocalSession: (
@@ -267,6 +271,7 @@ interface FirebaseContextValue {
     updates: Partial<Pick<UserProfile, 'name' | 'phone' | 'role' | 'status' | 'discountRate' | 'balance' | 'parentAgentId'>>
   ) => Promise<void>;
   toggleUserRoleUpgrade: (user: UserProfile) => Promise<void>;
+  toggleUserSuspension: (user: UserProfile) => Promise<boolean>;
   transferClientsToAgent: (clientUids: string[], targetAgentId: string) => Promise<void>;
   deleteManagedUser: (user: UserProfile) => Promise<void>;
   resolvePasswordReset: (req: PasswordResetRequest, status: 'approved' | 'rejected') => Promise<void>;
@@ -609,6 +614,24 @@ function buildAutoRecoveredProfile(
   };
 }
 
+function buildOwnerIdentifiers(
+  p: UserProfile | null | undefined,
+  fallbackUid?: string
+): string[] {
+  const out: string[] = [];
+  const push = (val?: string | null) => {
+    const clean = (val || '').trim();
+    if (clean && !out.includes(clean)) out.push(clean);
+  };
+  push(p?.uid);
+  push(fallbackUid);
+  push(p?.linkedSourceId);
+  const phoneDigits = normalizePhoneDigits(p?.phone);
+  if (phoneDigits.length >= 7) push(phoneDigits);
+  if (p?.email) push(p.email.trim().toLowerCase());
+  return out;
+}
+
 export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const isOnline = useOnlineStatus();
   const { notifySuccess, notifyError, notifyWarning, notifyInfo } = useFeedback();
@@ -625,7 +648,9 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [profileLoading, setProfileLoading] = useState(false);
   const [firestoreConnected, setFirestoreConnected] = useState(true);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [isRefreshingInventory, setIsRefreshingInventory] = useState(false);
   const [syncNonce, setSyncNonce] = useState(0);
+  const autoInventorySyncedRef = useRef<string | null>(null);
   const [adminDocApproved, setAdminDocApproved] = useState(false);
   const [adminApprovalChecking, setAdminApprovalChecking] = useState(false);
   const explicitSignOutRef = useRef<boolean>(false);
@@ -2411,16 +2436,21 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
 
     // Strict Isolation for Agent & Client: NEVER expose Admin's availableCount/uploadedCount/soldCount/injectedCount
-    const cachedOfflinePool = activeUid ? getCachedAvailableCards(activeUid) : [];
+    const ownerIds = buildOwnerIdentifiers(profile, activeUid);
+    const cachedOfflinePool = ownerIds.length > 0 ? getCachedAvailableCardsForOwners(ownerIds) : [];
     const cachedByPkg: Record<string, number> = {};
     for (const c of cachedOfflinePool) {
-      cachedByPkg[c.packageId] = (cachedByPkg[c.packageId] || 0) + 1;
+      const normPkg = canonicalPackageId(c.packageId);
+      if (!normPkg) continue;
+      cachedByPkg[normPkg] = (cachedByPkg[normPkg] || 0) + 1;
     }
 
     return baseList.map((pkg) => {
       const livePersonal = personalCardCounts[pkg.id];
+      const cachedCount = cachedByPkg[pkg.id] || 0;
+      // Never let a stale `0` in `stats/user_{uid}` hide real unsold cards in the local pool!
       const baseAvail =
-        livePersonal !== undefined ? livePersonal : cachedByPkg[pkg.id] || 0;
+        cachedCount > 0 ? Math.max(cachedCount, livePersonal ?? 0) : livePersonal ?? 0;
       const offlineUsed = offlineSoldByPkg[pkg.id] || 0;
       return {
         ...pkg,
@@ -2430,7 +2460,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         injectedCount: 0,
       };
     });
-  }, [rawPackages, profile?.role, profile?.uid, firebaseUser?.uid, personalCardCounts, personalSoldCounts, pendingOfflineSales, offlinePoolVersion]);
+  }, [rawPackages, profile, firebaseUser?.uid, personalCardCounts, personalSoldCounts, pendingOfflineSales, offlinePoolVersion]);
 
   // Merge pending offline sales at the top of live Firestore sales so they show up immediately in all lists/reports
   const mergedSales = useMemo<SaleDoc[]>(() => {
@@ -2645,6 +2675,197 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     [firebaseUser]
   );
 
+  const refreshMyInventory = useCallback(
+    async (forceServer = false): Promise<number> => {
+      const activeUid = profile?.uid || auth.currentUser?.uid || firebaseUser?.uid || '';
+      if (!activeUid || !profile) return 0;
+
+      const ownerIds = buildOwnerIdentifiers(profile, activeUid);
+      const isAdmin = profile.role === 'super_admin';
+      const existingLocal = getCachedAvailableCardsForOwners(ownerIds);
+
+      if (isRefreshingInventory) return existingLocal.length;
+      setIsRefreshingInventory(true);
+
+      try {
+        // Super Admin refreshes lightweight package counters (`packages` = 8 docs only)
+        if (isAdmin) {
+          if (typeof navigator !== 'undefined' && !navigator.onLine) {
+            if (forceServer) {
+              notifyInfo('وضع عدم الاتصال', 'يتم عرض المخزون المحفوظ محلياً حالياً.');
+            }
+            return totalAvailableCards;
+          }
+          const pkgQ = query(collection(db, 'packages'), where('price', '>', 0));
+          const snap = await getDocs(pkgQ);
+          if (!snap.empty) {
+            const list = snap.docs
+              .map((d) => ({ id: d.id, ...(d.data() as Omit<PackageDoc, 'id'>) }))
+              .sort((a, b) => a.sortOrder - b.sortOrder);
+            setRawPackages(list);
+            writeCachedJson(
+              CACHE_PACKAGES_KEY,
+              list.map(({ updatedAt: _u, ...rest }) => rest)
+            );
+            const total = list.reduce((sum, p) => sum + (Number(p.availableCount) || 0), 0);
+            if (forceServer) {
+              notifySuccess(`تم تحديث المخزون المركزي بنجاح (${total.toLocaleString('en-US')} كرت متاح) ✅`);
+            }
+            return total;
+          }
+          return totalAvailableCards;
+        }
+
+        // Agent / Client: lightweight filtered query for ALL unsold cards (`available` + `assigned_to_agent`)
+        // across `uid` and `linkedSourceId` (never capped at 50!) with strict No Empty Overwrite protection.
+        const queryOwnerIds = Array.from(
+          new Set([activeUid, profile.linkedSourceId || ''].map((s) => s.trim()).filter(Boolean))
+        );
+        const canHitServer =
+          Boolean(auth.currentUser && auth.currentUser.uid === activeUid) &&
+          (typeof navigator === 'undefined' || navigator.onLine);
+
+        const mergedByCard = new Map<string, CachedAvailableCard>();
+        let anyServerQuerySucceeded = false;
+
+        for (const oid of queryOwnerIds) {
+          const cardsQ = query(
+            collection(db, 'cards'),
+            where('ownerId', '==', oid),
+            where('status', 'in', ['available', 'assigned_to_agent']),
+            limit(3000)
+          );
+          try {
+            const snap =
+              forceServer && canHitServer
+                ? await raceWithTimeout(getDocs(cardsQ), 12000)
+                : canHitServer
+                  ? await raceWithTimeout(getDocs(cardsQ), 10000)
+                  : await getDocsFromCache(cardsQ);
+
+            if (canHitServer) anyServerQuerySucceeded = true;
+
+            for (const d of snap.docs) {
+              const data = d.data() as CardDoc & { denomination?: string | number; price?: number };
+              if (!data.cardNumber || isCardLocallyLocked(data.cardNumber)) continue;
+              const normPkg = canonicalPackageId(data.packageId || data.denomination || data.price);
+              if (!normPkg) continue;
+              if (!mergedByCard.has(data.cardNumber)) {
+                mergedByCard.set(data.cardNumber, {
+                  id: d.id,
+                  packageId: normPkg,
+                  cardNumber: data.cardNumber,
+                  ownerId: data.ownerId || oid,
+                });
+              }
+            }
+          } catch (err) {
+            // Do NOT clear or overwrite existing local cache on network/quota/timeout error!
+            if (forceServer && (isFirestoreQuotaError(err) || isFirestoreOfflineError(err))) {
+              notifyInfo(
+                'تم الاحتفاظ بمخزونك المحلي بأمان',
+                `تعذر الوصول للسحابة حالياً — مخزونك المحفوظ (${existingLocal.length} كرت) جاهز للبيع.`
+              );
+            }
+            return existingLocal.length;
+          }
+        }
+
+        const freshList = Array.from(mergedByCard.values());
+
+        // Strict No Empty Overwrite: ONLY allow writing an empty pool if server confirmed 0 AND user forced refresh
+        if (freshList.length > 0 || (anyServerQuerySucceeded && forceServer && existingLocal.length === 0)) {
+          saveCachedAvailableCards(activeUid, freshList, {
+            allowEmpty: anyServerQuerySucceeded && existingLocal.length === 0,
+          });
+          const countsByPkg: Record<string, number> = {};
+          for (const pkg of EXCLUSIVE_PACKAGES) countsByPkg[pkg.id] = 0;
+          for (const c of freshList) {
+            countsByPkg[c.packageId] = (countsByPkg[c.packageId] || 0) + 1;
+          }
+          setPersonalCardCounts(countsByPkg);
+          setOfflinePoolVersion((v) => v + 1);
+          setFirestoreConnected(true);
+
+          // Mirror accurate local counts into cached stats doc for instant cold starts
+          const statsCacheKey = `${CACHE_STATS_PREFIX}user_${activeUid}`;
+          const prevStats = readCachedJson<StatsSummaryDocData | null>(statsCacheKey, null);
+          const pkgStatsMap: Record<string, PackageCounterStats> = { ...(prevStats?.packages || {}) };
+          for (const pkg of EXCLUSIVE_PACKAGES) {
+            pkgStatsMap[pkg.id] = {
+              availableCount: countsByPkg[pkg.id] || 0,
+              soldCount: prevStats?.packages?.[pkg.id]?.soldCount ?? personalSoldCounts[pkg.id] ?? 0,
+              uploadedCount: 0,
+              injectedCount: 0,
+            };
+          }
+          writeCachedJson(statsCacheKey, {
+            ownerId: activeUid,
+            totalAvailable: freshList.length,
+            totalSold: prevStats?.totalSold ?? 0,
+            totalUploaded: 0,
+            totalInjected: 0,
+            packages: pkgStatsMap,
+          });
+
+          if (forceServer) {
+            notifySuccess(
+              freshList.length > 0
+                ? `تم تحديث مخزونك بنجاح — ${freshList.length.toLocaleString('en-US')} كرت جاهز للبيع ✅`
+                : 'تم فحص مخزونك السحابي — لا توجد كروت متبقية حالياً.'
+            );
+          }
+          return freshList.length;
+        }
+
+        if (forceServer) {
+          notifyInfo(
+            'مخزونك المحلي محفوظ',
+            `يوجد ${existingLocal.length.toLocaleString('en-US')} كرت جاهز للبيع في جهازك.`
+          );
+        }
+        return existingLocal.length;
+      } catch {
+        // Never wipe local cache on unexpected failure
+        return existingLocal.length;
+      } finally {
+        setIsRefreshingInventory(false);
+      }
+    },
+    [firebaseUser?.uid, isRefreshingInventory, notifyInfo, notifySuccess, personalSoldCounts, profile, totalAvailableCards]
+  );
+
+  // Silent deferred one-time inventory warm-up for Agents & Clients so their cards NEVER show 0!
+  useEffect(() => {
+    const activeUid = profile?.uid || auth.currentUser?.uid || firebaseUser?.uid || '';
+    if (
+      !authReady ||
+      !activeUid ||
+      !profile ||
+      profile.role === 'super_admin' ||
+      profile.status !== 'active' ||
+      !hasActiveSessionUnlocked()
+    ) {
+      return;
+    }
+    if (!auth.currentUser || auth.currentUser.uid !== activeUid || !isOnline) return;
+    if (autoInventorySyncedRef.current === `${activeUid}_${syncNonce}`) return;
+
+    const ownerIds = buildOwnerIdentifiers(profile, activeUid);
+    const localCount = getCachedAvailableCardsForOwners(ownerIds).length;
+    // Fetch automatically once if local pool is empty OR user clicked manual sync
+    if (localCount > 0 && syncNonce === 0) {
+      autoInventorySyncedRef.current = `${activeUid}_${syncNonce}`;
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      autoInventorySyncedRef.current = `${activeUid}_${syncNonce}`;
+      void refreshMyInventory(false);
+    }, 600);
+    return () => window.clearTimeout(timer);
+  }, [authReady, firebaseUser?.uid, isOnline, profile, refreshMyInventory, syncNonce]);
+
   const syncNow = useCallback(async () => {
     setIsSyncing(true);
     try {
@@ -2656,6 +2877,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           await resolveAndLinkUserProfile(activeUser);
         }
         await flushOfflineSalesQueue();
+        await refreshMyInventory(false);
       }
       setSyncNonce((n) => n + 1);
       if (ok) {
@@ -2666,13 +2888,14 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     } finally {
       setTimeout(() => setIsSyncing(false), 500);
     }
-  }, [firebaseUser, flushOfflineSalesQueue, notifyError, notifySuccess, profile, resolveAndLinkUserProfile]);
+  }, [firebaseUser, flushOfflineSalesQueue, notifyError, notifySuccess, profile, refreshMyInventory, resolveAndLinkUserProfile]);
 
   // 100% Instant Local Sign-Out:
   // Clears ONLY active session in sessionStorage & RAM; keeps `localAuthVault` and saved username intact!
   const signOutUser = useCallback(async () => {
     try {
       explicitSignOutRef.current = true;
+      markManualSignOutForBiometric();
       clearActiveSession(true);
       clearMemorySessionCredentials();
       setProfile(null);
@@ -2775,7 +2998,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       // Fast O(n) in-memory validation & deduplication via Set (zero per-card Firestore reads!)
       const validRegex = /^[0-9]{10,11}$/;
       const existingPoolSet = new Set<string>(
-        getCachedAvailableCards(activeUser.uid).map((c) => c.cardNumber)
+        getCachedAvailableCardsForOwners([activeUser.uid]).map((c) => c.cardNumber)
       );
       const uniqueSet = new Set<string>();
       let invalidCount = 0;
@@ -2917,7 +3140,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         };
       } catch (err) {
         // Rollback pre-cached cards if cloud commit failed
-        removeCardsFromCache(activeUser.uid, toInsert);
+        removeCardsFromCacheForOwners([activeUser.uid], toInsert);
         handleFirestoreError(err, OperationType.WRITE, 'cards/batch_import');
         notifyError('حدث خطأ أثناء الاستيراد', 'يرجى التحقق من الاتصال والمحاولة مجدداً.');
       }
@@ -2965,6 +3188,16 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         (profile?.uid ? ({ uid: profile.uid, email: profile.email } as FirebaseUser) : null);
       if (!activeUser || !profile) return null;
 
+      if (profile.status === 'suspended') {
+        notifyError(
+          'الحساب موقوف مؤقتاً',
+          'تم إيقاف حسابك مؤقتاً من قبل الإدارة — يرجى التواصل مع الإدارة لإعادة التفعيل.'
+        );
+        return null;
+      }
+
+      const ownerIds = buildOwnerIdentifiers(profile, activeUser.uid);
+
       const requestedItems = input.items.filter((i) => i.quantity > 0);
       if (requestedItems.length === 0) {
         notifyWarning('اختر باقة واحدة على الأقل');
@@ -3009,23 +3242,23 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       };
 
       try {
-        // STEP 1: INSTANT CARD PULL (0ms synchronous RAM/storage cache first -> parallel Firestore fallback ONLY if needed)
+        // STEP 1: INSTANT CARD PULL (0ms synchronous RAM/storage cache across ALL owner identifiers first -> Firestore fallback ONLY if needed)
         if (isElectronic) {
           const allCachedLocally = requestedItems.every((item) => {
             const deliverTarget = Math.min(item.quantity, item.deliverNow ?? item.quantity);
             if (deliverTarget <= 0) return true;
-            return getCachedAvailableCards(activeUser.uid, item.packageId).length >= deliverTarget;
+            return getCachedAvailableCardsForOwners(ownerIds, item.packageId).length >= deliverTarget;
           });
 
           if (allCachedLocally) {
-            // 0ms Synchronous Optimistic Pool Consumption (strict local lock prevents duplicate card numbers)
+            // 0ms Synchronous Optimistic Pool Consumption (strict local lock prevents duplicate card numbers; ZERO 50-card cap!)
             for (const item of requestedItems) {
               const deliverTarget = Math.min(item.quantity, item.deliverNow ?? item.quantity);
               if (deliverTarget <= 0) {
                 pickedCardsByPkg[item.packageId] = [];
                 continue;
               }
-              const picked = consumeCachedAvailableCards(activeUser.uid, item.packageId, deliverTarget);
+              const picked = consumeCachedAvailableCardsForOwners(ownerIds, item.packageId, deliverTarget);
               if (!picked || picked.length < deliverTarget) {
                 rollbackLocalSelection();
                 notifyWarning('أحد الكروت قيد التنفيذ حالياً، يرجى إعادة المحاولة فوراً.');
@@ -3042,7 +3275,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             if (!navigator.onLine) {
               const shortageItem = requestedItems.find((item) => {
                 const deliverTarget = Math.min(item.quantity, item.deliverNow ?? item.quantity);
-                return getCachedAvailableCards(activeUser.uid, item.packageId).length < deliverTarget;
+                return getCachedAvailableCardsForOwners(ownerIds, item.packageId).length < deliverTarget;
               });
               const pkgMeta = packages.find((p) => p.id === shortageItem?.packageId);
               const deliverTarget = shortageItem
@@ -3050,19 +3283,24 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                 : 0;
               notifyError(
                 'المخزون المحلي غير كافٍ دون إنترنت',
-                `المتوفر محلياً لباقة ${pkgMeta?.price || shortageItem?.packageId || ''} ر.ي أقل من المطلوب (${deliverTarget}). يرجى الاتصال بالإنترنت للمزامنة.`
+                `المتوفر محلياً لباقة ${pkgMeta?.price || shortageItem?.packageId || ''} ر.ي أقل من المطلوب (${deliverTarget}). يرجى الاتصال بالإنترنت أو الضغط على «تحديث مخزوني».`
               );
               return null;
             }
 
             // Cache-First (`localStorage` -> `getDocsFromCache`) then EXACT-LIMIT Firestore fetch (`limit(1)` direct / `limit(qty)` wholesale)
+            // Matches BOTH `available` and `assigned_to_agent` statuses across `uid` + `linkedSourceId`!
+            const queryOwnerIds = Array.from(
+              new Set([activeUser.uid, profile.linkedSourceId || ''].map((s) => s.trim()).filter(Boolean))
+            );
             const fetchedAll = await Promise.all(
               requestedItems.map(async (item) => {
                 const deliverTarget = Math.min(item.quantity, item.deliverNow ?? item.quantity);
                 if (deliverTarget <= 0) {
                   return { item, deliverTarget, list: [] as Array<{ id: string; cardNumber: string }>, fromCache: true };
                 }
-                const localPool = getCachedAvailableCards(activeUser.uid, item.packageId);
+                const normPkgId = canonicalPackageId(item.packageId);
+                const localPool = getCachedAvailableCardsForOwners(ownerIds, normPkgId);
                 if (localPool.length >= deliverTarget) {
                   return {
                     item,
@@ -3072,44 +3310,64 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                   };
                 }
 
-                const ownerExactQ = query(
-                  collection(db, 'cards'),
-                  where('ownerId', '==', activeUser.uid),
-                  where('packageId', '==', item.packageId),
-                  where('status', '==', 'available'),
-                  limit(deliverTarget)
-                );
-
-                // Try IndexedDB cache FIRST (0 Firestore server reads!)
-                try {
-                  const idbSnap = await getDocsFromCache(ownerExactQ);
-                  const idbList = idbSnap.docs
-                    .map((d) => ({ id: d.id, cardNumber: (d.data() as CardDoc).cardNumber }))
-                    .filter((c) => !isCardLocallyLocked(c.cardNumber));
-                  if (idbList.length >= deliverTarget) {
-                    return { item, deliverTarget, list: idbList.slice(0, deliverTarget), fromCache: true };
-                  }
-                } catch {
-                  // Cache miss -> proceed to exact-limit server fetch
+                const collectedMap = new Map<string, { id: string; cardNumber: string }>();
+                for (const c of localPool) {
+                  collectedMap.set(c.cardNumber, { id: c.id, cardNumber: c.cardNumber });
                 }
 
-                // Exact-limit server query: `limit(1)` for Direct Sale, `limit(deliverTarget)` for Wholesale
-                let snap = await getDocs(ownerExactQ);
-                if (profile.role === 'super_admin' && snap.docs.length < deliverTarget) {
-                  snap = await getDocs(
+                const addDocs = (docs: Array<{ id: string; data: () => unknown }>) => {
+                  for (const d of docs) {
+                    const cData = d.data() as CardDoc;
+                    if (!cData.cardNumber || isCardLocallyLocked(cData.cardNumber)) continue;
+                    if (!collectedMap.has(cData.cardNumber)) {
+                      collectedMap.set(cData.cardNumber, { id: d.id, cardNumber: cData.cardNumber });
+                    }
+                    if (collectedMap.size >= deliverTarget) break;
+                  }
+                };
+
+                // Try IndexedDB cache first, then exact-limit server query across owner IDs
+                for (const oid of queryOwnerIds) {
+                  if (collectedMap.size >= deliverTarget) break;
+                  const remainingNeeded = deliverTarget - collectedMap.size;
+                  const ownerExactQ = query(
+                    collection(db, 'cards'),
+                    where('ownerId', '==', oid),
+                    where('packageId', '==', normPkgId),
+                    where('status', 'in', ['available', 'assigned_to_agent']),
+                    limit(remainingNeeded + 2)
+                  );
+                  try {
+                    const idbSnap = await getDocsFromCache(ownerExactQ);
+                    addDocs(idbSnap.docs);
+                  } catch {
+                    // Cache miss
+                  }
+                  if (collectedMap.size < deliverTarget) {
+                    const serverSnap = await getDocs(ownerExactQ);
+                    addDocs(serverSnap.docs);
+                  }
+                }
+
+                // Super Admin central fallback if some cards belong to legacy admin ownerId
+                if (profile.role === 'super_admin' && collectedMap.size < deliverTarget) {
+                  const adminSnap = await getDocs(
                     query(
                       collection(db, 'cards'),
-                      where('packageId', '==', item.packageId),
+                      where('packageId', '==', normPkgId),
                       where('status', '==', 'available'),
-                      limit(deliverTarget)
+                      limit(deliverTarget - collectedMap.size + 2)
                     )
                   );
+                  addDocs(adminSnap.docs);
                 }
-                const list = snap.docs
-                  .map((d) => ({ id: d.id, cardNumber: (d.data() as CardDoc).cardNumber }))
-                  .filter((c) => !isCardLocallyLocked(c.cardNumber));
 
-                return { item, deliverTarget, list, fromCache: false };
+                return {
+                  item,
+                  deliverTarget,
+                  list: Array.from(collectedMap.values()).slice(0, deliverTarget),
+                  fromCache: false,
+                };
               })
             );
 
@@ -3136,7 +3394,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                 notifyWarning('أحد الكروت قيد التنفيذ حالياً، يرجى إعادة المحاولة فوراً.');
                 return null;
               }
-              removeCardsFromCache(activeUser.uid, fetchedAndLockedNumbers);
+              removeCardsFromCacheForOwners(ownerIds, fetchedAndLockedNumbers);
             }
           }
         }
@@ -4219,6 +4477,15 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           ...updates,
           updatedAt: serverTimestamp(),
         });
+        if (updates.status) {
+          await updateDoc(doc(db, 'clients', uid), {
+            status: updates.status,
+            updatedAt: serverTimestamp(),
+          }).catch(() => {});
+        }
+        setManagedUsers((prev) =>
+          prev.map((u) => (u.uid === uid ? { ...u, ...updates } : u))
+        );
         await writeAuditLog('تعديل بيانات حساب', `تم تعديل بيانات المستخدم ${uid}`);
         notifySuccess('تم تعديل بيانات الحساب بنجاح');
       } catch (err) {
@@ -4242,6 +4509,13 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           parentAgentId: nextRole === 'agent' ? '' : user.parentAgentId || '',
           updatedAt: serverTimestamp(),
         });
+        setManagedUsers((prev) =>
+          prev.map((u) =>
+            u.uid === user.uid
+              ? { ...u, role: nextRole, discountRate: nextRate, parentAgentId: nextRole === 'agent' ? '' : u.parentAgentId || '' }
+              : u
+          )
+        );
         await sendCloudNotification({
           recipientId: user.uid,
           title: nextRole === 'agent' ? 'تهانينا! تمت ترقيتك إلى وكيل معتمد' : 'تحديث مستوى الحساب',
@@ -4267,6 +4541,60 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       }
     },
     [appSettings, notifyError, notifySuccess, sendCloudNotification, writeAuditLog]
+  );
+
+  /**
+   * Super Admin exclusive account freeze/reactivate (`suspended` <-> `active`).
+   * Preserves 100% of cards, sales, and balances untouched while blocking login & selling immediately.
+   */
+  const toggleUserSuspension = useCallback(
+    async (user: UserProfile): Promise<boolean> => {
+      if (!profile || profile.role !== 'super_admin' || user.role === 'super_admin') return false;
+      const nextStatus: UserProfile['status'] = user.status === 'suspended' ? 'active' : 'suspended';
+      try {
+        await updateDoc(doc(db, 'users', user.uid), {
+          status: nextStatus,
+          updatedAt: serverTimestamp(),
+        });
+        // Mirror to legacy clients collection if present
+        await updateDoc(doc(db, 'clients', user.uid), {
+          status: nextStatus,
+          updatedAt: serverTimestamp(),
+        }).catch(() => {});
+
+        setManagedUsers((prev) =>
+          prev.map((u) => (u.uid === user.uid ? { ...u, status: nextStatus } : u))
+        );
+
+        await sendCloudNotification({
+          recipientId: user.uid,
+          title: nextStatus === 'suspended' ? 'تم إيقاف حسابك مؤقتاً' : 'تم إعادة تفعيل حسابك ✅',
+          body:
+            nextStatus === 'suspended'
+              ? 'تم إيقاف حسابك مؤقتاً من قبل الإدارة مع الاحتفاظ بكامل كروتك وبياناتك — يرجى التواصل مع الإدارة.'
+              : 'تم إعادة تفعيل حسابك بنجاح ويمكنك الآن الدخول وممارسة البيع بشكل طبيعي.',
+          category: 'account',
+          targetRoute: 'home',
+        });
+
+        await writeAuditLog(
+          nextStatus === 'suspended' ? 'إيقاف حساب مؤقتاً' : 'إعادة تفعيل حساب',
+          `${user.name} (${user.phone}) — الحالة الجديدة: ${nextStatus === 'suspended' ? 'موقوف' : 'نشط'} (مع حفظ كافة الكروت والبيانات)`
+        );
+
+        notifySuccess(
+          nextStatus === 'suspended'
+            ? `تم إيقاف حساب «${user.name}» مؤقتاً مع حفظ كافة كروته وبياناته ⛔`
+            : `تم إعادة تفعيل حساب «${user.name}» بنجاح ✅`
+        );
+        return true;
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, `users/${user.uid}`);
+        notifyError('تعذر تحديث حالة الحساب');
+        return false;
+      }
+    },
+    [notifyError, notifySuccess, profile, sendCloudNotification, writeAuditLog]
   );
 
   const transferClientsToAgent = useCallback(
@@ -5862,7 +6190,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           }
         } else {
           // Fallback to local cached pool when offline and IndexedDB has no query index
-          const localCached = getCachedAvailableCards(targetUid);
+          const localCached = getCachedAvailableCardsForOwners([targetUid]);
           for (const c of localCached) {
             const pkg = pkgMap.get(c.packageId);
             remainingCards.push({
@@ -6301,7 +6629,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         const recalledNumbers = recalledCardObjs.map((c) => c.cardNumber);
         releaseCardLocksLocally(recalledNumbers);
         appendCachedAvailableCards(activeUser.uid, recalledCardObjs);
-        removeCardsFromCache(targetUser.uid, recalledNumbers);
+        removeCardsFromCacheForOwners([targetUser.uid], recalledNumbers);
 
         try {
           localStorage.removeItem(`taibah_agent_cards_cache_v1_${targetUser.uid}`);
@@ -6472,6 +6800,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       hasMoreAuditLogs: auditLogs.length >= auditLogsLimit,
       loadMoreAuditLogs,
       refreshVerificationStatus,
+      isRefreshingInventory,
+      refreshMyInventory,
       syncNow,
       signOutUser,
       activateLocalSession,
@@ -6501,6 +6831,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       createManualUser,
       updateManagedUser,
       toggleUserRoleUpgrade,
+      toggleUserSuspension,
       transferClientsToAgent,
       deleteManagedUser,
       resolvePasswordReset,
@@ -6542,6 +6873,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       auditLogsLimit,
       loadMoreAuditLogs,
       refreshVerificationStatus,
+      isRefreshingInventory,
+      refreshMyInventory,
       syncNow,
       signOutUser,
       activateLocalSession,
@@ -6571,6 +6904,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       createManualUser,
       updateManagedUser,
       toggleUserRoleUpgrade,
+      toggleUserSuspension,
       transferClientsToAgent,
       deleteManagedUser,
       resolvePasswordReset,

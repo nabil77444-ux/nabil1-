@@ -321,10 +321,218 @@ export async function requestFCMToken(): Promise<string | null> {
   }
 }
 
+let safeDocIdCounter = 0;
+
+/**
+ * Android 6+ (minSdk 23) safe unique document ID generator — zero dependency on `crypto.randomUUID`.
+ */
 export function generateSafeDocId(prefix: string): string {
-  const randomPart =
-    typeof crypto !== 'undefined' && 'randomUUID' in crypto
-      ? crypto.randomUUID().replace(/-/g, '').slice(0, 16)
-      : Math.random().toString(36).slice(2, 12);
-  return `${prefix}_${Date.now()}_${randomPart}`;
+  safeDocIdCounter = (safeDocIdCounter + 1) % 100000;
+  const randA = Math.random().toString(36).slice(2, 10);
+  const randB = Math.random().toString(36).slice(2, 8);
+  return `${prefix}_${Date.now()}_${safeDocIdCounter.toString(36)}_${randA}${randB}`;
+}
+
+// ============================================================================
+// Lightweight HTTPS REST API Fallbacks (Firebase Auth + Firestore REST v1)
+// Used ONLY on first-time cloud activation when Firebase WebChannel/SDK stalls
+// behind VPNs, weak Yemeni mobile data, or legacy Android WebView.
+// ============================================================================
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number
+): Promise<Response> {
+  const hasAbort = typeof AbortController !== 'undefined';
+  const controller = hasAbort ? new AbortController() : null;
+  let timerId: ReturnType<typeof setTimeout> | null = null;
+  const fetchPromise = fetch(url, {
+    ...init,
+    ...(controller ? { signal: controller.signal } : {}),
+  });
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timerId = setTimeout(() => {
+      try {
+        controller?.abort();
+      } catch {
+        // ignore
+      }
+      reject(new Error('REST_TIMEOUT'));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([fetchPromise, timeoutPromise]);
+  } finally {
+    if (timerId !== null) clearTimeout(timerId);
+  }
+}
+
+export interface FirebaseAuthRestResult {
+  ok: boolean;
+  localId?: string;
+  idToken?: string;
+  email?: string;
+  displayName?: string;
+  errorCode?: string;
+}
+
+export async function firebaseAuthRestSignIn(
+  email: string,
+  password: string,
+  timeoutMs = 15000
+): Promise<FirebaseAuthRestResult> {
+  const apiKey = firebaseConfig.apiKey;
+  if (!apiKey) return { ok: false, errorCode: 'MISSING_API_KEY' };
+  try {
+    const res = await fetchWithTimeout(
+      `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${encodeURIComponent(apiKey)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: email.trim().toLowerCase(),
+          password,
+          returnSecureToken: true,
+        }),
+      },
+      timeoutMs
+    );
+    const data = (await res.json().catch(() => ({}))) as {
+      localId?: string;
+      idToken?: string;
+      email?: string;
+      displayName?: string;
+      error?: { message?: string };
+    };
+    if (!res.ok || !data.localId || !data.idToken) {
+      return {
+        ok: false,
+        errorCode: data?.error?.message || `HTTP_${res.status}`,
+      };
+    }
+    return {
+      ok: true,
+      localId: data.localId,
+      idToken: data.idToken,
+      email: data.email || email.trim().toLowerCase(),
+      displayName: data.displayName || '',
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err || '');
+    return { ok: false, errorCode: msg || 'NETWORK_ERROR' };
+  }
+}
+
+function parseFirestoreRestValue(val: unknown): unknown {
+  if (!val || typeof val !== 'object') return undefined;
+  const v = val as Record<string, unknown>;
+  if ('stringValue' in v) return String(v.stringValue ?? '');
+  if ('integerValue' in v) return Number(v.integerValue ?? 0);
+  if ('doubleValue' in v) return Number(v.doubleValue ?? 0);
+  if ('booleanValue' in v) return Boolean(v.booleanValue);
+  if ('nullValue' in v) return null;
+  if ('arrayValue' in v && v.arrayValue && typeof v.arrayValue === 'object') {
+    const arr = (v.arrayValue as { values?: unknown[] }).values;
+    return Array.isArray(arr) ? arr.map(parseFirestoreRestValue) : [];
+  }
+  if ('mapValue' in v && v.mapValue && typeof v.mapValue === 'object') {
+    const fields = (v.mapValue as { fields?: Record<string, unknown> }).fields;
+    return parseFirestoreRestFields(fields);
+  }
+  return undefined;
+}
+
+function parseFirestoreRestFields(
+  fields?: Record<string, unknown>
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (!fields || typeof fields !== 'object') return out;
+  for (const [key, rawVal] of Object.entries(fields)) {
+    const parsed = parseFirestoreRestValue(rawVal);
+    if (parsed !== undefined) {
+      out[key] = parsed;
+    }
+  }
+  return out;
+}
+
+export async function firestoreRestGetUserDoc(
+  uid: string,
+  idToken: string,
+  timeoutMs = 12000
+): Promise<Record<string, unknown> | null> {
+  const projectId = firebaseConfig.projectId;
+  const dbId = firebaseConfig.firestoreDatabaseId || '(default)';
+  if (!projectId || !uid || !idToken) return null;
+  const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(dbId)}/documents/users/${encodeURIComponent(uid)}`;
+  try {
+    const res = await fetchWithTimeout(
+      url,
+      {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${idToken}`,
+          Accept: 'application/json',
+        },
+      },
+      timeoutMs
+    );
+    if (!res.ok) return null;
+    const json = (await res.json().catch(() => null)) as {
+      fields?: Record<string, unknown>;
+    } | null;
+    if (!json?.fields) return null;
+    return parseFirestoreRestFields(json.fields);
+  } catch {
+    return null;
+  }
+}
+
+export async function firestoreRestLookupEmailByPhone(
+  phoneDigits: string,
+  timeoutMs = 10000
+): Promise<string | null> {
+  const projectId = firebaseConfig.projectId;
+  const dbId = firebaseConfig.firestoreDatabaseId || '(default)';
+  const apiKey = firebaseConfig.apiKey;
+  if (!projectId || !phoneDigits || !apiKey) return null;
+  const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(dbId)}/documents:runQuery?key=${encodeURIComponent(apiKey)}`;
+  try {
+    const res = await fetchWithTimeout(
+      url,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          structuredQuery: {
+            from: [{ collectionId: 'users' }],
+            where: {
+              fieldFilter: {
+                field: { fieldPath: 'phone' },
+                op: 'EQUAL',
+                value: { stringValue: phoneDigits },
+              },
+            },
+            limit: 1,
+          },
+        }),
+      },
+      timeoutMs
+    );
+    if (!res.ok) return null;
+    const rows = (await res.json().catch(() => [])) as Array<{
+      document?: { fields?: Record<string, unknown> };
+    }>;
+    if (!Array.isArray(rows)) return null;
+    for (const row of rows) {
+      const fields = parseFirestoreRestFields(row?.document?.fields);
+      if (typeof fields.email === 'string' && fields.email.includes('@')) {
+        return fields.email.trim().toLowerCase();
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }

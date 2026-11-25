@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   createUserWithEmailAndPassword,
   sendEmailVerification,
@@ -31,7 +31,10 @@ import {
   applyAuthPersistence,
   auth,
   db,
+  firebaseAuthRestSignIn,
   firebaseProjectId,
+  firestoreRestGetUserDoc,
+  firestoreRestLookupEmailByPhone,
   generateSafeDocId,
   handleFirestoreError,
   isSuperAdminEmail,
@@ -40,12 +43,14 @@ import {
   OperationType,
 } from '../lib/firebase';
 import {
+  clearManualSignOutForBiometric,
   getBiometricMethodStatus,
   getSavedBiometricEnrollment,
   isBiometricHardwareAvailable,
   readBiometricVaultCredentials,
   rememberSessionCredentialInMemory,
   resetBiometricPromptLock,
+  shouldAutoTriggerBiometricOnLaunch,
   syncBiometricVaultOnPasswordLogin,
   verifyDeviceBiometric,
 } from '../lib/biometric';
@@ -74,6 +79,14 @@ interface AuthScreenProps {
   onUnlockSession: (uid?: string, email?: string) => void;
 }
 
+function readSavedIdentifierOnce(): string {
+  try {
+    return localStorage.getItem(SAVED_IDENTIFIER_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
 export const AuthScreen: React.FC<AuthScreenProps> = ({
   isDark,
   onToggleTheme,
@@ -92,36 +105,31 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
     activateLocalSession,
   } = useFirebase();
 
+  const initialSavedId = useRef<string>(readSavedIdentifierOnce());
+
+  // Uncontrolled input refs — ZERO setState / localStorage / regex per keystroke (eliminates Samsung Keyboard lag!)
+  const identifierRef = useRef<HTMLInputElement | null>(null);
+  const passwordRef = useRef<HTMLInputElement | null>(null);
+  const regNameRef = useRef<HTMLInputElement | null>(null);
+  const regPhoneRef = useRef<HTMLInputElement | null>(null);
+  const regEmailRef = useRef<HTMLInputElement | null>(null);
+  const regPasswordRef = useRef<HTMLInputElement | null>(null);
+  const resetIdentifierRef = useRef<HTMLInputElement | null>(null);
+  const resetNameRef = useRef<HTMLInputElement | null>(null);
+  const autoBiometricTriedRef = useRef(false);
+
   const [view, setView] = useState<AuthView>('login');
-  const [identifier, setIdentifier] = useState(() => {
-    try {
-      return localStorage.getItem(SAVED_IDENTIFIER_KEY) || '';
-    } catch {
-      return '';
-    }
-  });
-  const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
-  const [saveUsername, setSaveUsername] = useState(() => {
-    try {
-      return !!localStorage.getItem(SAVED_IDENTIFIER_KEY);
-    } catch {
-      return false;
-    }
-  });
+  const [saveUsername, setSaveUsername] = useState(() => Boolean(initialSavedId.current));
   const [submitting, setSubmitting] = useState(false);
   const [emailAuthDisabledError, setEmailAuthDisabledError] = useState(false);
+  const [networkRetryError, setNetworkRetryError] = useState<string | null>(null);
+  const [showAdminSetupBtn, setShowAdminSetupBtn] = useState(() =>
+    isSuperAdminEmail(normalizeAuthIdentifier(initialSavedId.current).email)
+  );
 
-  // Registration state (strictly NO discount percentage shown!)
-  const [regName, setRegName] = useState('');
-  const [regPhone, setRegPhone] = useState('');
-  const [regEmail, setRegEmail] = useState('');
-  const [regPassword, setRegPassword] = useState('');
+  // Registration role toggle only (strictly NO discount percentage shown!)
   const [regRole, setRegRole] = useState<'client' | 'agent'>('client');
-
-  // Password reset state
-  const [resetIdentifier, setResetIdentifier] = useState('');
-  const [resetName, setResetName] = useState('');
 
   // Unified BiometricPrompt status (Fingerprint + Face + Device PIN)
   const [bioStatus, setBioStatus] = useState(() => getBiometricMethodStatus());
@@ -198,35 +206,37 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
     };
   };
 
-  const handleLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!identifier.trim() || !password) {
+  const executeLoginFlow = async (rawIdentifier: string, rawPassword: string) => {
+    const cleanId = rawIdentifier.trim();
+    if (!cleanId || !rawPassword) {
       notifyWarning('بيانات ناقصة', 'يرجى إدخال البريد الإلكتروني أو رقم الهاتف وكلمة المرور.');
       return;
     }
 
     setSubmitting(true);
     setEmailAuthDisabledError(false);
+    setNetworkRetryError(null);
 
-    // Mandatory 4-second safety watchdog: guarantees "جاري التحقق..." ALWAYS resets cleanly
+    // 20-second generous watchdog for first-time cloud activation over VPN / weak Yemeni mobile networks
     let loginSettled = false;
     const safetyWatchdog = window.setTimeout(() => {
       if (!loginSettled) {
         loginSettled = true;
         setSubmitting(false);
+        setNetworkRetryError('انتهت مهلة التفعيل السحابي (20 ثانية) — تحقق من الإنترنت أو الـ VPN واضغط إعادة المحاولة.');
         notifyError(
-          'انتهت مهلة التفعيل السحابي (4 ثوانٍ)',
-          'تعذر الاتصال السريع بالسحابة لتفعيل الحساب الجديد — تحقق من الإنترنت أو الـ VPN وحاول مجدداً.'
+          'انتهت مهلة التفعيل السحابي',
+          'الشبكة بطيئة أو محجوبة — يمكنك الضغط على «إعادة المحاولة» بالأسفل.'
         );
       }
-    }, 4000);
+    }, 20000);
 
-    const { email: normalizedEmail, phone: normalizedPhone, isPhoneLogin } = normalizeAuthIdentifier(identifier);
+    const { email: normalizedEmail, phone: normalizedPhone, isPhoneLogin } = normalizeAuthIdentifier(cleanId);
 
     try {
       try {
         if (saveUsername) {
-          localStorage.setItem(SAVED_IDENTIFIER_KEY, identifier.trim());
+          localStorage.setItem(SAVED_IDENTIFIER_KEY, cleanId);
         } else {
           localStorage.removeItem(SAVED_IDENTIFIER_KEY);
         }
@@ -237,10 +247,10 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
       // =========================================================================
       // STEP 1A: 100% LOCAL VERIFICATION VIA `localAuthVault` (< 0.05s, Pure-JS SHA-256, 0 cloud calls!)
       // =========================================================================
-      const localCheck = await verifyLocalVaultPassword(identifier, password);
+      const localCheck = await verifyLocalVaultPassword(cleanId, rawPassword);
 
       if (localCheck.status === 'suspended') {
-        notifyError('تم إيقاف الحساب', 'تم إيقاف هذا الحساب من قِبل الإدارة.');
+        notifyError('تم إيقاف الحساب', 'تم إيقاف هذا الحساب مؤقتاً من قِبل الإدارة — تواصل مع الإدارة لإعادة التفعيل.');
         return;
       }
 
@@ -251,12 +261,13 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
 
       if (localCheck.status === 'matched' && localCheck.account && localCheck.account.status === 'active') {
         const localProfile = vaultAccountToUserProfile(localCheck.account);
-        activateLocalSession(localProfile, { email: localCheck.account.email, password });
+        clearManualSignOutForBiometric();
+        activateLocalSession(localProfile, { email: localCheck.account.email, password: rawPassword });
         onUnlockSession(localCheck.account.uid, localCheck.account.email);
         void syncBiometricVaultOnPasswordLogin(
           localCheck.account.email,
-          password,
-          identifier.trim(),
+          rawPassword,
+          cleanId,
           localCheck.account.name
         );
         setBioStatus(getBiometricMethodStatus());
@@ -265,20 +276,19 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
       }
 
       // =========================================================================
-      // STEP 1B: LEGACY LOCAL BIOMETRIC VAULT MIGRATION (ONLY if enrolled, bounded 300ms)
-      // Strictly verifies exact email + password match — ZERO bypass!
+      // STEP 1B: LEGACY LOCAL BIOMETRIC VAULT MIGRATION (bounded 300ms)
       // =========================================================================
       const savedBioMeta = getSavedBiometricEnrollment();
       if (savedBioMeta?.hasVault) {
         try {
           const legacyBioCreds = await raceWithTimeout(readBiometricVaultCredentials(), 300).catch(() => null);
-          const cachedHint = findCachedLocalUserHint(identifier);
+          const cachedHint = findCachedLocalUserHint(cleanId);
           const matchesLegacyEmail =
             legacyBioCreds?.email &&
             (legacyBioCreds.email.toLowerCase() === normalizedEmail.toLowerCase() ||
               (cachedHint?.email && legacyBioCreds.email.toLowerCase() === cachedHint.email.toLowerCase()));
           if (matchesLegacyEmail) {
-            if (legacyBioCreds.password !== password) {
+            if (legacyBioCreds.password !== rawPassword) {
               notifyError('كلمة المرور غير صحيحة', 'تأكد من كلمة المرور المدخلة وحاول مجدداً.');
               return;
             }
@@ -294,8 +304,9 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                   normalizedPhone || cachedHint?.phone || '',
                   cachedHint?.name
                 );
-            saveAccountToLocalVaultSync(migratedProfile, password, identifier.trim());
-            activateLocalSession(migratedProfile, { email: legacyBioCreds.email, password });
+            clearManualSignOutForBiometric();
+            saveAccountToLocalVaultSync(migratedProfile, rawPassword, cleanId);
+            activateLocalSession(migratedProfile, { email: legacyBioCreds.email, password: rawPassword });
             onUnlockSession(migratedProfile.uid, migratedProfile.email);
             notifySuccess('مرحباً بك في كروت طيبة نت — تم تسجيل الدخول بنجاح ✅');
             return;
@@ -306,28 +317,27 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
       }
 
       // =========================================================================
-      // STEP 1C: ZERO-BLOCK 100% LOCAL SUPER ADMIN ENTRY (< 0.05s, works even in Airplane Mode!)
-      // Opens HomeScreen immediately without waiting for Firebase Auth or Firestore;
-      // cloud authentication & data sync execute silently in background afterwards.
+      // STEP 1C: ZERO-BLOCK 100% LOCAL SUPER ADMIN ENTRY (< 0.05s, works offline!)
       // =========================================================================
       if (isSuperAdminEmail(normalizedEmail)) {
-        if (password.length < 6) {
+        if (rawPassword.length < 6) {
           notifyWarning('كلمة مرور قصيرة', 'أدخل كلمة مرور المدير الصحيحة (6 أحرف على الأقل).');
           return;
         }
         const adminProfile = buildInstantSuperAdminProfile(normalizedEmail);
-        saveAccountToLocalVaultSync(adminProfile, password, identifier.trim() || SUPER_ADMIN_CONFIG.phone);
-        rememberSessionCredentialInMemory(adminProfile.email, password);
+        clearManualSignOutForBiometric();
+        saveAccountToLocalVaultSync(adminProfile, rawPassword, cleanId || SUPER_ADMIN_CONFIG.phone);
+        rememberSessionCredentialInMemory(adminProfile.email, rawPassword);
         void syncBiometricVaultOnPasswordLogin(
           adminProfile.email,
-          password,
-          identifier.trim() || SUPER_ADMIN_CONFIG.phone,
+          rawPassword,
+          cleanId || SUPER_ADMIN_CONFIG.phone,
           adminProfile.name
         );
         setBioStatus(getBiometricMethodStatus());
         activateLocalSession(adminProfile, {
           email: adminProfile.email,
-          password,
+          password: rawPassword,
           isProvisionalAdmin: true,
         });
         onUnlockSession(adminProfile.uid, adminProfile.email);
@@ -336,10 +346,10 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
       }
 
       // =========================================================================
-      // STEP 2: FIRST-TIME CLOUD ACTIVATION FOR NEW AGENTS/CLIENTS ON A NEW DEVICE ONLY
-      // Strictly ONE 4-second `Promise.race` budget, ZERO blocking Firestore profile loads!
+      // STEP 2: FIRST-TIME CLOUD ACTIVATION (20s Budget + Direct HTTPS REST API Fallback!)
       // =========================================================================
       if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        setNetworkRetryError('لا يوجد اتصال بالإنترنت — يلزم الاتصال لمرة واحدة فقط لتفعيل هذا الحساب.');
         notifyError(
           'يلزم الإنترنت للتفعيل لأول مرة',
           'هذا الحساب غير مفعّل محلياً على هذا الجهاز بعد — اتصل بالإنترنت للتفعيل لمرة واحدة فقط.'
@@ -347,7 +357,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
         return;
       }
 
-      const deadline = Date.now() + 4000;
+      const deadline = Date.now() + 19500;
 
       // Resolve phone -> real email from local cache synchronously first (0 cloud reads)
       let authEmailToUse = normalizedEmail;
@@ -358,93 +368,199 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
         }
       }
 
-      let cred: Awaited<ReturnType<typeof signInWithEmailAndPassword>>;
-      try {
-        cred = await raceWithTimeout(
-          signInWithEmailAndPassword(auth, authEmailToUse, password),
-          Math.max(500, deadline - Date.now())
-        );
-      } catch (firstErr: unknown) {
-        const firstCode = (firstErr as { code?: string })?.code || '';
-        const remainingForLookup = deadline - Date.now();
-        const shouldLookupPhoneEmail =
-          isPhoneLogin &&
-          normalizedPhone.length >= 7 &&
-          remainingForLookup > 800 &&
-          (firstCode === 'auth/user-not-found' || firstCode === 'auth/invalid-credential');
+      let verifiedUid = '';
+      let verifiedEmail = authEmailToUse;
+      let verifiedDisplayName = '';
+      let restUserFields: Record<string, unknown> | null = null;
 
-        if (!shouldLookupPhoneEmail) {
-          throw firstErr;
+      // Helper: HTTPS REST Auth + Firestore User Doc fallback (bypasses stalled WebChannel/VPN sockets)
+      const tryRestAuthSignIn = async (emailCandidate: string): Promise<boolean> => {
+        const remaining = Math.max(3000, deadline - Date.now());
+        const restRes = await firebaseAuthRestSignIn(emailCandidate, rawPassword, Math.min(12000, remaining));
+        if (restRes.ok && restRes.localId && restRes.idToken) {
+          verifiedUid = restRes.localId;
+          verifiedEmail = restRes.email || emailCandidate;
+          verifiedDisplayName = restRes.displayName || '';
+          restUserFields = await firestoreRestGetUserDoc(
+            restRes.localId,
+            restRes.idToken,
+            Math.max(2500, Math.min(6000, deadline - Date.now()))
+          ).catch(() => null);
+          return true;
+        }
+        // Check explicit wrong credentials from REST API
+        const ec = String(restRes.errorCode || '').toUpperCase();
+        if (ec.includes('INVALID_PASSWORD') || ec.includes('INVALID_LOGIN_CREDENTIALS')) {
+          const e = new Error('INVALID_CREDENTIAL') as Error & { code?: string };
+          e.code = 'auth/invalid-credential';
+          throw e;
+        }
+        if (ec.includes('EMAIL_NOT_FOUND')) {
+          const e = new Error('USER_NOT_FOUND') as Error & { code?: string };
+          e.code = 'auth/user-not-found';
+          throw e;
+        }
+        if (ec.includes('TOO_MANY_ATTEMPTS')) {
+          const e = new Error('TOO_MANY_REQUESTS') as Error & { code?: string };
+          e.code = 'auth/too-many-requests';
+          throw e;
+        }
+        return false;
+      };
+
+      // Attempt A: Firebase SDK signInWithEmailAndPassword (bounded to 9s so 10s remains for REST fallback!)
+      let sdkErr: unknown = null;
+      try {
+        const cred = await raceWithTimeout(
+          signInWithEmailAndPassword(auth, authEmailToUse, rawPassword),
+          Math.min(9000, Math.max(3000, deadline - Date.now()))
+        );
+        verifiedUid = cred.user.uid;
+        verifiedEmail = cred.user.email || authEmailToUse;
+        verifiedDisplayName = cred.user.displayName || '';
+      } catch (firstErr: unknown) {
+        sdkErr = firstErr;
+        const firstCode = (firstErr as { code?: string })?.code || '';
+        const isCredentialMiss =
+          firstCode === 'auth/user-not-found' || firstCode === 'auth/invalid-credential';
+        const isNetworkOrTimeout =
+          firstErr instanceof CloudTimeoutError ||
+          firstCode === 'cloud/timeout' ||
+          firstCode === 'auth/network-request-failed';
+
+        // If SDK stalled due to VPN/weak network, immediately fall back to direct HTTPS REST API!
+        if (isNetworkOrTimeout && deadline - Date.now() > 2500) {
+          const restOk = await tryRestAuthSignIn(authEmailToUse);
+          if (restOk) sdkErr = null;
         }
 
-        // Fast phone-to-email fallback strictly within the SAME 4-second total cap
-        let discoveredEmail: string | null = null;
-        try {
-          const snap = await raceWithTimeout(
-            getDocs(query(collection(db, 'users'), where('phone', '==', normalizedPhone), limit(1))),
-            Math.max(400, Math.min(1800, deadline - Date.now() - 400))
-          );
-          if (!snap.empty) {
-            const rawEmail = String(snap.docs[0].data()?.email || '').trim().toLowerCase();
-            if (rawEmail && rawEmail.includes('@') && rawEmail !== authEmailToUse) {
-              discoveredEmail = rawEmail;
+        // If phone login didn't match `<phone>@taibah.net`, resolve real email via Firestore SDK or REST query
+        if (sdkErr && isPhoneLogin && normalizedPhone.length >= 7 && (isCredentialMiss || isNetworkOrTimeout)) {
+          let discoveredEmail: string | null = null;
+          try {
+            const snap = await raceWithTimeout(
+              getDocs(query(collection(db, 'users'), where('phone', '==', normalizedPhone), limit(1))),
+              Math.max(1500, Math.min(4500, deadline - Date.now() - 2000))
+            );
+            if (!snap.empty) {
+              const rawEmail = String(snap.docs[0].data()?.email || '').trim().toLowerCase();
+              if (rawEmail && rawEmail.includes('@') && rawEmail !== authEmailToUse) {
+                discoveredEmail = rawEmail;
+              }
+            }
+          } catch {
+            discoveredEmail = await firestoreRestLookupEmailByPhone(
+              normalizedPhone,
+              Math.max(2000, Math.min(5000, deadline - Date.now() - 2000))
+            );
+          }
+
+          if (discoveredEmail && discoveredEmail !== authEmailToUse && deadline - Date.now() > 1500) {
+            authEmailToUse = discoveredEmail;
+            try {
+              const retryCred = await raceWithTimeout(
+                signInWithEmailAndPassword(auth, authEmailToUse, rawPassword),
+                Math.min(5000, Math.max(1500, deadline - Date.now()))
+              );
+              verifiedUid = retryCred.user.uid;
+              verifiedEmail = retryCred.user.email || authEmailToUse;
+              verifiedDisplayName = retryCred.user.displayName || '';
+              sdkErr = null;
+            } catch {
+              const restOk = await tryRestAuthSignIn(authEmailToUse);
+              if (restOk) sdkErr = null;
             }
           }
-        } catch {
-          discoveredEmail = null;
         }
+      }
 
-        const remainingForRetry = deadline - Date.now();
-        if (!discoveredEmail || remainingForRetry < 400) {
-          throw firstErr;
-        }
-
-        authEmailToUse = discoveredEmail;
-        cred = await raceWithTimeout(
-          signInWithEmailAndPassword(auth, authEmailToUse, password),
-          remainingForRetry
-        );
+      if (sdkErr || !verifiedUid) {
+        throw sdkErr || new CloudTimeoutError();
       }
 
       if (loginSettled) return;
 
-      // Firebase Auth verified the real password! Open HomeScreen IMMEDIATELY without waiting for Firestore.
-      // Full Firestore role/balance/discountRate sync runs silently in the background!
-      const instantProfile = buildVerifiedProfileFallback(
-        cred.user.uid,
-        cred.user.email || authEmailToUse,
+      const baseProfile = buildVerifiedProfileFallback(
+        verifiedUid,
+        verifiedEmail,
         normalizedPhone,
-        cred.user.displayName
+        verifiedDisplayName
       );
 
+      // Merge any live fields retrieved via REST API immediately (so role/status/discountRate are exact!)
+      const resolvedRestFields = restUserFields as Record<string, unknown> | null;
+      const instantProfile: UserProfile = resolvedRestFields
+        ? {
+            ...baseProfile,
+            name:
+              typeof resolvedRestFields.name === 'string' && resolvedRestFields.name.trim()
+                ? resolvedRestFields.name.trim()
+                : baseProfile.name,
+            phone:
+              typeof resolvedRestFields.phone === 'string' && resolvedRestFields.phone.trim()
+                ? resolvedRestFields.phone.trim()
+                : baseProfile.phone,
+            role:
+              resolvedRestFields.role === 'super_admin' ||
+              resolvedRestFields.role === 'agent' ||
+              resolvedRestFields.role === 'client'
+                ? resolvedRestFields.role
+                : baseProfile.role,
+            status:
+              resolvedRestFields.status === 'active' ||
+              resolvedRestFields.status === 'pending' ||
+              resolvedRestFields.status === 'rejected' ||
+              resolvedRestFields.status === 'suspended'
+                ? resolvedRestFields.status
+                : baseProfile.status,
+            parentAgentId:
+              typeof resolvedRestFields.parentAgentId === 'string'
+                ? resolvedRestFields.parentAgentId
+                : baseProfile.parentAgentId,
+            discountRate:
+              typeof resolvedRestFields.discountRate === 'number'
+                ? resolvedRestFields.discountRate
+                : baseProfile.discountRate,
+            balance:
+              typeof resolvedRestFields.balance === 'number'
+                ? resolvedRestFields.balance
+                : baseProfile.balance,
+            linkedSourceId:
+              typeof resolvedRestFields.linkedSourceId === 'string'
+                ? resolvedRestFields.linkedSourceId
+                : baseProfile.linkedSourceId,
+          }
+        : baseProfile;
+
       if (instantProfile.status === 'suspended') {
-        notifyError('تم إيقاف الحساب', 'تم إيقاف هذا الحساب من قِبل الإدارة.');
+        notifyError('تم إيقاف الحساب', 'تم إيقاف هذا الحساب مؤقتاً من قِبل الإدارة.');
         return;
       }
 
-      // Persist Pure-JS salted SHA-256 hash into `localAuthVault` synchronously (< 1ms)
-      saveAccountToLocalVaultSync(instantProfile, password, identifier.trim());
+      clearManualSignOutForBiometric();
+      saveAccountToLocalVaultSync(instantProfile, rawPassword, cleanId);
       void syncBiometricVaultOnPasswordLogin(
         instantProfile.email,
-        password,
-        identifier.trim(),
+        rawPassword,
+        cleanId,
         instantProfile.name
       );
       setBioStatus(getBiometricMethodStatus());
 
       activateLocalSession(instantProfile, {
         email: instantProfile.email,
-        password,
+        password: rawPassword,
         needsBackgroundProfileRefresh: true,
       });
-      onUnlockSession(cred.user.uid, instantProfile.email);
+      onUnlockSession(verifiedUid, instantProfile.email);
       notifySuccess('تم تفعيل الحساب على هذا الجهاز وتسجيل الدخول بنجاح ✅');
     } catch (err: unknown) {
       if (loginSettled) return;
       if (err instanceof CloudTimeoutError || (err as { code?: string })?.code === 'cloud/timeout') {
+        setNetworkRetryError('انتهت مهلة التفعيل السحابي — تحقق من الإنترنت أو الـ VPN واضغط إعادة المحاولة.');
         notifyError(
-          'انتهت مهلة التفعيل السحابي (4 ثوانٍ)',
-          'الشبكة بطيئة أو محجوبة — تحقق من اتصال الإنترنت أو الـ VPN وحاول مجدداً لتفعيل الحساب الجديد.'
+          'انتهت مهلة التفعيل السحابي',
+          'الشبكة بطيئة أو محجوبة — تحقق من اتصال الإنترنت أو الـ VPN واضغط «إعادة المحاولة».'
         );
         return;
       }
@@ -463,11 +579,13 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
       } else if (code === 'auth/too-many-requests') {
         notifyError('محاولات كثيرة', 'تم إيقاف المحاولات مؤقتاً لكثرة الإدخالات الخاطئة — انتظر قليلاً ثم أعد المحاولة.');
       } else if (code === 'auth/network-request-failed') {
+        setNetworkRetryError('تعذر الاتصال بالشبكة — تحقق من الإنترنت أو الـ VPN ثم اضغط إعادة المحاولة.');
         notifyError(
           'تعذر الاتصال بالشبكة',
           'تحقق من اتصال الإنترنت أو إعدادات الـ VPN ثم أعد المحاولة.'
         );
       } else {
+        setNetworkRetryError('تعذر إتمام الاتصال السحابي — يمكنك المحاولة مجدداً الآن.');
         notifyError('تعذر تسجيل الدخول', 'يرجى التحقق من البيانات المدخلة واتصال الإنترنت.');
       }
     } finally {
@@ -477,13 +595,22 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
     }
   };
 
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const rawId = identifierRef.current?.value || '';
+    const rawPwd = passwordRef.current?.value || '';
+    await executeLoginFlow(rawId, rawPwd);
+  };
+
   const handleFirstTimeAdminSetup = async () => {
-    const { email } = normalizeAuthIdentifier(identifier || SUPER_ADMIN_CONFIG.email);
+    const rawId = (identifierRef.current?.value || '').trim();
+    const rawPwd = passwordRef.current?.value || '';
+    const { email } = normalizeAuthIdentifier(rawId || SUPER_ADMIN_CONFIG.email);
     if (!isSuperAdminEmail(email)) {
       notifyWarning('خاص بالمدير الأساسي فقط', `أدخل ${SUPER_ADMIN_CONFIG.email} أو ${SUPER_ADMIN_CONFIG.phone}`);
       return;
     }
-    if (password.length < 6) {
+    if (rawPwd.length < 6) {
       notifyWarning('كلمة مرور قصيرة', 'أدخل كلمة مرور قوية من 6 أحرف على الأقل لحساب المدير.');
       return;
     }
@@ -491,35 +618,35 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
     setSubmitting(true);
     setEmailAuthDisabledError(false);
     try {
-      // If Super Admin is already activated locally on this device, strictly verify existing vault password!
-      const existingCheck = await verifyLocalVaultPassword(email, password);
+      const existingCheck = await verifyLocalVaultPassword(email, rawPwd);
       if (existingCheck.status === 'wrong_password') {
         notifyError('كلمة المرور غير صحيحة', 'حساب المدير مفعّل مسبقاً على هذا الجهاز بكلمة مرور مختلفة.');
         return;
       }
       if (existingCheck.status === 'matched' && existingCheck.account) {
         const localProfile = vaultAccountToUserProfile(existingCheck.account);
-        activateLocalSession(localProfile, { email: localProfile.email, password });
+        clearManualSignOutForBiometric();
+        activateLocalSession(localProfile, { email: localProfile.email, password: rawPwd });
         onUnlockSession(localProfile.uid, localProfile.email);
         notifySuccess('مرحباً بالمدير العام — تم الدخول بنجاح ✅');
         return;
       }
 
-      // 100% LOCAL & INSTANT (< 0.05s) Super Admin activation — ZERO network wait, works offline!
       const adminProfile = buildInstantSuperAdminProfile(email);
-      saveAccountToLocalVaultSync(adminProfile, password, identifier.trim() || SUPER_ADMIN_CONFIG.phone);
-      rememberSessionCredentialInMemory(email, password);
+      clearManualSignOutForBiometric();
+      saveAccountToLocalVaultSync(adminProfile, rawPwd, rawId || SUPER_ADMIN_CONFIG.phone);
+      rememberSessionCredentialInMemory(email, rawPwd);
       void syncBiometricVaultOnPasswordLogin(
         email,
-        password,
-        identifier.trim() || SUPER_ADMIN_CONFIG.phone,
+        rawPwd,
+        rawId || SUPER_ADMIN_CONFIG.phone,
         SUPER_ADMIN_CONFIG.name
       );
       setBioStatus(getBiometricMethodStatus());
 
       activateLocalSession(adminProfile, {
         email,
-        password,
+        password: rawPwd,
         isFirstTimeAdminSetup: true,
         isProvisionalAdmin: true,
       });
@@ -532,129 +659,151 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
     }
   };
 
-  const completeUnifiedBiometricSignIn = async (
-    displayName: string,
-    savedIdentifier: string,
-    credentials: { email: string; password: string } | null | undefined
-  ) => {
-    setIdentifier(savedIdentifier);
-
-    // 100% LOCAL BIOMETRIC SIGN-IN (0 cloud calls, < 0.05s!)
-    const vaultAcc =
-      findVaultAccountByIdentifier(credentials?.email || '') ||
-      findVaultAccountByIdentifier(savedIdentifier);
-
-    if (vaultAcc) {
-      if (vaultAcc.status === 'suspended' || vaultAcc.disabled === true) {
-        notifyError('تم إيقاف الحساب', 'تم إيقاف هذا الحساب من قِبل الإدارة.');
-        return;
+  const completeUnifiedBiometricSignIn = useCallback(
+    async (
+      displayName: string,
+      savedIdentifier: string,
+      credentials: { email: string; password: string } | null | undefined
+    ) => {
+      if (identifierRef.current) {
+        identifierRef.current.value = savedIdentifier;
       }
-      if (vaultAcc.status === 'active') {
-        if (credentials?.email && credentials?.password) {
-          rememberSessionCredentialInMemory(credentials.email, credentials.password);
+
+      // 100% LOCAL BIOMETRIC SIGN-IN (0 cloud calls, < 0.05s!)
+      const vaultAcc =
+        findVaultAccountByIdentifier(credentials?.email || '') ||
+        findVaultAccountByIdentifier(savedIdentifier);
+
+      if (vaultAcc) {
+        if (vaultAcc.status === 'suspended' || vaultAcc.disabled === true) {
+          notifyError('تم إيقاف الحساب', 'تم إيقاف هذا الحساب مؤقتاً من قِبل الإدارة.');
+          return;
         }
-        activateLocalSession(
-          vaultAccountToUserProfile(vaultAcc),
-          credentials?.email && credentials?.password ? credentials : undefined
+        if (vaultAcc.status === 'active') {
+          clearManualSignOutForBiometric();
+          if (credentials?.email && credentials?.password) {
+            rememberSessionCredentialInMemory(credentials.email, credentials.password);
+          }
+          activateLocalSession(
+            vaultAccountToUserProfile(vaultAcc),
+            credentials?.email && credentials?.password ? credentials : undefined
+          );
+          onUnlockSession(vaultAcc.uid, vaultAcc.email);
+          notifySuccess(`تم التحقق الحيوي بنجاح — مرحباً ${vaultAcc.name || displayName} ✅`);
+          return;
+        }
+      }
+
+      if (!credentials?.email || !credentials?.password) {
+        notifyWarning(
+          'يلزم ربط الدخول الحيوي بكلمة المرور',
+          'سجّل الدخول بكلمة المرور أولاً لتفعيل الحساب محلياً، ثم استخدم الدخول الحيوي.'
         );
-        onUnlockSession(vaultAcc.uid, vaultAcc.email);
-        notifySuccess(`تم التحقق الحيوي بنجاح — مرحباً ${vaultAcc.name || displayName} ✅`);
-        return;
-      }
-    }
-
-    if (!credentials?.email || !credentials?.password) {
-      notifyWarning(
-        'يلزم ربط الدخول الحيوي بكلمة المرور',
-        'سجّل الدخول بكلمة المرور أولاً لتفعيل الحساب محلياً، ثم استخدم الدخول الحيوي.'
-      );
-      return;
-    }
-
-    // Super Admin biometric fallback: 100% local instant (< 0.05s) without cloud block!
-    if (isSuperAdminEmail(credentials.email)) {
-      const adminProfile = buildInstantSuperAdminProfile(credentials.email);
-      saveAccountToLocalVaultSync(adminProfile, credentials.password, savedIdentifier);
-      rememberSessionCredentialInMemory(credentials.email, credentials.password);
-      activateLocalSession(adminProfile, { email: credentials.email, password: credentials.password });
-      onUnlockSession(adminProfile.uid, credentials.email);
-      notifySuccess(`تم التحقق الحيوي بنجاح — مرحباً ${displayName} ✅`);
-      return;
-    }
-
-    // Legacy non-admin biometric fallback bounded strictly to 4 seconds (no Firestore block!)
-    setSubmitting(true);
-    try {
-      const cred = await raceWithTimeout(
-        signInWithEmailAndPassword(auth, credentials.email, credentials.password),
-        4000
-      );
-      const instantProfile = buildVerifiedProfileFallback(
-        cred.user.uid,
-        credentials.email,
-        savedIdentifier,
-        displayName || cred.user.displayName
-      );
-
-      if (instantProfile.status === 'suspended') {
-        notifyError('تم إيقاف الحساب', 'تم إيقاف هذا الحساب من قِبل الإدارة.');
         return;
       }
 
-      saveAccountToLocalVaultSync(instantProfile, credentials.password, savedIdentifier);
-      rememberSessionCredentialInMemory(credentials.email, credentials.password);
-      activateLocalSession(instantProfile, {
-        email: credentials.email,
-        password: credentials.password,
-        needsBackgroundProfileRefresh: true,
-      });
-      onUnlockSession(cred.user.uid, credentials.email);
-      notifySuccess(`تم التحقق الحيوي بنجاح — مرحباً ${displayName} ✅`);
-    } catch {
-      notifyError(
-        'تعذر التحقق من بيانات الحساب',
-        'يرجى تسجيل الدخول بكلمة المرور مرة واحدة لتحديث الخزنة المحلية.'
-      );
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const handleUnifiedBiometricLogin = async () => {
-    if (bioBusy || submitting) return;
-    const currentStatus = getBiometricMethodStatus();
-    setBioStatus(currentStatus);
-
-    if (!currentStatus.hasAnyEnabled) {
-      notifyInfo(
-        'الدخول الحيوي غير مُفعّل بعد',
-        'سجّل الدخول بكلمة المرور أولاً، ثم افتح «الإعدادات وحول التطبيق» لتفعيل البصمة / الوجه / رمز الجهاز.'
-      );
-      return;
-    }
-
-    setBioBusy(true);
-    try {
-      const result = await verifyDeviceBiometric(undefined, 'unified');
-      if (result.requiresPin) {
-        setPinInput('');
-        setShowPinModal(true);
+      if (isSuperAdminEmail(credentials.email)) {
+        const adminProfile = buildInstantSuperAdminProfile(credentials.email);
+        clearManualSignOutForBiometric();
+        saveAccountToLocalVaultSync(adminProfile, credentials.password, savedIdentifier);
+        rememberSessionCredentialInMemory(credentials.email, credentials.password);
+        activateLocalSession(adminProfile, { email: credentials.email, password: credentials.password });
+        onUnlockSession(adminProfile.uid, credentials.email);
+        notifySuccess(`تم التحقق الحيوي بنجاح — مرحباً ${displayName} ✅`);
         return;
       }
 
-      if (result.verified && result.enrollment) {
-        await completeUnifiedBiometricSignIn(
-          result.enrollment.displayName,
-          result.enrollment.identifier,
-          result.credentials
+      setSubmitting(true);
+      try {
+        const cred = await raceWithTimeout(
+          signInWithEmailAndPassword(auth, credentials.email, credentials.password),
+          12000
         );
-      } else if (result.errorMessage) {
-        notifyWarning('لم يكتمل التحقق الحيوي', result.errorMessage);
+        const instantProfile = buildVerifiedProfileFallback(
+          cred.user.uid,
+          credentials.email,
+          savedIdentifier,
+          displayName || cred.user.displayName
+        );
+
+        if (instantProfile.status === 'suspended') {
+          notifyError('تم إيقاف الحساب', 'تم إيقاف هذا الحساب من قِبل الإدارة.');
+          return;
+        }
+
+        clearManualSignOutForBiometric();
+        saveAccountToLocalVaultSync(instantProfile, credentials.password, savedIdentifier);
+        rememberSessionCredentialInMemory(credentials.email, credentials.password);
+        activateLocalSession(instantProfile, {
+          email: credentials.email,
+          password: credentials.password,
+          needsBackgroundProfileRefresh: true,
+        });
+        onUnlockSession(cred.user.uid, credentials.email);
+        notifySuccess(`تم التحقق الحيوي بنجاح — مرحباً ${displayName} ✅`);
+      } catch {
+        notifyError(
+          'تعذر التحقق من بيانات الحساب',
+          'يرجى تسجيل الدخول بكلمة المرور مرة واحدة لتحديث الخزنة المحلية.'
+        );
+      } finally {
+        setSubmitting(false);
       }
-    } finally {
-      setBioBusy(false);
-    }
-  };
+    },
+    [activateLocalSession, notifyError, notifySuccess, notifyWarning, onUnlockSession]
+  );
+
+  const handleUnifiedBiometricLogin = useCallback(
+    async (isAutoLaunch = false) => {
+      if (bioBusy || submitting) return;
+      const currentStatus = getBiometricMethodStatus();
+      setBioStatus(currentStatus);
+
+      if (!currentStatus.hasAnyEnabled) {
+        if (!isAutoLaunch) {
+          notifyInfo(
+            'الدخول الحيوي غير مُفعّل بعد',
+            'سجّل الدخول بكلمة المرور أولاً، ثم افتح «الإعدادات وحول التطبيق» لتفعيل البصمة / الوجه / رمز الجهاز.'
+          );
+        }
+        return;
+      }
+
+      setBioBusy(true);
+      try {
+        const result = await verifyDeviceBiometric(undefined, 'unified');
+        if (result.requiresPin) {
+          setPinInput('');
+          setShowPinModal(true);
+          return;
+        }
+
+        if (result.verified && result.enrollment) {
+          await completeUnifiedBiometricSignIn(
+            result.enrollment.displayName,
+            result.enrollment.identifier,
+            result.credentials
+          );
+        } else if (result.errorMessage && !isAutoLaunch) {
+          notifyWarning('لم يكتمل التحقق الحيوي', result.errorMessage);
+        }
+      } finally {
+        setBioBusy(false);
+      }
+    },
+    [bioBusy, completeUnifiedBiometricSignIn, notifyInfo, notifyWarning, submitting]
+  );
+
+  // Instant Auto-Trigger Native Android Biometric / Face / Device PIN on Cold Start (< 0.1s unlock!)
+  useEffect(() => {
+    if (autoBiometricTriedRef.current || sessionUnlocked) return;
+    if (!shouldAutoTriggerBiometricOnLaunch()) return;
+    autoBiometricTriedRef.current = true;
+    const timer = window.setTimeout(() => {
+      void handleUnifiedBiometricLogin(true);
+    }, 180);
+    return () => window.clearTimeout(timer);
+  }, [handleUnifiedBiometricLogin, sessionUnlocked]);
 
   const handlePinConfirm = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -673,8 +822,11 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
 
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
-    const cleanName = regName.trim();
-    const cleanPhone = normalizeDigits(regPhone).replace(/[^\d]/g, '');
+    const cleanName = (regNameRef.current?.value || '').trim();
+    const cleanPhone = normalizeDigits(regPhoneRef.current?.value || '').replace(/[^\d]/g, '');
+    const cleanEmailInput = (regEmailRef.current?.value || '').trim();
+    const rawRegPassword = regPasswordRef.current?.value || '';
+
     if (cleanName.length < 2) {
       notifyWarning('الاسم مطلوب', 'يرجى إدخال الاسم الكامل (حرفان على الأقل).');
       return;
@@ -683,7 +835,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
       notifyWarning('رقم الهاتف غير صالح', 'يرجى إدخال رقم هاتف صحيح.');
       return;
     }
-    if (regPassword.length < 6) {
+    if (rawRegPassword.length < 6) {
       notifyWarning('كلمة المرور قصيرة', 'يجب أن تكون كلمة المرور 6 أحرف على الأقل.');
       return;
     }
@@ -692,12 +844,12 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
     setEmailAuthDisabledError(false);
 
     try {
-      const authEmail = regEmail.trim()
-        ? regEmail.trim().toLowerCase()
+      const authEmail = cleanEmailInput
+        ? cleanEmailInput.toLowerCase()
         : `${cleanPhone}@taibah.net`;
 
       await applyAuthPersistence(false);
-      const cred = await createUserWithEmailAndPassword(auth, authEmail, regPassword);
+      const cred = await createUserWithEmailAndPassword(auth, authEmail, rawRegPassword);
       const uid = cred.user.uid;
 
       // 1. Create pending user profile in Firestore (no discount % exposed on registration!)
@@ -763,7 +915,8 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
 
   const handlePasswordReset = async (e: React.FormEvent) => {
     e.preventDefault();
-    const cleaned = normalizeDigits(resetIdentifier).trim();
+    const cleaned = normalizeDigits(resetIdentifierRef.current?.value || '').trim();
+    const cleanResetName = (resetNameRef.current?.value || '').trim();
     if (cleaned.length < 3) {
       notifyWarning('بيانات ناقصة', 'أدخل رقم الهاتف أو البريد الإلكتروني المرتبط بحسابك.');
       return;
@@ -775,7 +928,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
       await setDoc(doc(db, 'passwordResetRequests', reqId), {
         requesterUid: auth.currentUser?.uid || '',
         identifier: cleaned.slice(0, 120),
-        name: resetName.trim().slice(0, 100),
+        name: cleanResetName.slice(0, 100),
         phone: cleaned.includes('@') ? '' : cleaned.replace(/[^\d]/g, '').slice(0, 20),
         status: 'pending',
         createdAt: serverTimestamp(),
@@ -787,8 +940,8 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
       }
 
       notifySuccess('تم إرسال طلب استعادة كلمة المرور للإدارة بنجاح');
-      setResetIdentifier('');
-      setResetName('');
+      if (resetIdentifierRef.current) resetIdentifierRef.current.value = '';
+      if (resetNameRef.current) resetNameRef.current.value = '';
       setView('login');
     } catch (err) {
       handleFirestoreError(err, OperationType.CREATE, 'passwordResetRequests');
@@ -1009,7 +1162,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
   return (
     <div
       dir="rtl"
-      className="taibah-app-frame h-[100dvh] w-full overflow-hidden flex flex-col items-center justify-between bg-gradient-to-br from-slate-100 via-blue-50 to-slate-200 dark:from-[#0B1220] dark:via-[#0F172A] dark:to-[#1A365D] px-3.5 pt-[calc(env(safe-area-inset-top,0px)+10px)] pb-[calc(env(safe-area-inset-bottom,0px)+14px)] relative select-none"
+      className="taibah-app-frame min-h-[100dvh] h-[100dvh] w-full overflow-y-auto flex flex-col items-center justify-between bg-gradient-to-br from-slate-100 via-blue-50 to-slate-200 dark:from-[#0B1220] dark:via-[#0F172A] dark:to-[#1A365D] px-3.5 pt-[calc(env(safe-area-inset-top,0px)+10px)] pb-[calc(env(safe-area-inset-bottom,0px)+14px)] relative"
     >
       {/* Theme Toggle floating corner */}
       <button
@@ -1105,7 +1258,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
             </div>
           )}
 
-          {/* VIEW 1: LOGIN */}
+          {/* VIEW 1: LOGIN (Uncontrolled useRef inputs -> ZERO Samsung/Android keyboard lag!) */}
           {view === 'login' && (
             <form onSubmit={handleLogin} className="space-y-2.5">
               <div>
@@ -1116,11 +1269,18 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                   <div className="relative flex-1">
                     <Phone className="w-4 h-4 text-slate-500 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                     <input
+                      ref={identifierRef}
                       type="text"
-                      value={identifier}
-                      onChange={(e) => setIdentifier(e.target.value)}
+                      defaultValue={initialSavedId.current}
+                      onBlur={(e) => {
+                        const isAdm = isSuperAdminEmail(normalizeAuthIdentifier(e.currentTarget.value).email);
+                        if (isAdm !== showAdminSetupBtn) setShowAdminSetupBtn(isAdm);
+                      }}
                       placeholder="772466998 أو nabil77444@gmail.com"
                       autoComplete="username"
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      spellCheck={false}
                       className="w-full min-h-[42px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 pr-9 pl-3 text-xs sm:text-sm font-bold text-slate-900 dark:text-white placeholder:text-slate-400 focus:border-[#D4AF37] focus:outline-none transition-colors"
                     />
                   </div>
@@ -1128,7 +1288,10 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                     unauthenticated
                     className="min-h-[42px] min-w-[42px] rounded-xl border-2 border-[#D4AF37] bg-[#1A365D] text-[#FDE68A] flex items-center justify-center active:scale-95 transition-transform shrink-0"
                     onSelect={(picked) => {
-                      if (picked.phone) setIdentifier(picked.phone);
+                      if (picked.phone && identifierRef.current) {
+                        identifierRef.current.value = picked.phone;
+                        setShowAdminSetupBtn(isSuperAdminEmail(normalizeAuthIdentifier(picked.phone).email));
+                      }
                     }}
                   />
                 </div>
@@ -1140,11 +1303,14 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                 </label>
                 <div className="relative">
                   <input
+                    ref={passwordRef}
                     type={showPassword ? 'text' : 'password'}
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
+                    defaultValue=""
                     placeholder="أدخل كلمة المرور"
                     autoComplete="current-password"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
                     className="w-full min-h-[42px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 pr-3 pl-10 text-xs sm:text-sm font-bold text-slate-900 dark:text-white placeholder:text-slate-400 focus:border-[#D4AF37] focus:outline-none transition-colors"
                   />
                   <button
@@ -1177,6 +1343,28 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                 </button>
               </div>
 
+              {networkRetryError && (
+                <div className="rounded-xl bg-red-50 dark:bg-red-950/50 border-2 border-red-400 dark:border-red-700 p-2.5 space-y-2">
+                  <p className="text-[11px] font-extrabold text-red-700 dark:text-red-300 leading-snug">
+                    {networkRetryError}
+                  </p>
+                  <button
+                    type="button"
+                    disabled={submitting}
+                    onClick={() =>
+                      void executeLoginFlow(
+                        identifierRef.current?.value || '',
+                        passwordRef.current?.value || ''
+                      )
+                    }
+                    className="w-full min-h-[36px] rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-extrabold flex items-center justify-center gap-1.5 disabled:opacity-60"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${submitting ? 'animate-spin' : ''}`} />
+                    <span>إعادة المحاولة الآن</span>
+                  </button>
+                </div>
+              )}
+
               {/* Primary Password Login Button */}
               <button
                 type="submit"
@@ -1184,14 +1372,14 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                 className="w-full min-h-[44px] royal-btn-3d border-2 border-[#D4AF37] text-white font-extrabold text-xs sm:text-sm rounded-xl flex items-center justify-center gap-2 disabled:opacity-60"
               >
                 <LogIn className="w-4 h-4 text-[#FDE68A]" />
-                <span>{submitting ? 'جاري التحقق...' : 'تسجيل الدخول بكلمة المرور'}</span>
+                <span>{submitting ? 'جاري التحقق والتفعيل...' : 'تسجيل الدخول بكلمة المرور'}</span>
               </button>
 
               {/* ONE Unified Native Android BiometricPrompt Button (Fingerprint + Face + Device PIN) */}
               <button
                 type="button"
                 disabled={submitting || bioBusy}
-                onClick={() => void handleUnifiedBiometricLogin()}
+                onClick={() => void handleUnifiedBiometricLogin(false)}
                 className={`w-full min-h-[44px] rounded-xl px-3 text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2 transition-transform active:scale-[0.98] border-2 border-[#D4AF37] shadow-md disabled:opacity-65 ${
                   bioStatus.hasAnyEnabled
                     ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
@@ -1203,7 +1391,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                 <span>{bioBusy ? 'جاري التحقق الحيوي...' : 'الدخول بالبصمة / الوجه / رمز الجهاز'}</span>
               </button>
 
-              {isSuperAdminEmail(normalizeAuthIdentifier(identifier).email) && (
+              {showAdminSetupBtn && (
                 <button
                   type="button"
                   disabled={submitting}
@@ -1227,7 +1415,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
             </form>
           )}
 
-          {/* VIEW 2: REGISTER NEW ACCOUNT (ZERO DISCOUNT % SHOWN) */}
+          {/* VIEW 2: REGISTER NEW ACCOUNT (ZERO DISCOUNT % SHOWN, Uncontrolled refs) */}
           {view === 'register' && (
             <form onSubmit={handleRegister} className="space-y-2">
               <div className="grid grid-cols-2 gap-1.5">
@@ -1258,20 +1446,20 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
               </div>
 
               <input
+                ref={regNameRef}
                 type="text"
                 required
-                value={regName}
-                onChange={(e) => setRegName(e.target.value)}
+                defaultValue=""
                 placeholder="الاسم الكامل / اسم المحل"
                 className="w-full min-h-[39px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold text-slate-900 dark:text-white focus:border-[#D4AF37] focus:outline-none"
               />
 
               <div className="flex items-center gap-1.5">
                 <input
+                  ref={regPhoneRef}
                   type="tel"
                   required
-                  value={regPhone}
-                  onChange={(e) => setRegPhone(e.target.value)}
+                  defaultValue=""
                   placeholder="رقم الهاتف (77xxxxxxx)"
                   className="flex-1 min-h-[39px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold text-slate-900 dark:text-white focus:border-[#D4AF37] focus:outline-none tabular-nums"
                 />
@@ -1279,25 +1467,29 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                   unauthenticated
                   className="min-h-[39px] min-w-[39px] rounded-xl border-2 border-[#D4AF37] bg-[#1A365D] text-[#FDE68A] flex items-center justify-center shrink-0"
                   onSelect={(picked) => {
-                    if (picked.name && !regName) setRegName(picked.name);
-                    if (picked.phone) setRegPhone(picked.phone);
+                    if (picked.name && regNameRef.current && !regNameRef.current.value) {
+                      regNameRef.current.value = picked.name;
+                    }
+                    if (picked.phone && regPhoneRef.current) {
+                      regPhoneRef.current.value = picked.phone;
+                    }
                   }}
                 />
               </div>
 
               <input
+                ref={regEmailRef}
                 type="email"
-                value={regEmail}
-                onChange={(e) => setRegEmail(e.target.value)}
+                defaultValue=""
                 placeholder="البريد الإلكتروني (اختياري)"
                 className="w-full min-h-[39px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold text-slate-900 dark:text-white focus:border-[#D4AF37] focus:outline-none"
               />
 
               <input
+                ref={regPasswordRef}
                 type="password"
                 required
-                value={regPassword}
-                onChange={(e) => setRegPassword(e.target.value)}
+                defaultValue=""
                 placeholder="كلمة المرور (6 أحرف أو أرقام على الأقل)"
                 className="w-full min-h-[39px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold text-slate-900 dark:text-white focus:border-[#D4AF37] focus:outline-none"
               />
@@ -1313,24 +1505,24 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
             </form>
           )}
 
-          {/* VIEW 3: PASSWORD RECOVERY */}
+          {/* VIEW 3: PASSWORD RECOVERY (Uncontrolled refs) */}
           {view === 'reset' && (
             <form onSubmit={handlePasswordReset} className="space-y-2.5">
               <p className="text-[11.5px] font-semibold text-slate-600 dark:text-slate-300 leading-relaxed">
                 أدخل رقم هاتفك أو بريدك الإلكتروني لإرسال طلب استعادة كلمة المرور مباشرة إلى إدارة شبكة طيبة نت.
               </p>
               <input
+                ref={resetIdentifierRef}
                 type="text"
                 required
-                value={resetIdentifier}
-                onChange={(e) => setResetIdentifier(e.target.value)}
+                defaultValue=""
                 placeholder="77xxxxxxx أو البريد الإلكتروني"
                 className="w-full min-h-[42px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold text-slate-900 dark:text-white focus:border-[#D4AF37] focus:outline-none"
               />
               <input
+                ref={resetNameRef}
                 type="text"
-                value={resetName}
-                onChange={(e) => setResetName(e.target.value)}
+                defaultValue=""
                 placeholder="الاسم الكامل (اختياري)"
                 className="w-full min-h-[42px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold text-slate-900 dark:text-white focus:border-[#D4AF37] focus:outline-none"
               />

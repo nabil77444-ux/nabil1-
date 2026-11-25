@@ -2,7 +2,9 @@ import React, { useMemo, useState } from 'react';
 import {
   ArrowLeftRight,
   ArrowUpDown,
+  Ban,
   Check,
+  CheckCircle2,
   CreditCard,
   Edit3,
   KeyRound,
@@ -45,6 +47,7 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
     createManualUser,
     updateManagedUser,
     toggleUserRoleUpgrade,
+    toggleUserSuspension,
     transferClientsToAgent,
     deleteManagedUser,
     resolvePasswordReset,
@@ -59,6 +62,7 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
   const [showTransferModal, setShowTransferModal] = useState(false);
   const [managingUser, setManagingUser] = useState<UserProfile | null>(null);
   const [auditTargetUser, setAuditTargetUser] = useState<UserProfile | null>(null);
+  const [suspendTargetUser, setSuspendTargetUser] = useState<UserProfile | null>(null);
   const [rejectTarget, setRejectTarget] = useState<RegistrationRequest | null>(null);
   const [rejectReason, setRejectReason] = useState('');
   const [busy, setBusy] = useState(false);
@@ -484,77 +488,161 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
             const subClients = clients.filter((c) => c.parentAgentId === agent.uid);
             return (
               <div key={agent.uid} className="space-y-2">
-                {/* Dark Navy Agent Card with Gold Badge "الوكيل X" */}
-                <div className="rounded-2xl bg-gradient-to-l from-[#0F172A] via-[#1A365D] to-[#1E3A8A] border-2 border-[#D4AF37] p-3.5 text-white shadow-lg">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="px-2.5 py-0.5 rounded-full bg-gradient-to-b from-[#F59E0B] to-[#D4AF37] text-[#0F172A] text-[11px] font-extrabold shadow">
+                {/* Dark Navy Agent Card — Clean 2-Row Vertical Layout */}
+                <div
+                  className={`rounded-2xl bg-gradient-to-l from-[#0F172A] via-[#1A365D] to-[#1E3A8A] border-2 p-3.5 text-white shadow-lg flex flex-col gap-3 ${
+                    agent.status === 'suspended' ? 'border-red-500' : 'border-[#D4AF37]'
+                  }`}
+                >
+                  {/* Top Section: Full Agent Info Across Full Width */}
+                  <div className="flex flex-col gap-2">
+                    {/* Row 1: Badge + Full Agent Name (Right) | Balance (Left) */}
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 min-w-0 flex-1 flex-wrap">
+                        <span className="px-2.5 py-0.5 rounded-full bg-gradient-to-b from-[#F59E0B] to-[#D4AF37] text-[#0F172A] text-[11px] font-extrabold shadow shrink-0 whitespace-nowrap">
                           الوكيل {idx + 1}
                         </span>
-                        <h4 className="text-sm font-extrabold truncate">{agent.name}</h4>
+                        <h4 className="text-sm font-extrabold leading-snug break-words">
+                          {agent.name}
+                        </h4>
+                        {agent.status === 'suspended' && (
+                          <span className="px-2 py-0.5 rounded-full bg-red-600 text-white text-[10px] font-extrabold border border-white/50 shrink-0 whitespace-nowrap">
+                            موقوف مؤقتاً
+                          </span>
+                        )}
                       </div>
-                      <div className="text-xs font-bold text-slate-200 mt-1 tabular-nums">
-                        {agent.phone} · نسبة التسعير {agent.discountRate || appSettings.agentDiscountPercent}% · التابعون ({subClients.length})
-                      </div>
-                    </div>
-                    <div className="text-left shrink-0 flex flex-col items-end gap-1">
-                      <div className="text-xs font-extrabold text-[#FDE68A] tabular-nums">
+                      <div className="text-left shrink-0 text-xs font-extrabold text-[#FDE68A] tabular-nums whitespace-nowrap bg-white/10 px-2.5 py-1 rounded-xl border border-[#D4AF37]/40">
                         {formatYER(agent.balance || 0, hideNumbers)}
                       </div>
-                      <div className="flex items-center gap-1 flex-wrap justify-end">
-                        <button
-                          type="button"
-                          onClick={() => setAuditTargetUser(agent)}
-                          className="min-h-[30px] px-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 border border-[#FDE68A]/70 text-[10.5px] font-extrabold text-white flex items-center gap-1"
-                        >
-                          <CreditCard className="w-3 h-3" />
-                          <span>كشف الكروت</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => openManageModal(agent)}
-                          className="min-h-[30px] px-2.5 rounded-lg bg-white/15 hover:bg-white/25 border border-[#D4AF37] text-[10.5px] font-extrabold text-white"
-                        >
-                          إدارة الحساب
-                        </button>
-                      </div>
                     </div>
+
+                    {/* Row 2: Horizontal Metadata (Phone • Pricing % • Sub-clients Count) */}
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-bold text-slate-200 tabular-nums">
+                      <span className="whitespace-nowrap">{agent.phone || '—'}</span>
+                      <span className="text-[#D4AF37] select-none">•</span>
+                      <span className="whitespace-nowrap">
+                        نسبة التسعير: {agent.discountRate || appSettings.agentDiscountPercent}%
+                      </span>
+                      <span className="text-[#D4AF37] select-none">•</span>
+                      <span className="whitespace-nowrap">التابعون: ({subClients.length})</span>
+                    </div>
+                  </div>
+
+                  {/* Bottom Section: Independent Equal-Width 3-Button Bar */}
+                  <div className="grid grid-cols-3 gap-2 w-full pt-2.5 border-t border-white/15">
+                    <button
+                      type="button"
+                      onClick={() => setAuditTargetUser(agent)}
+                      className="min-h-[36px] px-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 border border-[#FDE68A]/70 text-xs font-extrabold text-white flex items-center justify-center gap-1 whitespace-nowrap"
+                    >
+                      <CreditCard className="w-3.5 h-3.5 shrink-0" />
+                      <span>كشف الكروت</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSuspendTargetUser(agent)}
+                      className={`min-h-[36px] px-1.5 rounded-xl border text-xs font-extrabold text-white flex items-center justify-center gap-1 whitespace-nowrap ${
+                        agent.status === 'suspended'
+                          ? 'bg-emerald-600 hover:bg-emerald-700 border-emerald-300'
+                          : 'bg-red-600 hover:bg-red-700 border-red-300'
+                      }`}
+                    >
+                      {agent.status === 'suspended' ? (
+                        <>
+                          <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                          <span>تفعيل</span>
+                        </>
+                      ) : (
+                        <>
+                          <Ban className="w-3.5 h-3.5 shrink-0" />
+                          <span>إيقاف الحساب</span>
+                        </>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => openManageModal(agent)}
+                      className="min-h-[36px] px-1.5 rounded-xl bg-white/15 hover:bg-white/25 border border-[#D4AF37] text-xs font-extrabold text-white flex items-center justify-center whitespace-nowrap"
+                    >
+                      إدارة الحساب
+                    </button>
                   </div>
                 </div>
 
-                {/* Sub-Clients Nested Along a Vertical Gold Line (Update 8) */}
+                {/* Sub-Clients Nested Along a Vertical Gold Line — Clean 2-Row Layout */}
                 {subClients.length > 0 && (
-                  <div className="mr-4 pr-3.5 border-r-2 border-[#D4AF37] space-y-2">
+                  <div className="mr-3.5 pr-3 border-r-2 border-[#D4AF37] space-y-2">
                     {subClients.map((sub, sIdx) => (
                       <div
                         key={sub.uid}
-                        className="rounded-xl bg-white dark:bg-slate-900 border border-[#D4AF37]/70 p-2.5 shadow-sm flex items-center justify-between gap-2"
+                        className={`rounded-xl bg-white dark:bg-slate-900 border-2 p-3 shadow-sm flex flex-col gap-2.5 ${
+                          sub.status === 'suspended' ? 'border-red-500/80' : 'border-[#D4AF37]/70'
+                        }`}
                       >
-                        <div className="flex items-center gap-2 min-w-0">
-                          <span className="w-6 h-6 rounded-full bg-slate-950 border border-[#D4AF37] text-[#FDE68A] text-[10px] font-extrabold flex items-center justify-center shrink-0 tabular-nums">
-                            {sIdx + 1}
-                          </span>
-                          <div className="min-w-0">
-                            <div className="text-xs font-extrabold truncate">{sub.name}</div>
-                            <div className="text-[10px] font-bold text-slate-500 tabular-nums">
-                              {sub.phone} · {sub.discountRate || 80}% · الرصيد {formatYER(sub.balance || 0, hideNumbers)}
+                        {/* Top Row: Number + Full Name + Phone/Rate (Right) | Balance (Left) */}
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex items-start gap-2.5 min-w-0 flex-1">
+                            <span className="w-6 h-6 rounded-full bg-slate-950 border border-[#D4AF37] text-[#FDE68A] text-[11px] font-extrabold flex items-center justify-center shrink-0 tabular-nums mt-0.5">
+                              {sIdx + 1}
+                            </span>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="text-sm font-extrabold text-slate-900 dark:text-white leading-snug break-words">
+                                  {sub.name}
+                                </span>
+                                {sub.status === 'suspended' && (
+                                  <span className="px-1.5 py-0.5 rounded-full bg-red-600 text-white text-[10px] font-extrabold shrink-0 whitespace-nowrap">
+                                    موقوف
+                                  </span>
+                                )}
+                              </div>
+                              <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs font-bold text-slate-500 dark:text-slate-400 mt-0.5 tabular-nums">
+                                <span className="whitespace-nowrap">{sub.phone || '—'}</span>
+                                <span>•</span>
+                                <span className="whitespace-nowrap">{sub.discountRate || 80}%</span>
+                              </div>
                             </div>
                           </div>
+                          <div className="text-left shrink-0 text-xs font-extrabold text-[#1A365D] dark:text-[#FDE68A] tabular-nums whitespace-nowrap bg-slate-100 dark:bg-slate-800 px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700">
+                            {formatYER(sub.balance || 0, hideNumbers)}
+                          </div>
                         </div>
-                        <div className="flex items-center gap-1 shrink-0">
+
+                        {/* Bottom Row: Independent Equal-Width 3-Button Bar */}
+                        <div className="grid grid-cols-3 gap-2 w-full pt-2 border-t border-slate-100 dark:border-slate-800">
                           <button
                             type="button"
                             onClick={() => setAuditTargetUser(sub)}
-                            className="min-h-[30px] px-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[10.5px] font-extrabold flex items-center gap-1"
+                            className="min-h-[34px] px-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold flex items-center justify-center gap-1 whitespace-nowrap"
                           >
-                            <CreditCard className="w-3 h-3" />
+                            <CreditCard className="w-3.5 h-3.5 shrink-0" />
                             <span>الكروت</span>
                           </button>
                           <button
                             type="button"
+                            onClick={() => setSuspendTargetUser(sub)}
+                            className={`min-h-[34px] px-1.5 rounded-xl text-white text-xs font-extrabold flex items-center justify-center gap-1 whitespace-nowrap ${
+                              sub.status === 'suspended'
+                                ? 'bg-emerald-600 hover:bg-emerald-700'
+                                : 'bg-red-600 hover:bg-red-700'
+                            }`}
+                          >
+                            {sub.status === 'suspended' ? (
+                              <>
+                                <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                                <span>تفعيل</span>
+                              </>
+                            ) : (
+                              <>
+                                <Ban className="w-3.5 h-3.5 shrink-0" />
+                                <span>إيقاف</span>
+                              </>
+                            )}
+                          </button>
+                          <button
+                            type="button"
                             onClick={() => openManageModal(sub)}
-                            className="min-h-[30px] px-2 rounded-lg bg-slate-100 dark:bg-slate-800 border border-[#D4AF37]/50 text-[#1A365D] dark:text-[#FDE68A] text-[10.5px] font-extrabold"
+                            className="min-h-[34px] px-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 border border-[#D4AF37]/60 text-[#1A365D] dark:text-[#FDE68A] text-xs font-extrabold flex items-center justify-center whitespace-nowrap"
                           >
                             إدارة
                           </button>
@@ -570,7 +658,7 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
       )}
 
       {/* SECTION D: DIRECT ADMIN CLIENTS SECTION (Navy Header + Numbered White Cards) */}
-      <section className="space-y-2.5">
+      <section className="space-y-2.5 pb-20">
         <div className="rounded-xl bg-[#1A365D] border-2 border-[#D4AF37] px-3.5 py-2.5 text-xs font-extrabold text-white flex items-center justify-between">
           <span className="flex items-center gap-1.5">
             <Users className="w-4 h-4 text-[#FDE68A]" />
@@ -586,44 +674,89 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
             لا يوجد عملاء مسجلون في هذا القسم حالياً (0)
           </div>
         ) : (
-          <div className="space-y-2">
+          <div className="space-y-2.5">
             {(isAdmin ? directAdminClients : clients).map((client, idx) => (
               <div
                 key={client.uid}
-                className="royal-tile-3d rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37]/70 p-3 shadow-sm flex items-center justify-between gap-2.5"
+                className={`royal-tile-3d rounded-2xl bg-white dark:bg-slate-900 border-2 p-3 shadow-sm flex flex-col gap-2.5 ${
+                  client.status === 'suspended' ? 'border-red-500/80' : 'border-[#D4AF37]/70'
+                }`}
               >
-                <div className="flex items-center gap-2.5 min-w-0">
-                  <span className="w-7 h-7 rounded-full bg-slate-950 border-2 border-[#D4AF37] text-[#FDE68A] text-xs font-extrabold flex items-center justify-center shrink-0 tabular-nums">
-                    {idx + 1}
-                  </span>
-                  <div className="min-w-0">
-                    <div className="text-sm font-extrabold truncate">{client.name}</div>
-                    <div className="text-[11px] font-bold text-slate-500 dark:text-slate-400 tabular-nums">
-                      {client.phone} · {getRoleArabicLabel(client.role)} ({client.discountRate || 80}%)
+                {/* Top Section: Number + Full Client Name + Phone/Rate (Right) | Balance (Left) */}
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-start gap-2.5 min-w-0 flex-1">
+                    <span className="w-7 h-7 rounded-full bg-slate-950 border-2 border-[#D4AF37] text-[#FDE68A] text-xs font-extrabold flex items-center justify-center shrink-0 tabular-nums mt-0.5">
+                      {idx + 1}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="text-sm font-extrabold text-slate-900 dark:text-white leading-snug break-words">
+                          {client.name}
+                        </span>
+                        {client.status === 'suspended' && (
+                          <span className="px-2 py-0.5 rounded-full bg-red-600 text-white text-[10px] font-extrabold shrink-0 whitespace-nowrap">
+                            موقوف مؤقتاً
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs font-bold text-slate-500 dark:text-slate-400 mt-0.5 tabular-nums">
+                        <span className="whitespace-nowrap">{client.phone || '—'}</span>
+                        <span>•</span>
+                        <span className="whitespace-nowrap">{client.discountRate || 80}%</span>
+                        <span>•</span>
+                        <span className="whitespace-nowrap">{getRoleArabicLabel(client.role)}</span>
+                      </div>
                     </div>
                   </div>
-                </div>
-                <div className="text-left shrink-0 flex flex-col items-end gap-1">
-                  <div className="text-xs font-extrabold text-[#1A365D] dark:text-[#FDE68A] tabular-nums">
+                  <div className="text-left shrink-0 text-xs font-extrabold text-[#1A365D] dark:text-[#FDE68A] tabular-nums whitespace-nowrap bg-slate-100 dark:bg-slate-800 px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700">
                     {formatYER(client.balance || 0, hideNumbers)}
                   </div>
-                  <div className="flex items-center gap-1">
+                </div>
+
+                {/* Bottom Section: Independent Horizontal Button Row */}
+                <div
+                  className={`grid ${
+                    isAdmin ? 'grid-cols-3' : 'grid-cols-2'
+                  } gap-2 w-full pt-2 border-t border-slate-100 dark:border-slate-800`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => setAuditTargetUser(client)}
+                    className="min-h-[34px] px-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold flex items-center justify-center gap-1 whitespace-nowrap"
+                  >
+                    <CreditCard className="w-3.5 h-3.5 shrink-0" />
+                    <span>الكروت</span>
+                  </button>
+                  {isAdmin && (
                     <button
                       type="button"
-                      onClick={() => setAuditTargetUser(client)}
-                      className="min-h-[30px] px-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[10.5px] font-extrabold flex items-center gap-1"
+                      onClick={() => setSuspendTargetUser(client)}
+                      className={`min-h-[34px] px-1.5 rounded-xl text-white text-xs font-extrabold flex items-center justify-center gap-1 whitespace-nowrap ${
+                        client.status === 'suspended'
+                          ? 'bg-emerald-600 hover:bg-emerald-700'
+                          : 'bg-red-600 hover:bg-red-700'
+                      }`}
                     >
-                      <CreditCard className="w-3 h-3" />
-                      <span>كشف الكروت</span>
+                      {client.status === 'suspended' ? (
+                        <>
+                          <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                          <span>تفعيل</span>
+                        </>
+                      ) : (
+                        <>
+                          <Ban className="w-3.5 h-3.5 shrink-0" />
+                          <span>إيقاف</span>
+                        </>
+                      )}
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => openManageModal(client)}
-                      className="min-h-[30px] px-2.5 rounded-lg bg-[#1A365D] text-white text-[10.5px] font-extrabold"
-                    >
-                      إدارة الحساب
-                    </button>
-                  </div>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => openManageModal(client)}
+                    className="min-h-[34px] px-1.5 rounded-xl bg-[#1A365D] hover:bg-[#0F172A] text-white text-xs font-extrabold flex items-center justify-center whitespace-nowrap"
+                  >
+                    إدارة
+                  </button>
                 </div>
               </div>
             ))}
@@ -776,23 +909,50 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
               <span>كشف الكروت والمبيعات (كم استلم • كم باع • كم باقي • لمن باع)</span>
             </button>
 
-            {/* Instant Upgrade / Demote Button (Update 10) */}
+            {/* Instant Upgrade / Demote Button + Instant Suspend/Activate Button (Super Admin Only) */}
             {isAdmin && (
-              <button
-                type="button"
-                onClick={async () => {
-                  await toggleUserRoleUpgrade(managingUser);
-                  setManagingUser(null);
-                }}
-                className="w-full min-h-[42px] rounded-xl bg-gradient-to-l from-[#1A365D] to-[#2563EB] border border-[#D4AF37] text-[#FDE68A] text-xs font-extrabold flex items-center justify-center gap-2 shadow"
-              >
-                <ArrowUpDown className="w-4 h-4" />
-                <span>
-                  {managingUser.role === 'client'
-                    ? `ترقية فورية إلى وكيل معتمد (${appSettings.agentDiscountPercent}%)`
-                    : `خفض فوري إلى عميل / نقطة بيع (${appSettings.clientDiscountPercent}%)`}
-                </span>
-              </button>
+              <div className="grid grid-cols-1 gap-2">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    await toggleUserRoleUpgrade(managingUser);
+                    setManagingUser(null);
+                  }}
+                  className="w-full min-h-[42px] rounded-xl bg-gradient-to-l from-[#1A365D] to-[#2563EB] border border-[#D4AF37] text-[#FDE68A] text-xs font-extrabold flex items-center justify-center gap-2 shadow"
+                >
+                  <ArrowUpDown className="w-4 h-4" />
+                  <span>
+                    {managingUser.role === 'client'
+                      ? `ترقية فورية إلى وكيل معتمد (${appSettings.agentDiscountPercent}%)`
+                      : `خفض فوري إلى عميل / نقطة بيع (${appSettings.clientDiscountPercent}%)`}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const target = managingUser;
+                    setManagingUser(null);
+                    setSuspendTargetUser(target);
+                  }}
+                  className={`w-full min-h-[40px] rounded-xl text-white text-xs font-extrabold flex items-center justify-center gap-2 shadow ${
+                    managingUser.status === 'suspended'
+                      ? 'bg-emerald-600 hover:bg-emerald-700'
+                      : 'bg-red-600 hover:bg-red-700'
+                  }`}
+                >
+                  {managingUser.status === 'suspended' ? (
+                    <>
+                      <CheckCircle2 className="w-4 h-4" />
+                      <span>إعادة تفعيل الحساب فوراً</span>
+                    </>
+                  ) : (
+                    <>
+                      <Ban className="w-4 h-4" />
+                      <span>إيقاف الحساب مؤقتاً (مع حفظ كامل الكروت والبيانات)</span>
+                    </>
+                  )}
+                </button>
+              </div>
             )}
 
             <div className="grid grid-cols-2 gap-2">
@@ -1005,6 +1165,89 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
           mode="modal"
           onClose={() => setAuditTargetUser(null)}
         />
+      )}
+
+      {/* MODAL 5: SUPER ADMIN ACCOUNT SUSPEND / REACTIVATE CONFIRMATION */}
+      {isAdmin && suspendTargetUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4">
+          <div
+            className={`w-full max-w-sm rounded-3xl bg-white dark:bg-slate-900 border-2 p-5 shadow-2xl text-center space-y-3 ${
+              suspendTargetUser.status === 'suspended' ? 'border-emerald-500' : 'border-red-500'
+            }`}
+          >
+            <div
+              className={`w-12 h-12 rounded-2xl mx-auto flex items-center justify-center ${
+                suspendTargetUser.status === 'suspended'
+                  ? 'bg-emerald-100 dark:bg-emerald-900/40 text-emerald-600'
+                  : 'bg-red-100 dark:bg-red-900/40 text-red-600'
+              }`}
+            >
+              {suspendTargetUser.status === 'suspended' ? (
+                <CheckCircle2 className="w-7 h-7" />
+              ) : (
+                <Ban className="w-7 h-7" />
+              )}
+            </div>
+            <h3
+              className={`text-base font-extrabold ${
+                suspendTargetUser.status === 'suspended' ? 'text-emerald-700 dark:text-emerald-400' : 'text-red-600'
+              }`}
+            >
+              {suspendTargetUser.status === 'suspended'
+                ? 'تأكيد إعادة تفعيل الحساب'
+                : 'تأكيد إيقاف الحساب مؤقتاً'}
+            </h3>
+            <p className="text-xs font-bold text-slate-600 dark:text-slate-300 leading-relaxed">
+              {suspendTargetUser.status === 'suspended' ? (
+                <>
+                  هل تريد إعادة تفعيل حساب <strong>{suspendTargetUser.name}</strong> ({suspendTargetUser.phone})؟ سيتمكن فوراً من تسجيل الدخول وممارسة البيع بكل كروته المحفوظة.
+                </>
+              ) : (
+                <>
+                  هل أنت متأكد من إيقاف حساب <strong>{suspendTargetUser.name}</strong> ({suspendTargetUser.phone}) مؤقتاً؟
+                  <br />
+                  <span className="text-emerald-700 dark:text-emerald-400">
+                    ستبقى كافة كروته ومبيعاته وأرصدته محفوظة 100% دون أي حذف، ولن يتمكن من الدخول أو البيع حتى إعادة تفعيله.
+                  </span>
+                </>
+              )}
+            </p>
+            <div className="grid grid-cols-2 gap-2 pt-1">
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => setSuspendTargetUser(null)}
+                className="min-h-[42px] rounded-xl bg-slate-100 dark:bg-slate-800 border-2 border-slate-300 dark:border-slate-600 text-xs font-extrabold"
+              >
+                إلغاء
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={async () => {
+                  setBusy(true);
+                  try {
+                    await toggleUserSuspension(suspendTargetUser);
+                    setSuspendTargetUser(null);
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+                className={`min-h-[42px] rounded-xl text-white text-xs font-extrabold disabled:opacity-60 ${
+                  suspendTargetUser.status === 'suspended'
+                    ? 'bg-emerald-600 hover:bg-emerald-700'
+                    : 'bg-red-600 hover:bg-red-700'
+                }`}
+              >
+                {busy
+                  ? 'جاري التنفيذ...'
+                  : suspendTargetUser.status === 'suspended'
+                    ? 'نعم، تفعيل الحساب ✅'
+                    : 'نعم، إيقاف مؤقت ⛔'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

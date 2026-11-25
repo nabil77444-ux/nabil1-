@@ -2,25 +2,20 @@ import React, { useCallback, useMemo, useRef, useState } from 'react';
 import {
   CheckCircle2,
   Copy,
-  Edit3,
-  Eye,
   FileDown,
-  Fingerprint,
   ImageDown,
   MessageSquare,
   Printer,
-  RotateCcw,
+  RefreshCw,
   Save,
   Send,
   Settings2,
   ShoppingCart,
-  Trash2,
   X,
   Zap,
 } from 'lucide-react';
 import { useFirebase } from '../contexts/FirebaseContext';
 import { useFeedback } from '../lib/feedback';
-import { verifyDeviceBiometric } from '../lib/biometric';
 import {
   applyMessageTemplate,
   exportAsArabicPDF,
@@ -40,9 +35,7 @@ import {
   formatDateTimeAr,
   formatPackageBalanceFull,
   formatYER,
-  getPackageThemeStyle,
   resolveDirectSaleTemplate,
-  TAIBAH_ASSETS,
   type PackageDoc,
   type SaleDoc,
 } from '../types/taibah';
@@ -63,13 +56,11 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
   const {
     profile,
     packages,
-    sales,
     totalAvailableCards,
     appSettings,
+    isRefreshingInventory,
+    refreshMyInventory,
     executeSaleTransaction,
-    processSaleReturn,
-    updateSaleRecord,
-    deleteSaleRecord,
     updateAppSettings,
     updatePackageInfo,
   } = useFirebase();
@@ -78,7 +69,7 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
   const displayPackages = packages.length > 0 ? packages : (EXCLUSIVE_PACKAGES as PackageDoc[]);
   const isAdmin = profile?.role === 'super_admin';
 
-  // Consumer details
+  // Consumer details (optional quick bar)
   const [buyerName, setBuyerName] = useState('');
   const [buyerPhone, setBuyerPhone] = useState('');
 
@@ -86,26 +77,17 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
   const [cart, setCart] = useState<Record<string, number>>({});
   const [submitting, setSubmitting] = useState(false);
 
-  // Modals
+  // Modals (clean & focused — sales history lives strictly in «المبيعات» and «التقارير»)
   const [completedSale, setCompletedSale] = useState<SaleDoc | null>(null);
   const [exportPreview, setExportPreview] = useState<ExportShareResult | null>(null);
   const [showTemplateModal, setShowTemplateModal] = useState(false);
   const [templateText, setTemplateText] = useState(
     resolveDirectSaleTemplate(appSettings.directSaleMessageTemplate)
   );
-  const [showReturnsModal, setShowReturnsModal] = useState(false);
   const [editingPkg, setEditingPkg] = useState<PackageDoc | null>(null);
   const [editPkgData, setEditPkgData] = useState('');
   const [editPkgHours, setEditPkgHours] = useState('');
   const [editPkgValidity, setEditPkgValidity] = useState('');
-
-  // Edit / Delete Direct Sale History Card modals
-  const [editingSale, setEditingSale] = useState<SaleDoc | null>(null);
-  const [editSaleName, setEditSaleName] = useState('');
-  const [editSalePhone, setEditSalePhone] = useState('');
-  const [editSaleNotes, setEditSaleNotes] = useState('');
-  const [deleteSaleTarget, setDeleteSaleTarget] = useState<SaleDoc | null>(null);
-  const [busySaleAction, setBusySaleAction] = useState(false);
 
   const selectedItems = useMemo(() => {
     return displayPackages
@@ -121,11 +103,6 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
   const selectedTotalAmount = useMemo(
     () => selectedItems.reduce((s, x) => s + x.pkg.price * x.qty, 0),
     [selectedItems]
-  );
-
-  const recentDirectSales = useMemo(
-    () => (sales || []).filter((s) => s && s.saleType === 'direct').slice(0, 20),
-    [sales]
   );
 
   const latestRef = useRef({
@@ -186,7 +163,7 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
       if ((pkg?.availableCount ?? 0) <= 0) {
         notifyWarning(
           'الرصيد غير متوفر لهذه الباقة',
-          `لا توجد كروت متاحة حالياً في مخزون باقة ${pkg?.price ?? 0} ريال — يرجى استيراد كروت أو طلب تغذية أولاً.`
+          `لا توجد كروت متاحة حالياً في مخزون باقة ${pkg?.price ?? 0} ريال — اضغط «تحديث مخزوني» أو اطلب تغذية.`
         );
         return;
       }
@@ -374,40 +351,19 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
     };
   };
 
-  const openEditSaleModal = (sale: SaleDoc) => {
-    setEditingSale(sale);
-    setEditSaleName(sale.buyerName);
-    setEditSalePhone(sale.buyerPhone || '');
-    setEditSaleNotes(sale.notes || '');
-  };
-
-  const handleSaveSaleEdit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!editingSale) return;
-    setBusySaleAction(true);
-    try {
-      await updateSaleRecord(editingSale.id, {
-        buyerName: editSaleName.trim() || editingSale.buyerName,
-        buyerPhone: editSalePhone.trim(),
-        notes: editSaleNotes.trim(),
-      });
-      setEditingSale(null);
-    } finally {
-      setBusySaleAction(false);
-    }
-  };
-
   return (
     <div className="space-y-3 safe-bottom-clear">
       {/* Top Direct Sale Action Bar */}
       <div className="royal-header-3d rounded-3xl border-2 border-[#D4AF37] p-3 shadow-lg space-y-2">
         <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <div className="w-10 h-10 rounded-xl bg-white/15 border-2 border-[#D4AF37] flex items-center justify-center text-[#FDE68A]">
+          <div className="flex items-center gap-2 min-w-0">
+            <div className="w-10 h-10 rounded-xl bg-white/15 border-2 border-[#D4AF37] flex items-center justify-center text-[#FDE68A] shrink-0">
               <Zap className="w-5 h-5" />
             </div>
-            <div>
-              <h2 className="text-sm sm:text-base font-extrabold text-white">البيع المباشر للمستهلك (100%)</h2>
+            <div className="min-w-0">
+              <h2 className="text-sm sm:text-base font-extrabold text-white truncate">
+                البيع المباشر للمستهلك (100%)
+              </h2>
               <p className="text-[11px] font-bold text-[#FDE68A] tabular-nums">
                 الكروت المتاحة: {formatCount(totalAvailableCards, hideNumbers)} كرت
               </p>
@@ -416,48 +372,32 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
 
           <button
             type="button"
-            onClick={async () => {
-              const res = await verifyDeviceBiometric(undefined, 'unified');
-              if (res.verified) {
-                notifySuccess('تم التحقق البيومتري الفوري — جلسة البيع مؤمّنة ✅');
-              } else {
-                notifyWarning(res.errorMessage || 'فعّل الدخول الحيوي من الإعدادات للتحقق السريع');
-              }
-            }}
-            title="تحقق سريع بالبصمة"
-            className="w-10 h-10 rounded-xl gold-btn-3d border-2 border-[#92400E] text-[#0F172A] flex items-center justify-center shrink-0"
+            disabled={isRefreshingInventory}
+            onClick={() => void refreshMyInventory(true)}
+            className="min-h-[38px] px-3 rounded-xl gold-btn-3d border-2 border-[#92400E] text-[#0F172A] text-xs font-extrabold flex items-center justify-center gap-1.5 shrink-0 disabled:opacity-65"
           >
-            <Fingerprint className="w-5 h-5" />
+            <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingInventory ? 'animate-spin' : ''}`} />
+            <span>{isRefreshingInventory ? 'جاري التحديث...' : 'تحديث مخزوني'}</span>
           </button>
         </div>
 
-        {/* Utility Buttons Row */}
-        <div className={`grid gap-2 ${isAdmin ? 'grid-cols-2' : 'grid-cols-1'}`}>
+        {/* Admin Message Template Editor Button */}
+        {isAdmin && (
           <button
             type="button"
-            onClick={() => setShowReturnsModal(true)}
-            className="min-h-[38px] rounded-xl bg-white/15 hover:bg-white/25 border-2 border-[#D4AF37]/80 text-white text-xs font-extrabold flex items-center justify-center gap-1.5"
+            onClick={() => {
+              setTemplateText(resolveDirectSaleTemplate(appSettings.directSaleMessageTemplate));
+              setShowTemplateModal(true);
+            }}
+            className="w-full min-h-[36px] rounded-xl bg-white/15 hover:bg-white/25 border border-[#D4AF37]/80 text-white text-xs font-extrabold flex items-center justify-center gap-1.5"
           >
-            <RotateCcw className="w-3.5 h-3.5 text-[#FDE68A]" />
-            <span>التسليم / المرتجعات</span>
+            <Settings2 className="w-3.5 h-3.5 text-[#FDE68A]" />
+            <span>تحرير صيغة رسالة البيع المباشر</span>
           </button>
-          {isAdmin && (
-            <button
-              type="button"
-              onClick={() => {
-                setTemplateText(resolveDirectSaleTemplate(appSettings.directSaleMessageTemplate));
-                setShowTemplateModal(true);
-              }}
-              className="min-h-[38px] rounded-xl bg-white/15 hover:bg-white/25 border-2 border-[#D4AF37]/80 text-white text-xs font-extrabold flex items-center justify-center gap-1.5"
-            >
-              <Settings2 className="w-3.5 h-3.5 text-[#FDE68A]" />
-              <span>تحرير صيغة الرسالة</span>
-            </button>
-          )}
-        </div>
+        )}
       </div>
 
-      {/* Optional Buyer Quick Bar with Full Official Phonebook Contact Picker — Crisp Navy Borders */}
+      {/* Optional Buyer Quick Bar with Full Official Phonebook Contact Picker */}
       <div className="royal-card-frame rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] p-2.5 grid grid-cols-1 sm:grid-cols-2 gap-2">
         <input
           type="text"
@@ -487,7 +427,7 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
         </div>
       </div>
 
-      {/* Unified 8 Color-Coded Exclusive Package Cards with Vivid True-Color Royal Navy + Gold Confirm Button */}
+      {/* Unified 8 Color-Coded Exclusive Package Cards */}
       <div className="grid grid-cols-2 gap-2">
         {(displayPackages || []).map((pkg) => {
           const qty = cart[pkg.id] || 0;
@@ -513,11 +453,10 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
         })}
       </div>
 
-      {/* NORMAL-FLOW VERTICAL BATCH SUMMARY CARD — Directly below the 8th package (3000 YER), never fixed/sticky */}
+      {/* NORMAL-FLOW VERTICAL BATCH SUMMARY CARD — Directly below the 8th package (3000 YER) */}
       {selectedPackagesCount > 0 && (
         <div className="w-full !mt-[16px] !mb-[28px]">
           <div className="rounded-2xl royal-header-3d border-2 border-[#D4AF37] p-[14px] shadow-2xl flex flex-col gap-[12px]">
-            {/* Top Row: Single clear summary line on right + independent close (×) button on left */}
             <div className="flex items-center justify-between gap-2">
               <div className="text-xs sm:text-sm font-extrabold text-white tabular-nums leading-snug min-w-0">
                 <span className="text-[#FDE68A]">
@@ -537,7 +476,6 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
               </button>
             </div>
 
-            {/* Bottom Row: Full-width confirmation button */}
             <button
               type="button"
               disabled={submitting}
@@ -551,120 +489,7 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
         </div>
       )}
 
-      {/* COLOR-CODED DIRECT SALE HISTORY CARDS (Styled by Denomination 100..3000) */}
-      {recentDirectSales.length > 0 && (
-        <section className="space-y-2.5 pt-1">
-          <div className="flex items-center justify-between px-1">
-            <h3 className="text-xs sm:text-sm font-extrabold text-[#1A365D] dark:text-[#FDE68A]">
-              سجل مبيعات البيع المباشر الأخيرة ({recentDirectSales.length})
-            </h3>
-          </div>
-
-          <div className="space-y-2.5">
-            {recentDirectSales.map((sale) => {
-              const primaryItem = sale.items?.[0];
-              const denomPrice = primaryItem?.price || sale.totalAmount || 100;
-              const pkgTheme = getPackageThemeStyle(denomPrice);
-              const primaryCard = sale.cardNumbers?.[0] || primaryItem?.cardNumbers?.[0] || sale.invoiceNumber || '—';
-              const extraCardsCount = Math.max(0, (sale.cardNumbers?.length || 1) - 1);
-              const statusLabel =
-                sale.status === 'returned'
-                  ? 'مرتجع'
-                  : sale.status === 'cancelled'
-                    ? 'ملغي'
-                    : 'مباع / مفعل';
-
-              return (
-                <div
-                  key={sale.id}
-                  className={`royal-card-frame rounded-2xl bg-white dark:bg-slate-900 border-2 ${pkgTheme.border} overflow-hidden`}
-                >
-                  {/* 1. Colored Top Header Bar per Denomination: Large Card Number + Status Badge */}
-                  <div
-                    className={`bg-gradient-to-l ${pkgTheme.headerBg} px-3.5 py-2 flex items-center justify-between gap-2`}
-                  >
-                    <div className="min-w-0 flex items-center gap-2">
-                      <span
-                        dir="ltr"
-                        className="font-mono text-sm sm:text-base font-extrabold text-white tracking-wider drop-shadow truncate"
-                      >
-                        {hideNumbers ? '••••••••' : primaryCard}
-                      </span>
-                      {extraCardsCount > 0 && (
-                        <span className="px-1.5 py-0.5 rounded-md bg-black/25 border border-white/30 text-[10px] font-extrabold text-[#FDE68A] shrink-0 tabular-nums">
-                          +{extraCardsCount}
-                        </span>
-                      )}
-                    </div>
-                    <span className="px-2 py-0.5 rounded-full bg-white/95 text-[#0F172A] text-[10px] font-extrabold shrink-0 shadow-xs">
-                      {statusLabel}
-                    </span>
-                  </div>
-
-                  {/* 2. Body: Buyer Name & Phone + Package Price/Data + Sale Date & Time */}
-                  <div className="p-3 space-y-2">
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <div className="text-xs sm:text-sm font-extrabold text-slate-900 dark:text-white truncate">
-                          {sale.buyerName || 'زبون مباشر'}
-                        </div>
-                        {sale.buyerPhone && (
-                          <div className="text-[11px] font-bold text-slate-600 dark:text-slate-300 tabular-nums">
-                            {sale.buyerPhone}
-                          </div>
-                        )}
-                      </div>
-                      <div className="text-left shrink-0">
-                        <div className={`text-xs sm:text-sm font-extrabold tabular-nums ${pkgTheme.textAccent}`}>
-                          {primaryItem?.packageLabel || `باقة ${denomPrice} ريال`}
-                        </div>
-                        <div className="text-[11px] font-extrabold text-slate-800 dark:text-slate-200 tabular-nums">
-                          {formatYER(sale.totalAmount, hideNumbers)}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="text-[10.5px] font-bold text-slate-500 dark:text-slate-400 tabular-nums flex items-center justify-between">
-                      <span>التاريخ: {formatDateTimeAr(sale.createdAt)}</span>
-                      <span>فاتورة #{sale.invoiceNumber || sale.id.slice(-6)}</span>
-                    </div>
-
-                    {/* 3. Footer Action Boxes: Details, Edit, Delete */}
-                    <div className="grid grid-cols-3 gap-1.5 pt-1 border-t border-slate-200 dark:border-slate-800">
-                      <button
-                        type="button"
-                        onClick={() => setCompletedSale(sale)}
-                        className="min-h-[34px] rounded-xl bg-[#1A365D] hover:bg-[#142a4a] border border-[#D4AF37] text-white text-[11px] font-extrabold flex items-center justify-center gap-1"
-                      >
-                        <Eye className="w-3.5 h-3.5 text-[#FDE68A]" />
-                        <span>التفاصيل</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => openEditSaleModal(sale)}
-                        className="min-h-[34px] rounded-xl bg-amber-50 dark:bg-amber-950/35 border-2 border-[#D4AF37] text-[#1A365D] dark:text-[#FDE68A] text-[11px] font-extrabold flex items-center justify-center gap-1"
-                      >
-                        <Edit3 className="w-3.5 h-3.5" />
-                        <span>تعديل</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setDeleteSaleTarget(sale)}
-                        className="min-h-[34px] rounded-xl bg-red-50 dark:bg-red-950/40 border-2 border-red-400 dark:border-red-700 text-red-700 dark:text-red-300 text-[11px] font-extrabold flex items-center justify-center gap-1"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                        <span>حذف</span>
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </section>
-      )}
-
-      {/* POST-SALE / DETAILS UNIFIED MESSAGE & INVOICE MODAL */}
+      {/* POST-SALE UNIFIED MESSAGE & INVOICE MODAL */}
       {completedSale && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-3 safe-top safe-bottom overflow-y-auto">
           <div className="w-full max-w-md rounded-3xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] shadow-2xl overflow-hidden my-auto">
@@ -793,104 +618,6 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
         </div>
       )}
 
-      {/* EDIT DIRECT SALE RECORD MODAL */}
-      {editingSale && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4">
-          <form
-            onSubmit={handleSaveSaleEdit}
-            className="w-full max-w-md rounded-3xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] p-5 shadow-2xl space-y-3"
-          >
-            <div className="flex items-center justify-between">
-              <h3 className="text-sm font-extrabold text-[#1A365D] dark:text-[#FDE68A]">
-                تعديل بيانات البيع المباشر #{editingSale.invoiceNumber || editingSale.id.slice(-6)}
-              </h3>
-              <button
-                type="button"
-                onClick={() => setEditingSale(null)}
-                className="p-1.5 rounded-full bg-slate-100 dark:bg-slate-800"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <div>
-              <label className="block text-xs font-extrabold mb-1">اسم الزبون</label>
-              <input
-                type="text"
-                required
-                value={editSaleName}
-                onChange={(e) => setEditSaleName(e.target.value)}
-                className="w-full min-h-[42px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-extrabold mb-1">رقم الهاتف</label>
-              <div className="flex items-center gap-1.5">
-                <input
-                  type="tel"
-                  value={editSalePhone}
-                  onChange={(e) => setEditSalePhone(e.target.value)}
-                  className="flex-1 min-h-[42px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold tabular-nums"
-                />
-                <ContactPickerButton
-                  onSelect={(c) => {
-                    if (c.name) setEditSaleName(c.name);
-                    if (c.phone) setEditSalePhone(c.phone);
-                  }}
-                />
-              </div>
-            </div>
-            <div>
-              <label className="block text-xs font-extrabold mb-1">ملاحظات</label>
-              <textarea
-                rows={2}
-                value={editSaleNotes}
-                onChange={(e) => setEditSaleNotes(e.target.value)}
-                className="w-full rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 p-2.5 text-xs font-bold"
-              />
-            </div>
-            <button
-              type="submit"
-              disabled={busySaleAction}
-              className="w-full min-h-[44px] royal-btn-3d border-2 border-[#D4AF37] text-white text-sm font-extrabold rounded-xl"
-            >
-              {busySaleAction ? 'جاري الحفظ...' : 'حفظ التعديلات'}
-            </button>
-          </form>
-        </div>
-      )}
-
-      {/* DELETE DIRECT SALE CONFIRM MODAL */}
-      {deleteSaleTarget && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4">
-          <div className="w-full max-w-sm rounded-3xl bg-white dark:bg-slate-900 border-2 border-red-500 p-5 shadow-2xl text-center space-y-3">
-            <h3 className="text-base font-extrabold text-red-600">تأكيد حذف عملية البيع</h3>
-            <p className="text-xs font-bold text-slate-600 dark:text-slate-300">
-              هل أنت متأكد من حذف عملية البيع المباشر للزبون <strong>{deleteSaleTarget.buyerName}</strong> بقيمة{' '}
-              <strong>{formatYER(deleteSaleTarget.totalAmount)}</strong>؟
-            </p>
-            <div className="grid grid-cols-2 gap-2 pt-2">
-              <button
-                type="button"
-                onClick={() => setDeleteSaleTarget(null)}
-                className="min-h-[42px] rounded-xl bg-slate-100 dark:bg-slate-800 border-2 border-slate-300 dark:border-slate-600 text-xs font-extrabold"
-              >
-                إلغاء
-              </button>
-              <button
-                type="button"
-                onClick={async () => {
-                  await deleteSaleRecord(deleteSaleTarget.id);
-                  setDeleteSaleTarget(null);
-                }}
-                className="min-h-[42px] rounded-xl bg-red-600 text-white text-xs font-extrabold"
-              >
-                نعم، حذف نهائي
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* MESSAGE TEMPLATE EDITOR MODAL */}
       {showTemplateModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4">
@@ -931,64 +658,6 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
               <Save className="w-4 h-4 text-[#FDE68A]" />
               حفظ صيغة الرسالة
             </button>
-          </div>
-        </div>
-      )}
-
-      {/* DIRECT SALE RETURNS MODAL */}
-      {showReturnsModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-3 safe-top safe-bottom">
-          <div className="w-full max-w-md rounded-3xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] shadow-2xl overflow-hidden max-h-[85dvh] flex flex-col">
-            <div className="royal-header-3d px-4 py-3 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <div className="w-9 h-9 rounded-full bg-[#061124] border-2 border-[#D4AF37] p-0.5 flex items-center justify-center overflow-hidden shrink-0">
-                  <img src={TAIBAH_ASSETS.logo} alt="طيبة نت" className="w-full h-full rounded-full object-contain" />
-                </div>
-                <h3 className="text-sm font-extrabold text-white">سجل التسليم والمرتجعات المباشرة</h3>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowReturnsModal(false)}
-                className="w-8 h-8 rounded-full bg-white/15 text-white flex items-center justify-center"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <div className="flex-1 overflow-y-auto p-3.5 space-y-2">
-              {recentDirectSales.length === 0 ? (
-                <p className="text-center text-xs font-bold text-slate-500 py-6">
-                  لا توجد مبيعات مباشرة مسجلة بعد (0)
-                </p>
-              ) : (
-                recentDirectSales.map((s) => (
-                  <div
-                    key={s.id}
-                    className="rounded-xl border-2 border-slate-300 dark:border-slate-700 p-3 space-y-2"
-                  >
-                    <div className="flex items-center justify-between text-xs font-extrabold">
-                      <span>{s.buyerName} ({s.invoiceNumber})</span>
-                      <span className="tabular-nums text-[#1A365D] dark:text-[#FDE68A]">
-                        {formatYER(s.totalAmount)}
-                      </span>
-                    </div>
-                    <div className="flex flex-wrap gap-1.5">
-                      {(s.items || []).map((item) => (
-                        <button
-                          key={item.packageId}
-                          type="button"
-                          disabled={item.quantity - (item.returned || 0) <= 0}
-                          onClick={() => processSaleReturn(s, item.packageId, 1)}
-                          className="min-h-[32px] px-2.5 rounded-lg bg-amber-100 dark:bg-amber-900/40 border border-amber-400 text-amber-900 dark:text-amber-200 text-[11px] font-extrabold flex items-center gap-1 disabled:opacity-40"
-                        >
-                          <RotateCcw className="w-3 h-3" />
-                          إرجاع 1 من {item.price} ر.ي
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
           </div>
         </div>
       )}
