@@ -17,6 +17,7 @@ import {
   X,
 } from 'lucide-react';
 import { useFirebase } from '../contexts/FirebaseContext';
+import { useDebounce } from '../hooks/useDebounce';
 import { useFeedback } from '../lib/feedback';
 import {
   exportAsArabicPDF,
@@ -193,6 +194,7 @@ export const SalesListScreen: React.FC<SalesListScreenProps> = ({ hideNumbers, o
   const [dateFilter, setDateFilter] = useState<DateFilter>('all');
   const [typeFilter, setTypeFilter] = useState<TypeFilter>('all');
   const [searchTerm, setSearchTerm] = useState('');
+  const debouncedSearchTerm = useDebounce(searchTerm, 180);
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
 
@@ -230,8 +232,8 @@ export const SalesListScreen: React.FC<SalesListScreenProps> = ({ hideNumbers, o
         }
       }
 
-      if (searchTerm.trim()) {
-        const q = searchTerm.trim().toLowerCase();
+      if (debouncedSearchTerm.trim()) {
+        const q = debouncedSearchTerm.trim().toLowerCase();
         const match =
           s.buyerName.toLowerCase().includes(q) ||
           (s.buyerPhone || '').includes(q) ||
@@ -242,7 +244,7 @@ export const SalesListScreen: React.FC<SalesListScreenProps> = ({ hideNumbers, o
 
       return true;
     });
-  }, [sales, typeFilter, dateFilter, fromDate, toDate, searchTerm]);
+  }, [sales, typeFilter, dateFilter, fromDate, toDate, debouncedSearchTerm]);
 
   const totalSoldCards = useMemo(
     () => filteredSales.reduce((acc, s) => acc + (Number(s.totalCards) || 0), 0),
@@ -407,10 +409,17 @@ export const SalesListScreen: React.FC<SalesListScreenProps> = ({ hideNumbers, o
           <input
             type="text"
             autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="none"
+            spellCheck={false}
+            dir="auto"
+            enterKeyHint="search"
+            data-lpignore="true"
+            data-form-type="other"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             placeholder="بحث باسم العميل، رقم الهاتف، أو رقم الفاتورة..."
-            className="w-full min-h-[42px] rounded-xl border-2 border-[#1A365D]/70 dark:border-[#60A5FA]/70 bg-slate-50 dark:bg-slate-800 pr-9 pl-3 text-xs font-extrabold shadow-xs focus:border-[#D4AF37] focus:outline-none"
+            className="w-full min-h-[42px] rounded-xl border-2 border-[#1A365D]/70 dark:border-[#60A5FA]/70 bg-slate-50 dark:bg-slate-800 pr-9 pl-3 text-base sm:text-sm font-extrabold shadow-xs focus:border-[#D4AF37] focus:outline-none"
           />
         </div>
         {dateFilter === 'range' && (

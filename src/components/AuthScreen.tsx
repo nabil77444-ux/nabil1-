@@ -87,12 +87,268 @@ function readSavedIdentifierOnce(): string {
   }
 }
 
-export const AuthScreen: React.FC<AuthScreenProps> = ({
+/**
+ * Isolated Password Eye Button:
+ * Mutates `inputRef.current.type` directly in DOM with `onMouseDown={(e) => e.preventDefault()}`
+ * so toggling visibility NEVER steals focus, NEVER closes/reopens the Android keyboard,
+ * and NEVER re-renders the login form or AuthScreen.
+ */
+const PasswordEyeToggle = React.memo(function PasswordEyeToggle({
+  inputRef,
+}: {
+  inputRef: React.MutableRefObject<HTMLInputElement | null>;
+}) {
+  const [visible, setVisible] = useState(false);
+
+  const handleToggle = useCallback(() => {
+    const next = !visible;
+    setVisible(next);
+    if (inputRef.current) {
+      inputRef.current.type = next ? 'text' : 'password';
+    }
+  }, [inputRef, visible]);
+
+  return (
+    <button
+      type="button"
+      tabIndex={-1}
+      onMouseDown={(e) => e.preventDefault()}
+      onClick={handleToggle}
+      className="absolute left-1.5 top-1/2 -translate-y-1/2 p-1.5 text-slate-600 dark:text-slate-300"
+      aria-label={visible ? 'إخفاء كلمة المرور' : 'إظهار كلمة المرور'}
+    >
+      {visible ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+    </button>
+  );
+});
+
+interface IsolatedLoginFormProps {
+  initialSavedId: string;
+  identifierRef: React.MutableRefObject<HTMLInputElement | null>;
+  passwordRef: React.MutableRefObject<HTMLInputElement | null>;
+  saveUsernameRef: React.MutableRefObject<boolean>;
+  submitting: boolean;
+  bioBusy: boolean;
+  hasAnyBioEnabled: boolean;
+  networkRetryError: string | null;
+  showAdminSetupBtn: boolean;
+  onSubmitForm: (e: React.FormEvent) => void;
+  onRetryLogin: () => void;
+  onUnifiedBiometric: () => void;
+  onFirstTimeAdminSetup: () => void;
+  onOpenReset: () => void;
+  onOpenRegister: () => void;
+  onContactPicked: (phone: string) => void;
+}
+
+/**
+ * Fully Isolated Uncontrolled Login Form (`React.memo`):
+ * - ZERO `onChange` / `onBlur` state updates while typing
+ * - ZERO `trim()`, Arabic-digit conversion, validation, or `localStorage` reads per keystroke
+ * - Guaranteed 0 React re-renders during typing for instant 60fps input on Android 6+ & Samsung/Xiaomi WebViews
+ */
+const IsolatedLoginForm = React.memo(function IsolatedLoginForm({
+  initialSavedId,
+  identifierRef,
+  passwordRef,
+  saveUsernameRef,
+  submitting,
+  bioBusy,
+  hasAnyBioEnabled,
+  networkRetryError,
+  showAdminSetupBtn,
+  onSubmitForm,
+  onRetryLogin,
+  onUnifiedBiometric,
+  onFirstTimeAdminSetup,
+  onOpenReset,
+  onOpenRegister,
+  onContactPicked,
+}: IsolatedLoginFormProps) {
+  const [saveUsernameChecked, setSaveUsernameChecked] = useState(() => Boolean(initialSavedId));
+
+  // Populate saved username ONCE on mount via ref (never bound to React state!)
+  useEffect(() => {
+    if (initialSavedId && identifierRef.current && !identifierRef.current.value) {
+      identifierRef.current.value = initialSavedId;
+    }
+  }, [initialSavedId, identifierRef]);
+
+  return (
+    <form onSubmit={onSubmitForm} className="space-y-2.5" autoComplete="off" noValidate>
+      <div>
+        <label
+          htmlFor="taibah-login-id"
+          className="block text-[11.5px] font-extrabold text-slate-800 dark:text-slate-200 mb-1"
+        >
+          البريد الإلكتروني أو رقم الهاتف
+        </label>
+        <div className="relative flex items-center gap-1.5">
+          <div className="relative flex-1">
+            <Phone className="w-4 h-4 text-slate-500 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <input
+              id="taibah-login-id"
+              name="taibah_user_id"
+              ref={identifierRef}
+              type="text"
+              defaultValue={initialSavedId}
+              placeholder="772466998 أو nabil77444@gmail.com"
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="none"
+              spellCheck={false}
+              dir="auto"
+              enterKeyHint="next"
+              data-lpignore="true"
+              data-form-type="other"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  passwordRef.current?.focus();
+                }
+              }}
+              className="w-full min-h-[44px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 pr-9 pl-3 text-base font-bold text-slate-900 dark:text-white placeholder:text-slate-400 focus:border-[#D4AF37] focus:outline-none"
+            />
+          </div>
+          <ContactPickerButton
+            unauthenticated
+            className="min-h-[44px] min-w-[44px] rounded-xl border-2 border-[#D4AF37] bg-[#1A365D] text-[#FDE68A] flex items-center justify-center shrink-0"
+            onSelect={(picked) => {
+              if (picked.phone && identifierRef.current) {
+                identifierRef.current.value = picked.phone;
+                onContactPicked(picked.phone);
+              }
+            }}
+          />
+        </div>
+      </div>
+
+      <div>
+        <label
+          htmlFor="taibah-login-pwd"
+          className="block text-[11.5px] font-extrabold text-slate-800 dark:text-slate-200 mb-1"
+        >
+          كلمة المرور
+        </label>
+        <div className="relative">
+          <input
+            id="taibah-login-pwd"
+            name="taibah_user_secret"
+            ref={passwordRef}
+            type="password"
+            defaultValue=""
+            placeholder="أدخل كلمة المرور"
+            autoComplete="new-password"
+            autoCorrect="off"
+            autoCapitalize="none"
+            spellCheck={false}
+            dir="auto"
+            enterKeyHint="done"
+            data-lpignore="true"
+            data-form-type="other"
+            className="w-full min-h-[44px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 pr-3 pl-10 text-base font-bold text-slate-900 dark:text-white placeholder:text-slate-400 focus:border-[#D4AF37] focus:outline-none"
+          />
+          <PasswordEyeToggle inputRef={passwordRef} />
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between gap-2 text-[11.5px] font-extrabold text-slate-700 dark:text-slate-300">
+        <label className="flex items-center gap-1.5 cursor-pointer select-none min-h-[30px]">
+          <input
+            type="checkbox"
+            checked={saveUsernameChecked}
+            onChange={(e) => {
+              const checked = e.target.checked;
+              saveUsernameRef.current = checked;
+              setSaveUsernameChecked(checked);
+            }}
+            className="w-4 h-4 rounded accent-[#1A365D]"
+          />
+          <span>حفظ اسم المستخدم فقط</span>
+        </label>
+        <button
+          type="button"
+          onClick={onOpenReset}
+          className="text-slate-600 dark:text-slate-400 hover:text-red-600 dark:hover:text-red-400 py-0.5"
+        >
+          نسيت كلمة المرور؟
+        </button>
+      </div>
+
+      {networkRetryError && (
+        <div className="rounded-xl bg-red-50 dark:bg-red-950/50 border-2 border-red-400 dark:border-red-700 p-2.5 space-y-2">
+          <p className="text-[11px] font-extrabold text-red-700 dark:text-red-300 leading-snug">
+            {networkRetryError}
+          </p>
+          <button
+            type="button"
+            disabled={submitting}
+            onClick={onRetryLogin}
+            className="w-full min-h-[36px] rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-extrabold flex items-center justify-center gap-1.5 disabled:opacity-60"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${submitting ? 'animate-spin' : ''}`} />
+            <span>إعادة المحاولة الآن</span>
+          </button>
+        </div>
+      )}
+
+      {/* Primary Password Login Button */}
+      <button
+        type="submit"
+        disabled={submitting}
+        className="w-full min-h-[44px] bg-[#1A365D] active:bg-[#0F172A] border-2 border-[#D4AF37] text-white font-extrabold text-xs sm:text-sm rounded-xl flex items-center justify-center gap-2 disabled:opacity-60 shadow-sm"
+      >
+        <LogIn className="w-4 h-4 text-[#FDE68A]" />
+        <span>{submitting ? 'جاري التحقق والتفعيل...' : 'تسجيل الدخول بكلمة المرور'}</span>
+      </button>
+
+      {/* ONE Unified Native Android BiometricPrompt Button (Fingerprint + Face + Device PIN) */}
+      <button
+        type="button"
+        disabled={submitting || bioBusy}
+        onClick={onUnifiedBiometric}
+        className={`w-full min-h-[44px] rounded-xl px-3 text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2 border-2 border-[#D4AF37] shadow-sm disabled:opacity-65 ${
+          hasAnyBioEnabled
+            ? 'bg-emerald-600 active:bg-emerald-700 text-white'
+            : 'bg-[#D4AF37] active:bg-[#B4860B] text-[#0F172A]'
+        }`}
+        aria-label="الدخول بالبصمة أو الوجه أو رمز الجهاز"
+      >
+        <Fingerprint className="w-4 h-4 shrink-0" />
+        <span>{bioBusy ? 'جاري التحقق الحيوي...' : 'الدخول بالبصمة / الوجه / رمز الجهاز'}</span>
+      </button>
+
+      {showAdminSetupBtn && (
+        <button
+          type="button"
+          disabled={submitting}
+          onClick={onFirstTimeAdminSetup}
+          className="w-full min-h-[36px] rounded-xl border-2 border-dashed border-[#D4AF37] bg-amber-50 dark:bg-amber-950/40 text-[11px] font-extrabold text-[#1A365D] dark:text-[#FDE68A] flex items-center justify-center gap-1.5"
+        >
+          <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
+          <span>أول دخول للمدير الأساسي؟ تفعيل حساب الإدارة الآن</span>
+        </button>
+      )}
+
+      <div className="pt-1.5 border-t-2 border-slate-200 dark:border-slate-800 flex items-center justify-center text-[11.5px] font-extrabold">
+        <button
+          type="button"
+          onClick={onOpenRegister}
+          className="text-[#1A365D] dark:text-[#FDE68A] hover:underline py-0.5"
+        >
+          ليس لديك حساب؟ طلب فتح حساب وكيل / عميل جديد
+        </button>
+      </div>
+    </form>
+  );
+});
+
+export const AuthScreen: React.FC<AuthScreenProps> = React.memo(function AuthScreen({
   isDark,
   onToggleTheme,
   sessionUnlocked,
   onUnlockSession,
-}) => {
+}: AuthScreenProps) {
   const { notifySuccess, notifyError, notifyWarning, notifyInfo } = useFeedback();
   const {
     firebaseUser,
@@ -107,20 +363,20 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
 
   const initialSavedId = useRef<string>(readSavedIdentifierOnce());
 
-  // Uncontrolled input refs — ZERO setState / localStorage / regex per keystroke (eliminates Samsung Keyboard lag!)
+  // Uncontrolled input refs — ZERO setState / localStorage / regex per keystroke
   const identifierRef = useRef<HTMLInputElement | null>(null);
   const passwordRef = useRef<HTMLInputElement | null>(null);
+  const saveUsernameRef = useRef<boolean>(Boolean(initialSavedId.current));
   const regNameRef = useRef<HTMLInputElement | null>(null);
   const regPhoneRef = useRef<HTMLInputElement | null>(null);
   const regEmailRef = useRef<HTMLInputElement | null>(null);
   const regPasswordRef = useRef<HTMLInputElement | null>(null);
   const resetIdentifierRef = useRef<HTMLInputElement | null>(null);
   const resetNameRef = useRef<HTMLInputElement | null>(null);
+  const pinInputRef = useRef<HTMLInputElement | null>(null);
   const autoBiometricTriedRef = useRef(false);
 
   const [view, setView] = useState<AuthView>('login');
-  const [showPassword, setShowPassword] = useState(false);
-  const [saveUsername, setSaveUsername] = useState(() => Boolean(initialSavedId.current));
   const [submitting, setSubmitting] = useState(false);
   const [emailAuthDisabledError, setEmailAuthDisabledError] = useState(false);
   const [networkRetryError, setNetworkRetryError] = useState<string | null>(null);
@@ -135,7 +391,6 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
   const [bioStatus, setBioStatus] = useState(() => getBiometricMethodStatus());
   const [bioBusy, setBioBusy] = useState(false);
   const [showPinModal, setShowPinModal] = useState(false);
-  const [pinInput, setPinInput] = useState('');
 
   useEffect(() => {
     resetBiometricPromptLock();
@@ -232,10 +487,13 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
     }, 20000);
 
     const { email: normalizedEmail, phone: normalizedPhone, isPhoneLogin } = normalizeAuthIdentifier(cleanId);
+    if (isSuperAdminEmail(normalizedEmail)) {
+      setShowAdminSetupBtn(true);
+    }
 
     try {
       try {
-        if (saveUsername) {
+        if (saveUsernameRef.current) {
           localStorage.setItem(SAVED_IDENTIFIER_KEY, cleanId);
         } else {
           localStorage.removeItem(SAVED_IDENTIFIER_KEY);
@@ -776,7 +1034,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
       try {
         const result = await verifyDeviceBiometric(undefined, 'unified');
         if (result.requiresPin) {
-          setPinInput('');
+          if (pinInputRef.current) pinInputRef.current.value = '';
           setShowPinModal(true);
           return;
         }
@@ -818,8 +1076,10 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
 
   const handlePinConfirm = async (e: React.FormEvent) => {
     e.preventDefault();
-    const res = await verifyDeviceBiometric(pinInput.trim(), 'unified');
+    const rawPin = normalizeDigits(pinInputRef.current?.value || '').trim();
+    const res = await verifyDeviceBiometric(rawPin, 'unified');
     if (res.verified && res.enrollment) {
+      if (pinInputRef.current) pinInputRef.current.value = '';
       setShowPinModal(false);
       await completeUnifiedBiometricSignIn(
         res.enrollment.displayName,
@@ -830,6 +1090,18 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
       notifyWarning('الرمز غير مطابق', res.errorMessage || 'يرجى التأكد من الرمز والمحاولة مجدداً.');
     }
   };
+
+  const handleOpenReset = useCallback(() => setView('reset'), []);
+  const handleOpenRegister = useCallback(() => setView('register'), []);
+  const handleRetryLogin = useCallback(() => {
+    void executeLoginFlow(identifierRef.current?.value || '', passwordRef.current?.value || '');
+  }, []);
+  const handleUnifiedBioClick = useCallback(() => {
+    void handleUnifiedBiometricLogin(false);
+  }, [handleUnifiedBiometricLogin]);
+  const handleContactPicked = useCallback((phone: string) => {
+    setShowAdminSetupBtn(isSuperAdminEmail(normalizeAuthIdentifier(phone).email));
+  }, []);
 
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1173,23 +1445,23 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
   return (
     <div
       dir="rtl"
-      className="taibah-app-frame min-h-[100dvh] h-[100dvh] w-full overflow-y-auto flex flex-col items-center justify-between bg-gradient-to-br from-slate-100 via-blue-50 to-slate-200 dark:from-[#0B1220] dark:via-[#0F172A] dark:to-[#1A365D] px-3.5 pt-[calc(env(safe-area-inset-top,0px)+10px)] pb-[calc(env(safe-area-inset-bottom,0px)+14px)] relative"
+      className="taibah-app-frame min-h-[100dvh] w-full overflow-y-auto flex flex-col items-center justify-between bg-slate-100 dark:bg-[#0B1220] px-3.5 pt-[calc(env(safe-area-inset-top,0px)+10px)] pb-[calc(env(safe-area-inset-bottom,0px)+14px)] relative"
     >
       {/* Theme Toggle floating corner */}
       <button
         type="button"
         onClick={onToggleTheme}
         aria-label={isDark ? 'التبديل للوضع النهاري' : 'التبديل للوضع الليلي'}
-        className="fixed top-[calc(env(safe-area-inset-top,0px)+12px)] left-3.5 z-20 w-9 h-9 rounded-full bg-white dark:bg-slate-800 border-2 border-[#D4AF37] text-[#1A365D] dark:text-[#FDE68A] shadow-lg flex items-center justify-center active:scale-95 transition-transform"
+        className="fixed top-[calc(env(safe-area-inset-top,0px)+12px)] left-3.5 z-20 w-9 h-9 rounded-full bg-white dark:bg-slate-800 border-2 border-[#D4AF37] text-[#1A365D] dark:text-[#FDE68A] shadow-sm flex items-center justify-center"
       >
         {isDark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
       </button>
 
-      {/* Main Centered Compact Auth Card — 100% locked inside viewport with zero scroll */}
-      <div className="w-full max-w-md my-auto flex flex-col justify-center min-h-0">
+      {/* Main Centered Compact Auth Card — ultra-lightweight DOM for 60fps Android WebView typing */}
+      <div className="w-full max-w-md my-auto flex flex-col justify-center">
         {/* Royal Brand Card Header */}
-        <div className="rounded-t-3xl royal-header-3d px-4 pt-3.5 pb-3 text-center border-x-2 border-t-2 border-[#D4AF37]">
-          <div className="w-14 h-14 sm:w-16 sm:h-16 rounded-full mx-auto p-0.5 bg-gradient-to-tr from-[#B4860B] via-[#FDE68A] to-[#D4AF37] shadow-xl">
+        <div className="rounded-t-2xl bg-[#1A365D] px-4 pt-3.5 pb-3 text-center border-x-2 border-t-2 border-[#D4AF37]">
+          <div className="w-14 h-14 sm:w-16 sm:h-16 rounded-full mx-auto p-0.5 bg-[#D4AF37] shadow-sm">
             <div className="w-full h-full rounded-full bg-[#061124] flex items-center justify-center overflow-hidden p-1">
               <img
                 src={TAIBAH_ASSETS.logo}
@@ -1207,14 +1479,14 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
           </p>
         </div>
 
-        {/* Main 3D Card Body */}
-        <div className="rounded-b-3xl bg-white dark:bg-slate-900 border-x-2 border-b-2 border-[#D4AF37] px-4 py-3.5 shadow-2xl">
+        {/* Lightweight Card Body (zero backdrop-blur / shadow-2xl / GPU layer churn) */}
+        <div className="rounded-b-2xl bg-white dark:bg-slate-900 border-x-2 border-b-2 border-[#D4AF37] px-4 py-3.5 shadow-sm">
           {/* Segmented Mode Tabs */}
           <div className="grid grid-cols-3 gap-1 p-1 rounded-2xl bg-slate-100 dark:bg-slate-800 border-2 border-slate-300 dark:border-slate-700 mb-3">
             <button
               type="button"
               onClick={() => setView('login')}
-              className={`min-h-[34px] rounded-xl text-xs font-extrabold transition-all flex items-center justify-center gap-1 whitespace-nowrap ${
+              className={`min-h-[34px] rounded-xl text-xs font-extrabold flex items-center justify-center gap-1 whitespace-nowrap ${
                 view === 'login'
                   ? 'bg-[#1A365D] text-white border border-[#D4AF37] shadow-sm'
                   : 'text-slate-700 dark:text-slate-300'
@@ -1226,7 +1498,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
             <button
               type="button"
               onClick={() => setView('register')}
-              className={`min-h-[34px] rounded-xl text-xs font-extrabold transition-all flex items-center justify-center gap-1 whitespace-nowrap ${
+              className={`min-h-[34px] rounded-xl text-xs font-extrabold flex items-center justify-center gap-1 whitespace-nowrap ${
                 view === 'register'
                   ? 'bg-[#1A365D] text-white border border-[#D4AF37] shadow-sm'
                   : 'text-slate-700 dark:text-slate-300'
@@ -1238,7 +1510,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
             <button
               type="button"
               onClick={() => setView('reset')}
-              className={`min-h-[34px] rounded-xl text-xs font-extrabold transition-all flex items-center justify-center gap-1 whitespace-nowrap ${
+              className={`min-h-[34px] rounded-xl text-xs font-extrabold flex items-center justify-center gap-1 whitespace-nowrap ${
                 view === 'reset'
                   ? 'bg-[#1A365D] text-white border border-[#D4AF37] shadow-sm'
                   : 'text-slate-700 dark:text-slate-300'
@@ -1269,171 +1541,36 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
             </div>
           )}
 
-          {/* VIEW 1: LOGIN (Uncontrolled useRef inputs -> ZERO Samsung/Android keyboard lag!) */}
+          {/* VIEW 1: ISOLATED UNCONTROLLED LOGIN FORM (0 React re-renders while typing!) */}
           {view === 'login' && (
-            <form onSubmit={handleLogin} className="space-y-2.5">
-              <div>
-                <label className="block text-[11.5px] font-extrabold text-slate-800 dark:text-slate-200 mb-1">
-                  البريد الإلكتروني أو رقم الهاتف
-                </label>
-                <div className="relative flex items-center gap-1.5">
-                  <div className="relative flex-1">
-                    <Phone className="w-4 h-4 text-slate-500 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                    <input
-                      ref={identifierRef}
-                      type="text"
-                      defaultValue={initialSavedId.current}
-                      onBlur={(e) => {
-                        const isAdm = isSuperAdminEmail(normalizeAuthIdentifier(e.currentTarget.value).email);
-                        if (isAdm !== showAdminSetupBtn) setShowAdminSetupBtn(isAdm);
-                      }}
-                      placeholder="772466998 أو nabil77444@gmail.com"
-                      autoComplete="username"
-                      autoCapitalize="none"
-                      autoCorrect="off"
-                      spellCheck={false}
-                      className="w-full min-h-[42px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 pr-9 pl-3 text-xs sm:text-sm font-bold text-slate-900 dark:text-white placeholder:text-slate-400 focus:border-[#D4AF37] focus:outline-none transition-colors"
-                    />
-                  </div>
-                  <ContactPickerButton
-                    unauthenticated
-                    className="min-h-[42px] min-w-[42px] rounded-xl border-2 border-[#D4AF37] bg-[#1A365D] text-[#FDE68A] flex items-center justify-center active:scale-95 transition-transform shrink-0"
-                    onSelect={(picked) => {
-                      if (picked.phone && identifierRef.current) {
-                        identifierRef.current.value = picked.phone;
-                        setShowAdminSetupBtn(isSuperAdminEmail(normalizeAuthIdentifier(picked.phone).email));
-                      }
-                    }}
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-[11.5px] font-extrabold text-slate-800 dark:text-slate-200 mb-1">
-                  كلمة المرور
-                </label>
-                <div className="relative">
-                  <input
-                    ref={passwordRef}
-                    type={showPassword ? 'text' : 'password'}
-                    defaultValue=""
-                    placeholder="أدخل كلمة المرور"
-                    autoComplete="current-password"
-                    autoCapitalize="none"
-                    autoCorrect="off"
-                    spellCheck={false}
-                    className="w-full min-h-[42px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 pr-3 pl-10 text-xs sm:text-sm font-bold text-slate-900 dark:text-white placeholder:text-slate-400 focus:border-[#D4AF37] focus:outline-none transition-colors"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowPassword((v) => !v)}
-                    className="absolute left-1.5 top-1/2 -translate-y-1/2 p-1.5 text-slate-600 dark:text-slate-300"
-                    aria-label={showPassword ? 'إخفاء كلمة المرور' : 'إظهار كلمة المرور'}
-                  >
-                    {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                  </button>
-                </div>
-              </div>
-
-              <div className="flex items-center justify-between gap-2 text-[11.5px] font-extrabold text-slate-700 dark:text-slate-300">
-                <label className="flex items-center gap-1.5 cursor-pointer select-none min-h-[30px]">
-                  <input
-                    type="checkbox"
-                    checked={saveUsername}
-                    onChange={(e) => setSaveUsername(e.target.checked)}
-                    className="w-4 h-4 rounded accent-[#1A365D]"
-                  />
-                  <span>حفظ اسم المستخدم فقط</span>
-                </label>
-                <button
-                  type="button"
-                  onClick={() => setView('reset')}
-                  className="text-slate-600 dark:text-slate-400 hover:text-red-600 dark:hover:text-red-400 py-0.5"
-                >
-                  نسيت كلمة المرور؟
-                </button>
-              </div>
-
-              {networkRetryError && (
-                <div className="rounded-xl bg-red-50 dark:bg-red-950/50 border-2 border-red-400 dark:border-red-700 p-2.5 space-y-2">
-                  <p className="text-[11px] font-extrabold text-red-700 dark:text-red-300 leading-snug">
-                    {networkRetryError}
-                  </p>
-                  <button
-                    type="button"
-                    disabled={submitting}
-                    onClick={() =>
-                      void executeLoginFlow(
-                        identifierRef.current?.value || '',
-                        passwordRef.current?.value || ''
-                      )
-                    }
-                    className="w-full min-h-[36px] rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-extrabold flex items-center justify-center gap-1.5 disabled:opacity-60"
-                  >
-                    <RefreshCw className={`w-3.5 h-3.5 ${submitting ? 'animate-spin' : ''}`} />
-                    <span>إعادة المحاولة الآن</span>
-                  </button>
-                </div>
-              )}
-
-              {/* Primary Password Login Button */}
-              <button
-                type="submit"
-                disabled={submitting}
-                className="w-full min-h-[44px] royal-btn-3d border-2 border-[#D4AF37] text-white font-extrabold text-xs sm:text-sm rounded-xl flex items-center justify-center gap-2 disabled:opacity-60"
-              >
-                <LogIn className="w-4 h-4 text-[#FDE68A]" />
-                <span>{submitting ? 'جاري التحقق والتفعيل...' : 'تسجيل الدخول بكلمة المرور'}</span>
-              </button>
-
-              {/* ONE Unified Native Android BiometricPrompt Button (Fingerprint + Face + Device PIN) */}
-              <button
-                type="button"
-                disabled={submitting || bioBusy}
-                onClick={() => void handleUnifiedBiometricLogin(false)}
-                className={`w-full min-h-[44px] rounded-xl px-3 text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2 transition-transform active:scale-[0.98] border-2 border-[#D4AF37] shadow-md disabled:opacity-65 ${
-                  bioStatus.hasAnyEnabled
-                    ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
-                    : 'gold-btn-3d text-[#0F172A]'
-                }`}
-                aria-label="الدخول بالبصمة أو الوجه أو رمز الجهاز"
-              >
-                <Fingerprint className="w-4 h-4 shrink-0" />
-                <span>{bioBusy ? 'جاري التحقق الحيوي...' : 'الدخول بالبصمة / الوجه / رمز الجهاز'}</span>
-              </button>
-
-              {showAdminSetupBtn && (
-                <button
-                  type="button"
-                  disabled={submitting}
-                  onClick={handleFirstTimeAdminSetup}
-                  className="w-full min-h-[36px] rounded-xl border-2 border-dashed border-[#D4AF37] bg-amber-50/75 dark:bg-amber-950/25 text-[11px] font-extrabold text-[#1A365D] dark:text-[#FDE68A] flex items-center justify-center gap-1.5"
-                >
-                  <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
-                  <span>أول دخول للمدير الأساسي؟ تفعيل حساب الإدارة الآن</span>
-                </button>
-              )}
-
-              <div className="pt-1.5 border-t-2 border-slate-200 dark:border-slate-800 flex items-center justify-center text-[11.5px] font-extrabold">
-                <button
-                  type="button"
-                  onClick={() => setView('register')}
-                  className="text-[#1A365D] dark:text-[#FDE68A] hover:underline py-0.5"
-                >
-                  ليس لديك حساب؟ طلب فتح حساب وكيل / عميل جديد
-                </button>
-              </div>
-            </form>
+            <IsolatedLoginForm
+              initialSavedId={initialSavedId.current}
+              identifierRef={identifierRef}
+              passwordRef={passwordRef}
+              saveUsernameRef={saveUsernameRef}
+              submitting={submitting}
+              bioBusy={bioBusy}
+              hasAnyBioEnabled={bioStatus.hasAnyEnabled}
+              networkRetryError={networkRetryError}
+              showAdminSetupBtn={showAdminSetupBtn}
+              onSubmitForm={handleLogin}
+              onRetryLogin={handleRetryLogin}
+              onUnifiedBiometric={handleUnifiedBioClick}
+              onFirstTimeAdminSetup={handleFirstTimeAdminSetup}
+              onOpenReset={handleOpenReset}
+              onOpenRegister={handleOpenRegister}
+              onContactPicked={handleContactPicked}
+            />
           )}
 
-          {/* VIEW 2: REGISTER NEW ACCOUNT (ZERO DISCOUNT % SHOWN, Uncontrolled refs) */}
+          {/* VIEW 2: REGISTER NEW ACCOUNT (ZERO DISCOUNT % SHOWN, Uncontrolled refs + safe keyboard attrs) */}
           {view === 'register' && (
-            <form onSubmit={handleRegister} className="space-y-2">
+            <form onSubmit={handleRegister} className="space-y-2" autoComplete="off">
               <div className="grid grid-cols-2 gap-1.5">
                 <button
                   type="button"
                   onClick={() => setRegRole('client')}
-                  className={`min-h-[38px] rounded-xl border-2 text-[11.5px] font-extrabold flex items-center justify-center gap-1 transition-all ${
+                  className={`min-h-[38px] rounded-xl border-2 text-[11.5px] font-extrabold flex items-center justify-center gap-1 ${
                     regRole === 'client'
                       ? 'border-[#D4AF37] bg-[#1A365D] text-white shadow-sm'
                       : 'border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
@@ -1445,7 +1582,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                 <button
                   type="button"
                   onClick={() => setRegRole('agent')}
-                  className={`min-h-[38px] rounded-xl border-2 text-[11.5px] font-extrabold flex items-center justify-center gap-1 transition-all ${
+                  className={`min-h-[38px] rounded-xl border-2 text-[11.5px] font-extrabold flex items-center justify-center gap-1 ${
                     regRole === 'agent'
                       ? 'border-[#D4AF37] bg-[#1A365D] text-white shadow-sm'
                       : 'border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
@@ -1462,7 +1599,15 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                 required
                 defaultValue=""
                 placeholder="الاسم الكامل / اسم المحل"
-                className="w-full min-h-[39px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold text-slate-900 dark:text-white focus:border-[#D4AF37] focus:outline-none"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="none"
+                spellCheck={false}
+                dir="auto"
+                enterKeyHint="next"
+                data-lpignore="true"
+                data-form-type="other"
+                className="w-full min-h-[42px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-base font-bold text-slate-900 dark:text-white focus:border-[#D4AF37] focus:outline-none"
               />
 
               <div className="flex items-center gap-1.5">
@@ -1472,11 +1617,19 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                   required
                   defaultValue=""
                   placeholder="رقم الهاتف (77xxxxxxx)"
-                  className="flex-1 min-h-[39px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold text-slate-900 dark:text-white focus:border-[#D4AF37] focus:outline-none tabular-nums"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  dir="auto"
+                  enterKeyHint="next"
+                  data-lpignore="true"
+                  data-form-type="other"
+                  className="flex-1 min-h-[42px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-base font-bold text-slate-900 dark:text-white focus:border-[#D4AF37] focus:outline-none tabular-nums"
                 />
                 <ContactPickerButton
                   unauthenticated
-                  className="min-h-[39px] min-w-[39px] rounded-xl border-2 border-[#D4AF37] bg-[#1A365D] text-[#FDE68A] flex items-center justify-center shrink-0"
+                  className="min-h-[42px] min-w-[42px] rounded-xl border-2 border-[#D4AF37] bg-[#1A365D] text-[#FDE68A] flex items-center justify-center shrink-0"
                   onSelect={(picked) => {
                     if (picked.name && regNameRef.current && !regNameRef.current.value) {
                       regNameRef.current.value = picked.name;
@@ -1493,7 +1646,15 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                 type="email"
                 defaultValue=""
                 placeholder="البريد الإلكتروني (اختياري)"
-                className="w-full min-h-[39px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold text-slate-900 dark:text-white focus:border-[#D4AF37] focus:outline-none"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="none"
+                spellCheck={false}
+                dir="auto"
+                enterKeyHint="next"
+                data-lpignore="true"
+                data-form-type="other"
+                className="w-full min-h-[42px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-base font-bold text-slate-900 dark:text-white focus:border-[#D4AF37] focus:outline-none"
               />
 
               <input
@@ -1502,13 +1663,21 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                 required
                 defaultValue=""
                 placeholder="كلمة المرور (6 أحرف أو أرقام على الأقل)"
-                className="w-full min-h-[39px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold text-slate-900 dark:text-white focus:border-[#D4AF37] focus:outline-none"
+                autoComplete="new-password"
+                autoCorrect="off"
+                autoCapitalize="none"
+                spellCheck={false}
+                dir="auto"
+                enterKeyHint="done"
+                data-lpignore="true"
+                data-form-type="other"
+                className="w-full min-h-[42px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-base font-bold text-slate-900 dark:text-white focus:border-[#D4AF37] focus:outline-none"
               />
 
               <button
                 type="submit"
                 disabled={submitting}
-                className="w-full min-h-[42px] gold-btn-3d border-2 border-[#92400E] text-[#0F172A] font-extrabold text-xs sm:text-sm rounded-xl flex items-center justify-center gap-2 disabled:opacity-60"
+                className="w-full min-h-[44px] bg-[#D4AF37] active:bg-[#B4860B] border-2 border-[#92400E] text-[#0F172A] font-extrabold text-xs sm:text-sm rounded-xl flex items-center justify-center gap-2 disabled:opacity-60 shadow-sm"
               >
                 <UserPlus className="w-4 h-4" />
                 <span>{submitting ? 'جاري إرسال الطلب...' : 'إرسال طلب فتح الحساب'}</span>
@@ -1516,9 +1685,9 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
             </form>
           )}
 
-          {/* VIEW 3: PASSWORD RECOVERY (Uncontrolled refs) */}
+          {/* VIEW 3: PASSWORD RECOVERY (Uncontrolled refs + safe keyboard attrs) */}
           {view === 'reset' && (
-            <form onSubmit={handlePasswordReset} className="space-y-2.5">
+            <form onSubmit={handlePasswordReset} className="space-y-2.5" autoComplete="off">
               <p className="text-[11.5px] font-semibold text-slate-600 dark:text-slate-300 leading-relaxed">
                 أدخل رقم هاتفك أو بريدك الإلكتروني لإرسال طلب استعادة كلمة المرور مباشرة إلى إدارة شبكة طيبة نت.
               </p>
@@ -1528,19 +1697,35 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                 required
                 defaultValue=""
                 placeholder="77xxxxxxx أو البريد الإلكتروني"
-                className="w-full min-h-[42px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold text-slate-900 dark:text-white focus:border-[#D4AF37] focus:outline-none"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="none"
+                spellCheck={false}
+                dir="auto"
+                enterKeyHint="next"
+                data-lpignore="true"
+                data-form-type="other"
+                className="w-full min-h-[44px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-base font-bold text-slate-900 dark:text-white focus:border-[#D4AF37] focus:outline-none"
               />
               <input
                 ref={resetNameRef}
                 type="text"
                 defaultValue=""
                 placeholder="الاسم الكامل (اختياري)"
-                className="w-full min-h-[42px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold text-slate-900 dark:text-white focus:border-[#D4AF37] focus:outline-none"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="none"
+                spellCheck={false}
+                dir="auto"
+                enterKeyHint="done"
+                data-lpignore="true"
+                data-form-type="other"
+                className="w-full min-h-[44px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-base font-bold text-slate-900 dark:text-white focus:border-[#D4AF37] focus:outline-none"
               />
               <button
                 type="submit"
                 disabled={submitting}
-                className="w-full min-h-[44px] royal-btn-3d border-2 border-[#D4AF37] text-white font-extrabold text-xs sm:text-sm rounded-xl flex items-center justify-center gap-2 disabled:opacity-60"
+                className="w-full min-h-[44px] bg-[#1A365D] active:bg-[#0F172A] border-2 border-[#D4AF37] text-white font-extrabold text-xs sm:text-sm rounded-xl flex items-center justify-center gap-2 disabled:opacity-60 shadow-sm"
               >
                 <KeyRound className="w-4 h-4 text-[#FDE68A]" />
                 <span>{submitting ? 'جاري الإرسال...' : 'إرسال طلب استعادة الحساب'}</span>
@@ -1552,17 +1737,18 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
 
       {/* Always-Visible Official Footer above Android Navigation Buttons */}
       <footer className="shrink-0 w-full text-center pt-1.5">
-        <span className="inline-block px-4 py-1 rounded-full bg-[#0F172A] border-2 border-[#D4AF37] text-xs font-extrabold text-[#FDE68A] shadow-md">
+        <span className="inline-block px-4 py-1 rounded-full bg-[#0F172A] border-2 border-[#D4AF37] text-xs font-extrabold text-[#FDE68A] shadow-sm">
           {SUPER_ADMIN_CONFIG.developerCredit}
         </span>
       </footer>
 
-      {/* Quick-PIN Fallback Modal (when PIN is configured in non-native preview) */}
+      {/* Quick-PIN Fallback Modal (uncontrolled ref, lightweight card) */}
       {showPinModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4">
           <form
             onSubmit={handlePinConfirm}
-            className="w-full max-w-xs rounded-3xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] p-5 shadow-2xl"
+            autoComplete="off"
+            className="w-full max-w-xs rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] p-5 shadow-sm"
           >
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-sm font-extrabold text-[#1A365D] dark:text-[#FDE68A]">
@@ -1577,16 +1763,24 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
               </button>
             </div>
             <input
+              ref={pinInputRef}
               type="password"
               inputMode="numeric"
-              value={pinInput}
-              onChange={(e) => setPinInput(e.target.value)}
+              defaultValue=""
+              autoComplete="new-password"
+              autoCorrect="off"
+              autoCapitalize="none"
+              spellCheck={false}
+              dir="auto"
+              enterKeyHint="done"
+              data-lpignore="true"
+              data-form-type="other"
               placeholder="أدخل رمز PIN"
               className="w-full min-h-[44px] text-center tracking-widest rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-base font-extrabold focus:border-[#D4AF37] focus:outline-none"
             />
             <button
               type="submit"
-              className="mt-3 w-full min-h-[44px] gold-btn-3d border-2 border-[#92400E] text-[#0F172A] font-extrabold text-sm rounded-xl"
+              className="mt-3 w-full min-h-[44px] bg-[#D4AF37] active:bg-[#B4860B] border-2 border-[#92400E] text-[#0F172A] font-extrabold text-sm rounded-xl shadow-sm"
             >
               تأكيد الدخول
             </button>
@@ -1595,4 +1789,4 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
       )}
     </div>
   );
-};
+});

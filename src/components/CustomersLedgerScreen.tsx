@@ -18,6 +18,7 @@ import {
   X,
 } from 'lucide-react';
 import { useFirebase } from '../contexts/FirebaseContext';
+import { useDebounce } from '../hooks/useDebounce';
 import { useFeedback } from '../lib/feedback';
 import {
   exportAsArabicPDF,
@@ -62,6 +63,7 @@ export const CustomersLedgerScreen: React.FC<CustomersLedgerScreenProps> = ({ hi
   const { notifySuccess, notifyError } = useFeedback();
 
   const [search, setSearch] = useState('');
+  const debouncedSearch = useDebounce(search, 180);
   const [categoryFilter, setCategoryFilter] = useState('الكل');
 
   // Create / Edit Customer Modal
@@ -98,8 +100,8 @@ export const CustomersLedgerScreen: React.FC<CustomersLedgerScreenProps> = ({ hi
       if (categoryFilter !== 'الكل' && (c.category || 'عميل شبكة') !== categoryFilter) {
         return false;
       }
-      if (search.trim()) {
-        const q = search.trim().toLowerCase();
+      if (debouncedSearch.trim()) {
+        const q = debouncedSearch.trim().toLowerCase();
         return (
           c.name.toLowerCase().includes(q) ||
           (c.phone || '').includes(q) ||
@@ -108,7 +110,7 @@ export const CustomersLedgerScreen: React.FC<CustomersLedgerScreenProps> = ({ hi
       }
       return true;
     });
-  }, [customers, categoryFilter, search]);
+  }, [customers, categoryFilter, debouncedSearch]);
 
   // 4 Live Summary Cards
   const summary = useMemo(() => {
@@ -419,10 +421,17 @@ export const CustomersLedgerScreen: React.FC<CustomersLedgerScreenProps> = ({ hi
           <input
             type="text"
             autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="none"
+            spellCheck={false}
+            dir="auto"
+            enterKeyHint="search"
+            data-lpignore="true"
+            data-form-type="other"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="بحث باسم العميل أو رقم الهاتف..."
-            className="w-full min-h-[42px] rounded-xl border-2 border-[#1A365D]/70 dark:border-[#60A5FA]/70 bg-slate-50 dark:bg-slate-800 pr-9 pl-3 text-xs font-extrabold shadow-xs focus:border-[#D4AF37] focus:outline-none"
+            className="w-full min-h-[42px] rounded-xl border-2 border-[#1A365D]/70 dark:border-[#60A5FA]/70 bg-slate-50 dark:bg-slate-800 pr-9 pl-3 text-base sm:text-sm font-extrabold shadow-xs focus:border-[#D4AF37] focus:outline-none"
           />
         </div>
         <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5">

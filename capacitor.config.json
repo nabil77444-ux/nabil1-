@@ -23,8 +23,8 @@
       "presentationOptions": ["badge", "sound", "alert"]
     },
     "Keyboard": {
-      "resize": "body",
-      "resizeOnFullScreen": true
+      "resize": "native",
+      "resizeOnFullScreen": false
     },
     "CapacitorUpdater": {
       "autoUpdate": false
@@ -32,7 +32,7 @@
   },
   "android": {
     "allowMixedContent": false,
-    "captureInput": true,
+    "captureInput": false,
     "webContentsDebuggingEnabled": false
   }
 }

@@ -126,7 +126,8 @@ jobs:
           test -s "$JAVA_PKG_DIR/UpdateCheckWorker.java" || { echo "::error::UpdateCheckWorker.java copy failed"; exit 1; }
           test -s "$JAVA_PKG_DIR/TaibahUpdateNotifierPlugin.java" || { echo "::error::TaibahUpdateNotifierPlugin.java copy failed"; exit 1; }
 
-          # Register TaibahBiometricPlugin & TaibahUpdateNotifierPlugin in MainActivity BEFORE super.onCreate(savedInstanceState)
+          # Register TaibahBiometricPlugin & TaibahUpdateNotifierPlugin BEFORE super.onCreate,
+          # and disable Android 8+ WebView Autofill AFTER super.onCreate to eliminate keyboard freeze/lag
           python3 - <<'PYEOF'
           import os, re
           main_activity = "android/app/src/main/java/net/taibah/wireless/MainActivity.java"
@@ -165,8 +166,24 @@ jobs:
                       src,
                       count=1
                   )
-              with open(main_activity, "w", encoding="utf-8") as f:
-                  f.write(src)
+
+          autofill_guard = (
+              "if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O "
+              "&& getBridge() != null && getBridge().getWebView() != null) {\n"
+              "            getBridge().getWebView().setImportantForAutofill("
+              "android.view.View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS);\n"
+              "        }"
+          )
+          if "setImportantForAutofill" not in src:
+              src = re.sub(
+                  r'(super\.onCreate\s*\(\s*savedInstanceState\s*\)\s*;)',
+                  f'\\1\n        {autofill_guard}',
+                  src,
+                  count=1
+              )
+
+          with open(main_activity, "w", encoding="utf-8") as f:
+              f.write(src)
           print("=== Verified MainActivity.java ===")
           print(src)
           PYEOF
@@ -334,19 +351,30 @@ jobs:
             fi
           done
 
-          # 4. Enforce adjustResize on MainActivity so Samsung/Android keyboards never freeze or overlap inputs
+          # 4. Enforce adjustResize + hardwareAccelerated="true" on application & MainActivity for 60fps smooth typing
           python3 - <<'PYEOF'
           import re
           manifest_path = "android/app/src/main/AndroidManifest.xml"
           with open(manifest_path, "r", encoding="utf-8") as f:
               xml = f.read()
-          if 'android:windowSoftInputMode=' in xml:
-              xml = re.sub(r'android:windowSoftInputMode="[^"]*"', 'android:windowSoftInputMode="adjustResize"', xml)
-          else:
-              xml = xml.replace('<activity', '<activity\n            android:windowSoftInputMode="adjustResize"', 1)
+
+          def ensure_tag_attr(content: str, tag: str, attr: str, value: str) -> str:
+              pattern = rf'(<{tag}\b[^>]*>)'
+              def repl(m):
+                  opening = m.group(1)
+                  attr_re = rf'{re.escape(attr)}="[^"]*"'
+                  if re.search(attr_re, opening):
+                      return re.sub(attr_re, f'{attr}="{value}"', opening)
+                  return opening.replace(f'<{tag}', f'<{tag}\n        {attr}="{value}"', 1)
+              return re.sub(pattern, repl, content, count=1, flags=re.DOTALL)
+
+          xml = ensure_tag_attr(xml, 'application', 'android:hardwareAccelerated', 'true')
+          xml = ensure_tag_attr(xml, 'activity', 'android:hardwareAccelerated', 'true')
+          xml = ensure_tag_attr(xml, 'activity', 'android:windowSoftInputMode', 'adjustResize')
+
           with open(manifest_path, "w", encoding="utf-8") as f:
               f.write(xml)
-          print("Verified android:windowSoftInputMode=adjustResize in AndroidManifest.xml")
+          print("Verified hardwareAccelerated=true & windowSoftInputMode=adjustResize in AndroidManifest.xml")
           PYEOF
 
           # 5. Enable R8 Code Shrinking, Resource Shrinking, resConfigs ("ar", "en") & Custom ProGuard Rules (~8-11MB Release APK)

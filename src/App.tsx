@@ -106,8 +106,34 @@ const TaibahAppShell: React.FC = () => {
     });
   }, []);
 
+  const isTextInputFocused = (): boolean => {
+    try {
+      const el = document.activeElement as HTMLElement | null;
+      if (!el) return false;
+      const tag = el.tagName;
+      if (tag === 'TEXTAREA' || el.isContentEditable) return true;
+      if (tag === 'INPUT') {
+        const type = (el as HTMLInputElement).type?.toLowerCase() || 'text';
+        return !['checkbox', 'radio', 'button', 'submit', 'reset'].includes(type);
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  };
+
   const runUpdateCheck = useCallback(
     async (silent: boolean, ignoreSnooze = false): Promise<void> => {
+      // Never touch network or React state while the user is actively typing
+      if (silent && isTextInputFocused()) {
+        window.setTimeout(() => {
+          if (!isTextInputFocused()) {
+            void runUpdateCheck(true, ignoreSnooze);
+          }
+        }, 4000);
+        return;
+      }
+
       try {
         if (!silent || ignoreSnooze) {
           clearUpdateSnooze();
