@@ -97,7 +97,7 @@ service cloud.firestore {
 
     function isValidUserProfile(data) {
       return data.keys().hasAll(['uid', 'name', 'phone', 'email', 'role', 'status', 'parentAgentId', 'discountRate', 'balance', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['uid', 'name', 'phone', 'email', 'role', 'status', 'parentAgentId', 'discountRate', 'balance', 'fcmTokens', 'rejectionReason', 'linkedSourceId', 'localPasswordHash', 'localPasswordSalt', 'localHashRounds', 'passwordVersion', 'passwordUpdatedAt', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'name', 'phone', 'email', 'role', 'status', 'parentAgentId', 'parentAgentName', 'discountRate', 'balance', 'fcmTokens', 'rejectionReason', 'linkedSourceId', 'localPasswordHash', 'localPasswordSalt', 'localHashRounds', 'passwordVersion', 'passwordUpdatedAt', 'createdAt', 'updatedAt']) &&
         isValidId(data.uid) &&
         isValidString(data.name, 2, 100) &&
         isValidString(data.phone, 7, 20) &&
@@ -105,6 +105,7 @@ service cloud.firestore {
         data.role in ['super_admin', 'agent', 'client'] &&
         data.status in ['pending', 'active', 'rejected', 'suspended'] &&
         isValidString(data.parentAgentId, 0, 128) &&
+        (!('parentAgentName' in data) || isValidString(data.parentAgentName, 0, 100)) &&
         data.discountRate is number && data.discountRate >= 0 && data.discountRate <= 100 &&
         data.balance is number &&
         (!('fcmTokens' in data) || (data.fcmTokens is list && data.fcmTokens.size() <= 5 && (data.fcmTokens.size() == 0 || (data.fcmTokens[0] is string && data.fcmTokens[0].size() <= 300)))) &&
@@ -312,13 +313,15 @@ service cloud.firestore {
 
     function isValidTopupRequest(data) {
       return data.keys().hasAll(['requesterId', 'requesterName', 'requesterRole', 'targetId', 'totalCards', 'totalAmount', 'status', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['requesterId', 'requesterName', 'requesterPhone', 'requesterRole', 'discountRate', 'targetId', 'targetName', 'items', 'totalCards', 'totalAmount', 'status', 'rejectionReason', 'notes', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['requesterId', 'requesterName', 'requesterPhone', 'requesterRole', 'discountRate', 'targetId', 'targetAgentId', 'targetRole', 'targetName', 'items', 'totalCards', 'totalAmount', 'status', 'rejectionReason', 'notes', 'processedBy', 'processedAt', 'createdAt', 'updatedAt']) &&
         isValidId(data.requesterId) &&
         isValidString(data.requesterName, 2, 100) &&
         (!('requesterPhone' in data) || isValidString(data.requesterPhone, 0, 20)) &&
         data.requesterRole in ['agent', 'client'] &&
         (!('discountRate' in data) || (data.discountRate is number && data.discountRate >= 0 && data.discountRate <= 100)) &&
         isValidString(data.targetId, 1, 128) &&
+        (!('targetAgentId' in data) || isValidString(data.targetAgentId, 0, 128)) &&
+        (!('targetRole' in data) || data.targetRole in ['agent', 'admin']) &&
         (!('targetName' in data) || isValidString(data.targetName, 0, 100)) &&
         (!('items' in data) || (data.items is list && data.items.size() <= 20 && (data.items.size() == 0 || data.items[0] is map))) &&
         data.totalCards is number && data.totalCards >= 1 &&
@@ -326,6 +329,8 @@ service cloud.firestore {
         data.status in ['pending', 'approved', 'rejected'] &&
         (!('rejectionReason' in data) || isValidString(data.rejectionReason, 0, 300)) &&
         (!('notes' in data) || isValidString(data.notes, 0, 500)) &&
+        (!('processedBy' in data) || isValidString(data.processedBy, 0, 128)) &&
+        (!('processedAt' in data) || data.processedAt is timestamp) &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
     }
@@ -737,12 +742,14 @@ service cloud.firestore {
       allow get: if isValidId(requestId) && isSignedIn() && (
         isSuperAdmin() ||
         existing().requesterId == request.auth.uid ||
-        existing().targetId == request.auth.uid
+        existing().targetId == request.auth.uid ||
+        (('targetAgentId' in existing()) && existing().targetAgentId == request.auth.uid)
       );
       allow list: if isSignedIn() && (
         isSuperAdmin() ||
         resource.data.requesterId == request.auth.uid ||
-        resource.data.targetId == request.auth.uid
+        resource.data.targetId == request.auth.uid ||
+        (('targetAgentId' in resource.data) && resource.data.targetAgentId == request.auth.uid)
       );
       allow create: if isValidId(requestId) && isSignedIn() && isValidTopupRequest(incoming()) &&
         incoming().requesterId == request.auth.uid &&
@@ -756,8 +763,11 @@ service cloud.firestore {
           isSuperAdmin() ||
           (
             existing().status == 'pending' &&
-            existing().targetId == request.auth.uid &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'rejectionReason', 'notes', 'updatedAt'])
+            (
+              existing().targetId == request.auth.uid ||
+              (('targetAgentId' in existing()) && existing().targetAgentId == request.auth.uid)
+            ) &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'rejectionReason', 'notes', 'processedBy', 'processedAt', 'updatedAt'])
           )
         );
       allow delete: if isValidId(requestId) && isSuperAdmin();

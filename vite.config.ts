@@ -116,6 +116,20 @@ export default defineConfig(({ mode }) => {
           enabled: false,
         },
       }),
+      // Guard Vite 8 @vite/client ws.send() when HMR WebSocket is disabled or unavailable
+      {
+        name: 'guard-vite-client-ws-send',
+        apply: 'serve',
+        transform(code: string, id: string) {
+          if (id.includes('vite/dist/client/client.mjs') || id.includes('@vite/client')) {
+            return code.replace(
+              'ws.send(JSON.stringify(data));',
+              'if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify(data));'
+            );
+          }
+          return null;
+        },
+      },
       // Copies src/assets into dist/ if present.
       {
         name: 'copy-unbundled-src-assets',

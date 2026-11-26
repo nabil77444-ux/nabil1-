@@ -45,7 +45,7 @@ export const SidebarDrawer: React.FC<SidebarDrawerProps> = ({
   onClose,
   onNavigate,
 }) => {
-  const { profile, appSettings, unreadNotificationsCount, signOutUser } = useFirebase();
+  const { profile, appSettings, unreadNotificationsCount, pendingTopups, signOutUser } = useFirebase();
   const { notifySuccess, notifyInfo } = useFeedback();
 
   if (!open || !profile) return null;
@@ -122,6 +122,7 @@ export const SidebarDrawer: React.FC<SidebarDrawerProps> = ({
       label: 'طلبات التغذية',
       icon: Send,
       iconBg: 'bg-gradient-to-br from-cyan-600 to-blue-800 text-white',
+      badge: (isAdmin || isAgent) && pendingTopups.length > 0 ? pendingTopups.length : undefined,
       visible: true,
     },
     {

@@ -18,6 +18,8 @@ export interface OfflineTopupPayload {
   requesterRole: 'agent' | 'client';
   discountRate: number;
   targetId: string;
+  targetAgentId?: string;
+  targetRole?: 'agent' | 'admin';
   targetName: string;
   items: TopupLineItem[];
   totalCards: number;
@@ -132,6 +134,8 @@ export function offlineTopupOpToDoc(op: OfflineQueuedOp): TopupRequest | null {
     requesterRole: p.requesterRole,
     discountRate: p.discountRate,
     targetId: p.targetId,
+    targetAgentId: p.targetAgentId,
+    targetRole: p.targetRole,
     targetName: p.targetName,
     items: p.items,
     totalCards: p.totalCards,
@@ -196,6 +200,8 @@ interface SerializedTopup {
   requesterRole: 'agent' | 'client';
   discountRate?: number;
   targetId: string;
+  targetAgentId?: string;
+  targetRole?: 'agent' | 'admin';
   targetName?: string;
   items?: TopupLineItem[];
   totalCards: number;
@@ -203,6 +209,8 @@ interface SerializedTopup {
   status: 'pending' | 'approved' | 'rejected';
   rejectionReason?: string;
   notes?: string;
+  processedBy?: string;
+  processedAtMs?: number;
   createdAtMs: number;
   updatedAtMs: number;
 }
@@ -222,6 +230,8 @@ export function saveCachedTopupRequests(uid: string, list: TopupRequest[]): void
       requesterRole: t.requesterRole,
       discountRate: t.discountRate,
       targetId: t.targetId,
+      targetAgentId: t.targetAgentId,
+      targetRole: t.targetRole,
       targetName: t.targetName,
       items: t.items,
       totalCards: t.totalCards,
@@ -229,6 +239,8 @@ export function saveCachedTopupRequests(uid: string, list: TopupRequest[]): void
       status: t.status,
       rejectionReason: t.rejectionReason,
       notes: t.notes,
+      processedBy: t.processedBy,
+      processedAtMs: t.processedAt?.toMillis?.(),
       createdAtMs: t.createdAt?.toMillis?.() ?? Date.now(),
       updatedAtMs: t.updatedAt?.toMillis?.() ?? Date.now(),
     }));
@@ -255,6 +267,8 @@ export function loadCachedTopupRequests(uid: string): TopupRequest[] {
         requesterRole: x.requesterRole,
         discountRate: x.discountRate,
         targetId: x.targetId,
+        targetAgentId: x.targetAgentId,
+        targetRole: x.targetRole,
         targetName: x.targetName,
         items: x.items,
         totalCards: x.totalCards,
@@ -262,6 +276,8 @@ export function loadCachedTopupRequests(uid: string): TopupRequest[] {
         status: x.status,
         rejectionReason: x.rejectionReason,
         notes: x.notes,
+        processedBy: x.processedBy,
+        processedAt: x.processedAtMs ? makeFakeTimestamp(x.processedAtMs) : undefined,
         createdAt: makeFakeTimestamp(x.createdAtMs || Date.now()),
         updatedAt: makeFakeTimestamp(x.updatedAtMs || Date.now()),
       }));

@@ -528,6 +528,48 @@ function normalizePhoneDigits(raw: unknown): string {
   return digits.length >= 7 && digits.length <= 15 ? digits : '';
 }
 
+function resolveUserParentAgentId(raw?: Partial<UserProfile> | Record<string, unknown> | null): string {
+  if (!raw || typeof raw !== 'object') return '';
+  const r = raw as Record<string, unknown>;
+  const candidates = [r.parentAgentId, r.agentId, r.parentId, r.createdBy];
+  for (const cand of candidates) {
+    if (typeof cand === 'string') {
+      const trimmed = cand.trim();
+      if (trimmed && trimmed !== 'super_admin') {
+        return trimmed.slice(0, 128);
+      }
+    }
+  }
+  return '';
+}
+
+function resolveTopupRouting(
+  req: TopupRequest,
+  usersList: UserProfile[]
+): { targetAgentId: string; targetRole: 'agent' | 'admin' } {
+  const explicitTargetAgent =
+    typeof req.targetAgentId === 'string' && req.targetAgentId.trim() && req.targetAgentId.trim() !== 'super_admin'
+      ? req.targetAgentId.trim()
+      : '';
+  if (explicitTargetAgent) {
+    return { targetAgentId: explicitTargetAgent, targetRole: 'agent' };
+  }
+  if (req.targetRole === 'agent' && req.targetId && req.targetId !== 'super_admin') {
+    return { targetAgentId: req.targetId, targetRole: 'agent' };
+  }
+  if (req.targetId && req.targetId !== 'super_admin') {
+    return { targetAgentId: req.targetId, targetRole: 'agent' };
+  }
+  if (req.requesterRole === 'client') {
+    const requesterDoc = usersList.find((u) => u.uid === req.requesterId);
+    const inferredParent = resolveUserParentAgentId(requesterDoc);
+    if (inferredParent) {
+      return { targetAgentId: inferredParent, targetRole: 'agent' };
+    }
+  }
+  return { targetAgentId: '', targetRole: 'admin' };
+}
+
 function serializePlainAccountForBackup(raw: Record<string, unknown>, fallbackId: string): Record<string, unknown> {
   const phone = normalizePhoneDigits(raw.phone) || (typeof raw.phone === 'string' ? raw.phone.trim().slice(0, 20) : '');
   const email = typeof raw.email === 'string' ? raw.email.trim().toLowerCase().slice(0, 120) : '';
@@ -540,6 +582,11 @@ function serializePlainAccountForBackup(raw: Record<string, unknown>, fallbackId
     raw.status === 'suspended'
       ? raw.status
       : 'active';
+  const resolvedParentId = resolveUserParentAgentId(raw);
+  const resolvedParentName =
+    typeof raw.parentAgentName === 'string' && raw.parentAgentName.trim()
+      ? raw.parentAgentName.trim().slice(0, 100)
+      : undefined;
   return {
     uid: typeof raw.uid === 'string' && raw.uid.trim() ? raw.uid.trim().slice(0, 128) : fallbackId,
     name: typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim().slice(0, 100) : phone || 'مستخدم طيبة نت',
@@ -547,7 +594,8 @@ function serializePlainAccountForBackup(raw: Record<string, unknown>, fallbackId
     email,
     role,
     status,
-    parentAgentId: typeof raw.parentAgentId === 'string' ? raw.parentAgentId.slice(0, 128) : '',
+    parentAgentId: resolvedParentId,
+    ...(resolvedParentName ? { parentAgentName: resolvedParentName } : {}),
     discountRate:
       typeof raw.discountRate === 'number'
         ? raw.discountRate
@@ -2111,12 +2159,15 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       );
     }
 
-    // 4. Real-Time Topup Requests (Instant Admin/Agent arrival — compact limit 15)
+    // 4. Real-Time Topup Requests (Instant Admin/Agent arrival with targetId + targetAgentId support)
     if (isAgent) {
-      let incomingList: TopupRequest[] = [];
+      let incomingByTargetId: TopupRequest[] = [];
+      let incomingByTargetAgentId: TopupRequest[] = [];
       let outgoingList: TopupRequest[] = [];
+      let initialSnapshotHydrated = false;
+
       const handleTopupListUpdate = (nextList: TopupRequest[]) => {
-        if (!isAdmin && prevTopupStatusMapRef.current.size > 0) {
+        if (initialSnapshotHydrated && prevTopupStatusMapRef.current.size > 0) {
           for (const item of nextList) {
             if (
               item.requesterId === activeUser.uid &&
@@ -2126,9 +2177,18 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               notifySuccess(
                 `تمت الموافقة على طلب التغذية (${item.totalCards} كرت) وإضافة الكروت إلى مخزونك ✅`
               );
+            } else if (
+              item.requesterId !== activeUser.uid &&
+              item.status === 'pending' &&
+              !prevTopupStatusMapRef.current.has(item.id)
+            ) {
+              notifyInfo(
+                `طلب تغذية جديد من عميلك ${item.requesterName} (${item.totalCards} كرت)`
+              );
             }
           }
         }
+        initialSnapshotHydrated = true;
         const nextMap = new Map<string, TopupRequest['status']>();
         for (const item of nextList) nextMap.set(item.id, item.status);
         prevTopupStatusMapRef.current = nextMap;
@@ -2138,7 +2198,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
       const publishMergedTopups = () => {
         const merged = new Map<string, TopupRequest>();
-        for (const item of incomingList) merged.set(item.id, item);
+        for (const item of incomingByTargetId) merged.set(item.id, item);
+        for (const item of incomingByTargetAgentId) merged.set(item.id, item);
         for (const item of outgoingList) merged.set(item.id, item);
         handleTopupListUpdate(
           Array.from(merged.values()).sort(
@@ -2149,9 +2210,9 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
       unsubscribers.push(
         onSnapshot(
-          query(collection(db, 'topupRequests'), where('targetId', '==', activeUser.uid), limit(40)),
+          query(collection(db, 'topupRequests'), where('targetId', '==', activeUser.uid), limit(50)),
           (snap) => {
-            incomingList = snap.docs.map((d) => ({
+            incomingByTargetId = snap.docs.map((d) => ({
               id: d.id,
               ...(d.data() as Omit<TopupRequest, 'id'>),
             }));
@@ -2163,7 +2224,21 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
       unsubscribers.push(
         onSnapshot(
-          query(collection(db, 'topupRequests'), where('requesterId', '==', activeUser.uid), limit(40)),
+          query(collection(db, 'topupRequests'), where('targetAgentId', '==', activeUser.uid), limit(50)),
+          (snap) => {
+            incomingByTargetAgentId = snap.docs.map((d) => ({
+              id: d.id,
+              ...(d.data() as Omit<TopupRequest, 'id'>),
+            }));
+            publishMergedTopups();
+          },
+          (err) => handleFirestoreError(err, OperationType.LIST, 'topupRequests')
+        )
+      );
+
+      unsubscribers.push(
+        onSnapshot(
+          query(collection(db, 'topupRequests'), where('requesterId', '==', activeUser.uid), limit(50)),
           (snap) => {
             outgoingList = snap.docs.map((d) => ({
               id: d.id,
@@ -2747,10 +2822,35 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     return [...queued.filter((e) => !liveIds.has(e.id)), ...ledgerEntries];
   }, [ledgerEntries, pendingOfflineOps, profile?.uid, firebaseUser?.uid]);
 
-  const pendingTopups = useMemo(
-    () => mergedTopupRequests.filter((t) => t.status === 'pending'),
-    [mergedTopupRequests]
-  );
+  const pendingTopups = useMemo(() => {
+    const uid = profile?.uid || firebaseUser?.uid || '';
+    if (profile?.role === 'agent') {
+      const myClientIds = new Set(
+        managedUsers
+          .filter((u) => resolveUserParentAgentId(u) === uid)
+          .map((u) => u.uid)
+      );
+      return mergedTopupRequests.filter((t) => {
+        if (t.status !== 'pending' || t.requesterId === uid) return false;
+        const routing = resolveTopupRouting(t, managedUsers);
+        return (
+          t.targetAgentId === uid ||
+          t.targetId === uid ||
+          routing.targetAgentId === uid ||
+          myClientIds.has(t.requesterId)
+        );
+      });
+    }
+    if (profile?.role === 'super_admin') {
+      return mergedTopupRequests.filter((t) => {
+        if (t.status !== 'pending') return false;
+        return resolveTopupRouting(t, managedUsers).targetRole === 'admin';
+      });
+    }
+    return mergedTopupRequests.filter(
+      (t) => t.status === 'pending' && (!uid || t.requesterId === uid)
+    );
+  }, [mergedTopupRequests, profile?.role, profile?.uid, firebaseUser?.uid, managedUsers]);
 
   const pendingOfflineSyncCount = useMemo(() => {
     const uid = profile?.uid || firebaseUser?.uid;
@@ -3121,6 +3221,10 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           const existingSnap = await getDoc(doc(db, 'topupRequests', t.reqId)).catch(() => null);
           if (!existingSnap?.exists()) {
             const safeName = (t.requesterName || profile.name || 'مستخدم طيبة نت').trim();
+            const resolvedTargetRole: 'agent' | 'admin' =
+              t.targetRole || (t.targetId && t.targetId !== 'super_admin' ? 'agent' : 'admin');
+            const resolvedTargetAgentId =
+              t.targetAgentId || (resolvedTargetRole === 'agent' ? t.targetId : '');
             await setDoc(doc(db, 'topupRequests', t.reqId), {
               requesterId: activeUser.uid,
               requesterName: (safeName.length >= 2 ? safeName : `${safeName} نت`).slice(0, 100),
@@ -3128,6 +3232,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               requesterRole: t.requesterRole,
               discountRate: t.discountRate,
               targetId: t.targetId,
+              targetAgentId: resolvedTargetAgentId.slice(0, 128),
+              targetRole: resolvedTargetRole,
               targetName: t.targetName.slice(0, 100),
               items: t.items.slice(0, 20),
               totalCards: t.totalCards,
@@ -3138,7 +3244,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               updatedAt: serverTimestamp(),
             });
             void setDoc(doc(collection(db, 'notifications')), {
-              recipientId: t.targetId,
+              recipientId: resolvedTargetRole === 'agent' && resolvedTargetAgentId ? resolvedTargetAgentId : t.targetId,
               title: 'طلب تغذية جديد',
               body: `أرسل ${safeName} طلب تغذية (${t.totalCards} كرت — ${t.totalAmount} ر.ي)`,
               category: 'topup',
@@ -4806,13 +4912,25 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       const reqId = generateSafeDocId('topup');
       const totalCards = validItems.reduce((s, i) => s + i.quantity, 0);
       const totalAmount = validItems.reduce((s, i) => s + i.unitPrice * i.quantity, 0);
-      const targetId =
-        profile.role === 'client' && profile.parentAgentId ? profile.parentAgentId : 'super_admin';
+      const clientParentAgentId =
+        profile.role === 'client' ? resolveUserParentAgentId(profile) : '';
+      const targetRole: 'agent' | 'admin' = clientParentAgentId ? 'agent' : 'admin';
+      const targetId = targetRole === 'agent' ? clientParentAgentId : 'super_admin';
+      const targetAgentId = targetRole === 'agent' ? clientParentAgentId : '';
       const parentAgent = managedUsers.find((u) => u.uid === targetId);
+      const priorNamedTarget = topupRequests.find(
+        (r) =>
+          (r.targetAgentId === targetId || r.targetId === targetId) &&
+          r.targetName &&
+          r.targetName !== 'الوكيل المباشر'
+      )?.targetName;
       const targetName =
-        targetId === 'super_admin'
+        targetRole === 'admin'
           ? SUPER_ADMIN_CONFIG.name
-          : parentAgent?.name || 'الوكيل المباشر';
+          : profile.parentAgentName?.trim() ||
+            parentAgent?.name ||
+            priorNamedTarget ||
+            'الوكيل المباشر';
       const rawName = (profile.name || 'مستخدم طيبة نت').trim();
       const safeName = (rawName.length >= 2 ? rawName : `${rawName} نت`).slice(0, 100);
       const safePhone = (profile.phone || '').slice(0, 20);
@@ -4838,6 +4956,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             requesterRole: safeRole,
             discountRate: safeDiscountRate,
             targetId,
+            targetAgentId,
+            targetRole,
             targetName: targetName.slice(0, 100),
             items: validItems.slice(0, 20),
             totalCards,
@@ -4868,6 +4988,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             requesterRole: safeRole,
             discountRate: safeDiscountRate,
             targetId,
+            targetAgentId,
+            targetRole,
             targetName: targetName.slice(0, 100),
             items: validItems.slice(0, 20),
             totalCards,
@@ -4904,7 +5026,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         inFlightOpsRef.current.delete(opKey);
       }
     },
-    [appSettings, firebaseUser, managedUsers, notifyError, notifySuccess, notifyWarning, profile, sendCloudNotification, writeAuditLog]
+    [appSettings, firebaseUser, managedUsers, notifyError, notifySuccess, notifyWarning, profile, sales, sendCloudNotification, topupRequests, writeAuditLog]
   );
 
   const approveTopupRequest = useCallback(
@@ -4915,6 +5037,29 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         notifyWarning('تمت معالجة هذا الطلب مسبقاً');
         return false;
       }
+
+      // Enforce strict tenant/hierarchy authorization (Agent fulfills only own clients; Super Admin fulfills only admin-targeted requests)
+      const routing = resolveTopupRouting(req, managedUsers);
+      if (profile.role === 'agent') {
+        const isTargetedToMe =
+          req.requesterId !== activeUser.uid &&
+          (req.targetAgentId === activeUser.uid ||
+            req.targetId === activeUser.uid ||
+            routing.targetAgentId === activeUser.uid);
+        if (!isTargetedToMe) {
+          notifyError('هذا الطلب غير موجّه إلى حسابك ولا يمكنك تنفيذه');
+          return false;
+        }
+      } else if (profile.role === 'super_admin') {
+        if (routing.targetRole === 'agent') {
+          notifyWarning('هذا الطلب موجّه إلى وكيل العميل مباشرة ويُنفّذ من حساب الوكيل');
+          return false;
+        }
+      } else {
+        notifyError('ليس لديك صلاحية تنفيذ طلبات التغذية');
+        return false;
+      }
+
       const opKey = `topup_approve_${req.id}`;
       if (inFlightOpsRef.current.has(opKey)) {
         notifyWarning('جاري اعتماد طلب التغذية بالفعل...');
@@ -4922,16 +5067,56 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       }
       inFlightOpsRef.current.add(opKey);
       try {
-        // Re-verify live Firestore status to prevent double-approval across devices
-        const liveSnap = await getDoc(doc(db, 'topupRequests', req.id));
+        // 1. Re-verify live Firestore status to prevent double-approval across devices
+        const reqRef = doc(db, 'topupRequests', req.id);
+        const liveSnap = await getDoc(reqRef);
         if (!liveSnap.exists() || (liveSnap.data() as TopupRequest).status !== 'pending') {
           notifyWarning('تمت معالجة طلب التغذية مسبقاً من جهاز آخر');
           return false;
         }
 
-        // Transfer real available cards if items are specified — abort approval if sale fails!
+        // 2. Verify real available inventory in approver's own stock BEFORE executing transfer
         const items = req.items || [];
         if (items.length > 0) {
+          const ownerIds = buildOwnerIdentifiers(profile, activeUser.uid);
+          const ownerIdList = ownerIds.slice(0, 10);
+          const shortages: string[] = [];
+
+          for (const item of items) {
+            if (item.quantity <= 0) continue;
+            let availableQty = getCachedAvailableCardsForOwners(ownerIds, item.packageId).length;
+            if (availableQty < item.quantity && navigator.onLine && ownerIdList.length > 0) {
+              try {
+                const liveCardsSnap = await getDocs(
+                  query(
+                    collection(db, 'cards'),
+                    where('ownerId', 'in', ownerIdList),
+                    where('packageId', '==', item.packageId),
+                    where('status', 'in', ['available', 'assigned_to_agent']),
+                    limit(item.quantity + 1)
+                  )
+                );
+                availableQty = Math.max(availableQty, liveCardsSnap.size);
+              } catch {
+                // Keep cached count if network check fails
+              }
+            }
+            if (availableQty < item.quantity) {
+              const pkgMeta = packages.find((p) => p.id === item.packageId);
+              const label = item.packageLabel || (pkgMeta ? `باقة ${pkgMeta.price} ر.ي` : item.packageId);
+              shortages.push(`${label} (المتوفر: ${availableQty}، المطلوب: ${item.quantity})`);
+            }
+          }
+
+          if (shortages.length > 0) {
+            notifyError(
+              'مخزونك غير كافٍ لتنفيذ طلب التغذية',
+              `النقص في الباقات: ${shortages.join(' • ')}`
+            );
+            return false;
+          }
+
+          // 3. Transfer real available cards from approver's own inventory to requester
           const saleResult = await executeSaleTransaction({
             saleType: 'electronic_wholesale',
             buyerId: req.requesterId,
@@ -4939,7 +5124,11 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             buyerPhone: req.requesterPhone,
             buyerRole: req.requesterRole,
             paymentMethod: 'credit',
-            discountRate: req.discountRate || (req.requesterRole === 'agent' ? appSettings.agentDiscountPercent : appSettings.clientDiscountPercent),
+            discountRate:
+              req.discountRate ||
+              (req.requesterRole === 'agent'
+                ? appSettings.agentDiscountPercent
+                : appSettings.clientDiscountPercent),
             paidAmount: 0,
             notes: `تنفيذ طلب التغذية #${req.id.slice(-6)}`,
             items: items.map((i) => ({ packageId: i.packageId, quantity: i.quantity })),
@@ -4949,23 +5138,40 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           }
         }
 
-        await updateDoc(doc(db, 'topupRequests', req.id), {
-          status: 'approved',
-          updatedAt: serverTimestamp(),
+        // 4. Atomically mark topup request as approved inside a Firestore transaction
+        await runTransaction(db, async (tx) => {
+          const freshSnap = await tx.get(reqRef);
+          if (!freshSnap.exists()) {
+            throw new Error('TOPUP_NOT_FOUND');
+          }
+          const freshData = freshSnap.data() as TopupRequest;
+          if (freshData.status !== 'pending') {
+            throw new Error('TOPUP_ALREADY_PROCESSED');
+          }
+          tx.update(reqRef, {
+            status: 'approved',
+            processedBy: activeUser.uid,
+            processedAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
         });
 
         await sendCloudNotification({
           recipientId: req.requesterId,
           title: 'تمت الموافقة وتنفيذ طلب التغذية ✅',
-          body: `تم اعتماد وتنفيذ طلبك (${req.totalCards} كرت — ${req.totalAmount} ر.ي) وتحديث رصيدك ومخزونك.`,
+          body: `تم اعتماد وتنفيذ طلبك (${req.totalCards} كرت — ${req.totalAmount} ر.ي) من ${profile.name} وتحديث مخزونك.`,
           category: 'topup',
           targetRoute: 'topup_requests',
         });
 
         await writeAuditLog('تنفيذ طلب تغذية', `تم قبول وتنفيذ طلب ${req.requesterName} (${req.totalCards} كرت)`);
-        notifySuccess(`تم قبول وتنفيذ طلب التغذية لـ ${req.requesterName}`);
+        notifySuccess(`تم قبول وتغذية ${req.requesterName} (${req.totalCards} كرت) بنجاح ✅`);
         return true;
       } catch (err) {
+        if (err instanceof Error && err.message === 'TOPUP_ALREADY_PROCESSED') {
+          notifyWarning('تمت معالجة طلب التغذية مسبقاً من جهاز آخر');
+          return false;
+        }
         handleFirestoreError(err, OperationType.UPDATE, `topupRequests/${req.id}`);
         notifyError('تعذر تنفيذ طلب التغذية');
         return false;
@@ -4973,17 +5179,52 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         inFlightOpsRef.current.delete(opKey);
       }
     },
-    [appSettings, executeSaleTransaction, firebaseUser, notifyError, notifySuccess, notifyWarning, profile, sendCloudNotification, writeAuditLog]
+    [appSettings, executeSaleTransaction, firebaseUser, managedUsers, notifyError, notifySuccess, notifyWarning, packages, profile, sendCloudNotification, writeAuditLog]
   );
 
   const rejectTopupRequest = useCallback(
     async (req: TopupRequest, reason: string) => {
-      const cleanReason = reason.trim().slice(0, 300) || 'تم رفض الطلب من الإدارة';
+      const activeUser = auth.currentUser || firebaseUser;
+      if (!activeUser || !profile) return;
+
+      const routing = resolveTopupRouting(req, managedUsers);
+      if (profile.role === 'agent') {
+        const isTargetedToMe =
+          req.requesterId !== activeUser.uid &&
+          (req.targetAgentId === activeUser.uid ||
+            req.targetId === activeUser.uid ||
+            routing.targetAgentId === activeUser.uid);
+        if (!isTargetedToMe) {
+          notifyError('هذا الطلب غير موجّه إلى حسابك ولا يمكنك رفضه');
+          return;
+        }
+      } else if (profile.role === 'super_admin') {
+        if (routing.targetRole === 'agent') {
+          notifyWarning('هذا الطلب موجّه إلى وكيل العميل مباشرة');
+          return;
+        }
+      } else {
+        notifyError('ليس لديك صلاحية رفض طلبات التغذية');
+        return;
+      }
+
+      const defaultReason =
+        profile.role === 'agent' ? 'تم رفض الطلب من الوكيل' : 'تم رفض الطلب من الإدارة';
+      const cleanReason = reason.trim().slice(0, 300) || defaultReason;
       try {
-        await updateDoc(doc(db, 'topupRequests', req.id), {
-          status: 'rejected',
-          rejectionReason: cleanReason,
-          updatedAt: serverTimestamp(),
+        const reqRef = doc(db, 'topupRequests', req.id);
+        await runTransaction(db, async (tx) => {
+          const freshSnap = await tx.get(reqRef);
+          if (!freshSnap.exists() || (freshSnap.data() as TopupRequest).status !== 'pending') {
+            throw new Error('TOPUP_ALREADY_PROCESSED');
+          }
+          tx.update(reqRef, {
+            status: 'rejected',
+            rejectionReason: cleanReason,
+            processedBy: activeUser.uid,
+            processedAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
         });
         await sendCloudNotification({
           recipientId: req.requesterId,
@@ -4995,11 +5236,15 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         await writeAuditLog('رفض طلب تغذية', `رفض طلب ${req.requesterName} — السبب: ${cleanReason}`);
         notifySuccess('تم رفض طلب التغذية وإشعار صاحب الطلب');
       } catch (err) {
+        if (err instanceof Error && err.message === 'TOPUP_ALREADY_PROCESSED') {
+          notifyWarning('تمت معالجة هذا الطلب مسبقاً');
+          return;
+        }
         handleFirestoreError(err, OperationType.UPDATE, `topupRequests/${req.id}`);
         notifyError('تعذر رفض الطلب');
       }
     },
-    [notifyError, notifySuccess, sendCloudNotification, writeAuditLog]
+    [firebaseUser, managedUsers, notifyError, notifySuccess, notifyWarning, profile, sendCloudNotification, writeAuditLog]
   );
 
   // =========================================================================
@@ -5104,6 +5349,10 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         input.email?.trim().toLowerCase() || `${normalizedPhoneDigits || cleanPhone.replace(/[^\d]/g, '')}@taibah.net`
       ).slice(0, 120);
       try {
+        const cleanParentId = input.role === 'client' ? (input.parentAgentId || '').slice(0, 128) : '';
+        const parentAgentName = cleanParentId
+          ? (managedUsers.find((u) => u.uid === cleanParentId)?.name || '').slice(0, 100)
+          : '';
         await setDoc(doc(db, 'users', uid), {
           uid,
           name: input.name.trim().slice(0, 100),
@@ -5111,7 +5360,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           email: cleanEmail,
           role: input.role,
           status: 'active',
-          parentAgentId: input.role === 'client' ? (input.parentAgentId || '').slice(0, 128) : '',
+          parentAgentId: cleanParentId,
+          ...(parentAgentName ? { parentAgentName } : {}),
           discountRate: rate,
           balance: 0,
           fcmTokens: [],
@@ -5127,7 +5377,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         return false;
       }
     },
-    [appSettings, notifyError, notifySuccess, profile, writeAuditLog]
+    [appSettings, managedUsers, notifyError, notifySuccess, profile, writeAuditLog]
   );
 
   const updateManagedUser = useCallback(
@@ -5345,22 +5595,26 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     async (clientUids: string[], targetAgentId: string) => {
       if (clientUids.length === 0) return;
       try {
+        const targetAgentName = targetAgentId
+          ? (managedUsers.find((u) => u.uid === targetAgentId)?.name || '').slice(0, 100)
+          : '';
         const batch = writeBatch(db);
         for (const uid of clientUids) {
           batch.update(doc(db, 'users', uid), {
             parentAgentId: targetAgentId,
+            parentAgentName: targetAgentName,
             updatedAt: serverTimestamp(),
           });
         }
         await batch.commit();
-        await writeAuditLog('نقل عملاء', `تم نقل ${clientUids.length} عميل إلى ${targetAgentId || 'الإدارة العامة'}`);
+        await writeAuditLog('نقل عملاء', `تم نقل ${clientUids.length} عميل إلى ${targetAgentName || targetAgentId || 'الإدارة العامة'}`);
         notifySuccess(`تم نقل ${clientUids.length} حساب بنجاح`);
       } catch (err) {
         handleFirestoreError(err, OperationType.WRITE, 'users/transfer');
         notifyError('تعذر نقل الحسابات');
       }
     },
-    [notifyError, notifySuccess, writeAuditLog]
+    [managedUsers, notifyError, notifySuccess, writeAuditLog]
   );
 
   const deleteManagedUser = useCallback(

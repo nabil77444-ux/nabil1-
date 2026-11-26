@@ -44,6 +44,10 @@ export interface UserProfile {
   role: UserRole;
   status: UserStatus;
   parentAgentId: string;
+  parentAgentName?: string;
+  agentId?: string;
+  parentId?: string;
+  createdBy?: string;
   discountRate: number;
   balance: number;
   fcmTokens?: string[];
@@ -277,6 +281,8 @@ export interface TopupRequest {
   requesterRole: 'agent' | 'client';
   discountRate?: number;
   targetId: string;
+  targetAgentId?: string;
+  targetRole?: 'agent' | 'admin';
   targetName?: string;
   items?: TopupLineItem[];
   totalCards: number;
@@ -284,6 +290,8 @@ export interface TopupRequest {
   status: 'pending' | 'approved' | 'rejected';
   rejectionReason?: string;
   notes?: string;
+  processedBy?: string;
+  processedAt?: Timestamp;
   createdAt?: Timestamp;
   updatedAt?: Timestamp;
 }
