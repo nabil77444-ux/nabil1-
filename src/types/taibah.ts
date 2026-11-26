@@ -6,6 +6,7 @@ export type UserStatus = 'pending' | 'active' | 'rejected' | 'suspended';
 export type AppRoute =
   | 'home'
   | 'direct_sale'
+  | 'stock_count'
   | 'electronic_cards'
   | 'invoices'
   | 'customers'
@@ -101,6 +102,13 @@ export interface CardDoc {
   cardNumber: string;
   status: 'available' | 'assigned_to_agent' | 'sold' | 'returned' | 'recalled' | 'injected';
   ownerId: string;
+  agentId?: string;
+  cardType?: 'electronic' | 'paper' | string;
+  type?: string;
+  format?: string;
+  isPaper?: boolean;
+  denomination?: number | string;
+  price?: number;
   soldTo?: string;
   soldToName?: string;
   soldToPhone?: string;

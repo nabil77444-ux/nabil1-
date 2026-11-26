@@ -93,6 +93,7 @@ import {
   releaseCardLocksLocally,
   removeCardsFromCacheForOwners,
   removeSyncedOfflineSale,
+  resolveCardKind,
   saveCachedAvailableCards,
   type CachedAvailableCard,
   type OfflineQueuedSale,
@@ -155,6 +156,13 @@ export interface ImportCardsResult {
   elapsedMs?: number;
 }
 
+export interface PersonalStockSplit {
+  electronicByPkg: Record<string, number>;
+  paperByPkg: Record<string, number>;
+  totalElectronic: number;
+  totalPaper: number;
+}
+
 interface FirebaseContextValue {
   authReady: boolean;
   firebaseUser: FirebaseUser | null;
@@ -170,6 +178,7 @@ interface FirebaseContextValue {
   openTopupForPackage: (packageId: string) => void;
   packages: PackageDoc[];
   totalAvailableCards: number;
+  personalStockSplit: PersonalStockSplit;
   sales: SaleDoc[];
   customers: CustomerAccount[];
   ledgerEntries: LedgerEntry[];
@@ -692,6 +701,10 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   );
   const [personalCardCounts, setPersonalCardCounts] = useState<Record<string, number>>({});
   const [personalSoldCounts, setPersonalSoldCounts] = useState<Record<string, number>>({});
+  const [personalPaperCounts, setPersonalPaperCounts] = useState<Record<string, number>>(() => {
+    const uid = cachedProfileInitial?.uid;
+    return uid ? readCachedJson<Record<string, number>>(`taibah_paper_stock_v1_${uid}`, {}) : {};
+  });
   const [offlinePoolVersion, setOfflinePoolVersion] = useState(0);
   const [pendingOfflineSales, setPendingOfflineSales] = useState<OfflineQueuedSale[]>(() =>
     getPendingOfflineSales()
@@ -2547,6 +2560,73 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     [packages]
   );
 
+  // Instant 0ms split of personal available stock into Electronic vs Paper per exclusive denomination
+  const personalStockSplit = useMemo<PersonalStockSplit>(() => {
+    const electronicByPkg: Record<string, number> = {};
+    const paperByPkg: Record<string, number> = {};
+    for (const pkg of EXCLUSIVE_PACKAGES) {
+      electronicByPkg[pkg.id] = 0;
+      paperByPkg[pkg.id] = 0;
+    }
+
+    const activeUid = profile?.uid || auth.currentUser?.uid || firebaseUser?.uid || '';
+    const isAdmin = profile?.role === 'super_admin';
+
+    if (isAdmin) {
+      let totalElectronic = 0;
+      for (const p of packages) {
+        const cnt = Math.max(0, Number(p.availableCount) || 0);
+        electronicByPkg[p.id] = cnt;
+        totalElectronic += cnt;
+      }
+      return { electronicByPkg, paperByPkg, totalElectronic, totalPaper: 0 };
+    }
+
+    const ownerIds = buildOwnerIdentifiers(profile, activeUid);
+    const cachedPool = ownerIds.length > 0 ? getCachedAvailableCardsForOwners(ownerIds) : [];
+    const cachedElecByPkg: Record<string, number> = {};
+    const cachedPaperByPkg: Record<string, number> = {};
+
+    for (const c of cachedPool) {
+      const normPkg = canonicalPackageId(c.packageId);
+      if (!normPkg) continue;
+      if (resolveCardKind(c) === 'paper') {
+        cachedPaperByPkg[normPkg] = (cachedPaperByPkg[normPkg] || 0) + 1;
+      } else {
+        cachedElecByPkg[normPkg] = (cachedElecByPkg[normPkg] || 0) + 1;
+      }
+    }
+
+    const persistedPaper =
+      activeUid
+        ? readCachedJson<Record<string, number>>(`taibah_paper_stock_v1_${activeUid}`, {})
+        : {};
+
+    let totalElectronic = 0;
+    let totalPaper = 0;
+    for (const pkg of packages) {
+      const pkgAvail = Math.max(0, Number(pkg.availableCount) || 0);
+      const paperFromCards = cachedPaperByPkg[pkg.id] || 0;
+      const paperFromInvoices = Math.max(
+        0,
+        Number(personalPaperCounts[pkg.id] ?? persistedPaper[pkg.id] ?? 0)
+      );
+      const paperCount = paperFromCards + paperFromInvoices;
+
+      const elecCount =
+        cachedPool.length > 0
+          ? Math.max(cachedElecByPkg[pkg.id] || 0, Math.max(0, pkgAvail - paperFromCards))
+          : Math.max(0, pkgAvail - paperFromCards);
+
+      electronicByPkg[pkg.id] = elecCount;
+      paperByPkg[pkg.id] = paperCount;
+      totalElectronic += elecCount;
+      totalPaper += paperCount;
+    }
+
+    return { electronicByPkg, paperByPkg, totalElectronic, totalPaper };
+  }, [packages, profile, firebaseUser?.uid, personalPaperCounts, offlinePoolVersion]);
+
   const unreadNotificationsCount = useMemo(
     () => notifications.filter((n) => !n.isRead).length,
     [notifications]
@@ -3008,6 +3088,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                   packageId: normPkg,
                   cardNumber: data.cardNumber,
                   ownerId: data.ownerId || oid,
+                  cardType: resolveCardKind(data),
                 });
               }
             }
@@ -3024,6 +3105,42 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         }
 
         const freshList = Array.from(mergedByCard.values());
+
+        // Also compute net paper cards from paper_invoice sales assigned to this user (without cardNumbers to avoid double counting)
+        try {
+          const paperQ = query(
+            collection(db, 'sales'),
+            where('buyerId', '==', activeUid),
+            limit(200)
+          );
+          const paperSnap = canHitServer
+            ? await raceWithTimeout(getDocs(paperQ), 8000).catch(() => null)
+            : await getDocsFromCache(paperQ).catch(() => null);
+          if (paperSnap) {
+            const paperMap: Record<string, number> = {};
+            for (const pkg of EXCLUSIVE_PACKAGES) paperMap[pkg.id] = 0;
+            for (const docSnap of paperSnap.docs) {
+              const s = docSnap.data() as SaleDoc;
+              if (s.saleType !== 'paper_invoice' || s.status === 'cancelled' || s.status === 'returned') {
+                continue;
+              }
+              for (const item of s.items || []) {
+                if (item.cardNumbers && item.cardNumbers.length > 0) continue;
+                const normPkg = canonicalPackageId(item.packageId || item.price);
+                if (!normPkg) continue;
+                const netQty = Math.max(
+                  0,
+                  (Number(item.delivered ?? item.quantity) || 0) - (Number(item.returned) || 0)
+                );
+                paperMap[normPkg] = (paperMap[normPkg] || 0) + netQty;
+              }
+            }
+            setPersonalPaperCounts(paperMap);
+            writeCachedJson(`taibah_paper_stock_v1_${activeUid}`, paperMap);
+          }
+        } catch {
+          // Keep existing cached paper counts on network/rule hiccup
+        }
 
         // Strict No Empty Overwrite: ONLY allow writing an empty pool if server confirmed 0 AND user forced refresh
         if (freshList.length > 0 || (anyServerQuerySucceeded && forceServer && existingLocal.length === 0)) {
@@ -7149,6 +7266,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       openTopupForPackage,
       packages,
       totalAvailableCards,
+      personalStockSplit,
       sales: mergedSales,
       customers: mergedCustomers,
       ledgerEntries: mergedLedgerEntries,
@@ -7227,6 +7345,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       openTopupForPackage,
       packages,
       totalAvailableCards,
+      personalStockSplit,
       mergedSales,
       mergedCustomers,
       mergedLedgerEntries,

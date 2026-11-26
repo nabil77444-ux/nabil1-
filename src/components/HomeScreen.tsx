@@ -43,13 +43,13 @@ interface HomeScreenProps {
 }
 
 /**
- * Custom crisp colored 3D Royal SVG Icons (slightly scaled for balanced proportions & clearer text)
+ * Custom crisp colored 3D Royal SVG Icons (24px–26px inside soft colored containers)
  */
-const TileIconArtwork: React.FC<{ index: number }> = React.memo(({ index }) => {
-  switch (index) {
-    case 1: // سلة تسوق زرقاء بموجات WiFi
+const TileIconArtwork: React.FC<{ route: AppRoute }> = React.memo(({ route }) => {
+  switch (route) {
+    case 'direct_sale': // سلة تسوق زرقاء بموجات WiFi
       return (
-        <svg viewBox="0 0 48 48" className="w-6 h-6 sm:w-8 sm:h-8 shrink-0 drop-shadow-sm" aria-hidden="true">
+        <svg viewBox="0 0 48 48" className="w-6 h-6 sm:w-[26px] sm:h-[26px] shrink-0 drop-shadow-xs" aria-hidden="true">
           <path d="M18 11a10 10 0 0 1 12 0" fill="none" stroke="#D4AF37" strokeWidth="2.8" strokeLinecap="round" />
           <path d="M21 15a6 6 0 0 1 6 0" fill="none" stroke="#2563EB" strokeWidth="2.6" strokeLinecap="round" />
           <circle cx="24" cy="18.2" r="1.8" fill="#1A365D" />
@@ -58,9 +58,20 @@ const TileIconArtwork: React.FC<{ index: number }> = React.memo(({ index }) => {
           <circle cx="33" cy="39" r="3" fill="#1A365D" stroke="#D4AF37" strokeWidth="1.5" />
         </svg>
       );
-    case 2: // بطاقات زرقاء وذهبية بأيقونة WiFi
+    case 'stock_count': // صناديق مخزون ملكية واضحة وبارزة للوكلاء والعملاء
       return (
-        <svg viewBox="0 0 48 48" className="w-6 h-6 sm:w-8 sm:h-8 shrink-0 drop-shadow-sm" aria-hidden="true">
+        <svg viewBox="0 0 48 48" className="w-6 h-6 sm:w-[26px] sm:h-[26px] shrink-0 drop-shadow-xs" aria-hidden="true">
+          <path d="M24 6l16 7.5v21L24 42 8 34.5v-21L24 6z" fill="#DBEAFE" stroke="#1A365D" strokeWidth="2.4" strokeLinejoin="round" />
+          <path d="M24 6l16 7.5L24 21 8 13.5 24 6z" fill="#2563EB" fillOpacity="0.85" stroke="#1A365D" strokeWidth="2.2" strokeLinejoin="round" />
+          <path d="M24 21v21" stroke="#1A365D" strokeWidth="2.4" strokeLinecap="round" />
+          <path d="M16 9.8l16 7.5" stroke="#FDE68A" strokeWidth="2.8" strokeLinecap="round" />
+          <circle cx="35" cy="33" r="7" fill="#10B981" stroke="#FFFFFF" strokeWidth="2" />
+          <path d="M32 33l2 2.2 4-4.2" fill="none" stroke="#FFFFFF" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      );
+    case 'electronic_cards': // بطاقات زرقاء وذهبية بأيقونة WiFi
+      return (
+        <svg viewBox="0 0 48 48" className="w-6 h-6 sm:w-[26px] sm:h-[26px] shrink-0 drop-shadow-xs" aria-hidden="true">
           <rect x="6" y="14" width="28" height="20" rx="4" fill="#D4AF37" stroke="#92400E" strokeWidth="1.6" />
           <rect x="13" y="18" width="29" height="20" rx="4" fill="#1A365D" stroke="#D4AF37" strokeWidth="2" />
           <rect x="17" y="23" width="8" height="5" rx="1" fill="#FDE68A" />
@@ -69,9 +80,9 @@ const TileIconArtwork: React.FC<{ index: number }> = React.memo(({ index }) => {
           <circle cx="32.5" cy="32" r="1.3" fill="#FDE68A" />
         </svg>
       );
-    case 3: // ورقة فاتورة زرقاء بعلامة $ ذهبية
+    case 'invoices': // ورقة فاتورة زرقاء بعلامة $ ذهبية
       return (
-        <svg viewBox="0 0 48 48" className="w-6 h-6 sm:w-8 sm:h-8 shrink-0 drop-shadow-sm" aria-hidden="true">
+        <svg viewBox="0 0 48 48" className="w-6 h-6 sm:w-[26px] sm:h-[26px] shrink-0 drop-shadow-xs" aria-hidden="true">
           <path d="M11 7h22l6 6v28l-4-2.5L31 41l-4-2.5L23 41l-4-2.5L15 41l-4-2.5V7z" fill="#EFF6FF" stroke="#1E40AF" strokeWidth="2.4" strokeLinejoin="round" />
           <path d="M33 7v6h6" fill="#BFDBFE" stroke="#1E40AF" strokeWidth="2" strokeLinejoin="round" />
           <line x1="16" y1="18" x2="26" y2="18" stroke="#2563EB" strokeWidth="2.4" strokeLinecap="round" />
@@ -80,9 +91,9 @@ const TileIconArtwork: React.FC<{ index: number }> = React.memo(({ index }) => {
           <text x="31" y="33" textAnchor="middle" fontSize="11" fontWeight="900" fill="#0F172A">$</text>
         </svg>
       );
-    case 4: // 3 أشخاص أزرق وذهبي
+    case 'customers': // 3 أشخاص أزرق وذهبي
       return (
-        <svg viewBox="0 0 48 48" className="w-6 h-6 sm:w-8 sm:h-8 shrink-0 drop-shadow-sm" aria-hidden="true">
+        <svg viewBox="0 0 48 48" className="w-6 h-6 sm:w-[26px] sm:h-[26px] shrink-0 drop-shadow-xs" aria-hidden="true">
           <circle cx="13" cy="18" r="4.5" fill="#D4AF37" />
           <path d="M6 34c0-4 3-7 7-7s7 3 7 7" fill="#D4AF37" opacity="0.9" />
           <circle cx="35" cy="18" r="4.5" fill="#D4AF37" />
@@ -91,26 +102,26 @@ const TileIconArtwork: React.FC<{ index: number }> = React.memo(({ index }) => {
           <path d="M14 37c0-5.5 4.5-9.5 10-9.5S34 31.5 34 37" fill="#1E40AF" stroke="#D4AF37" strokeWidth="1.8" />
         </svg>
       );
-    case 5: // صندوق هدية أزرق بشريط ذهبي
+    case 'packages': // صندوق هدية أزرق بشريط ذهبي
       return (
-        <svg viewBox="0 0 48 48" className="w-6 h-6 sm:w-8 sm:h-8 shrink-0 drop-shadow-sm" aria-hidden="true">
+        <svg viewBox="0 0 48 48" className="w-6 h-6 sm:w-[26px] sm:h-[26px] shrink-0 drop-shadow-xs" aria-hidden="true">
           <rect x="9" y="20" width="30" height="20" rx="3" fill="#1E40AF" stroke="#1A365D" strokeWidth="2" />
           <rect x="7" y="14" width="34" height="7" rx="2.5" fill="#2563EB" stroke="#1A365D" strokeWidth="1.8" />
           <rect x="21.5" y="14" width="5" height="26" fill="#D4AF37" />
           <path d="M24 14c-4-7-11-5-10-1s6 2 10 1zm0 0c4-7 11-5 10-1s-6 2-10 1z" fill="#F59E0B" stroke="#92400E" strokeWidth="1.4" />
         </svg>
       );
-    case 6: // دائرة خضراء بعلامة + بيضاء
+    case 'topup_requests': // دائرة خضراء بعلامة + بيضاء
       return (
-        <svg viewBox="0 0 48 48" className="w-6 h-6 sm:w-8 sm:h-8 shrink-0 drop-shadow-sm" aria-hidden="true">
+        <svg viewBox="0 0 48 48" className="w-6 h-6 sm:w-[26px] sm:h-[26px] shrink-0 drop-shadow-xs" aria-hidden="true">
           <circle cx="24" cy="24" r="17" fill="#10B981" stroke="#065F46" strokeWidth="2.2" />
           <circle cx="24" cy="24" r="14" fill="none" stroke="#A7F3D0" strokeWidth="1.2" opacity="0.6" />
           <path d="M24 14v20M14 24h20" stroke="#FFFFFF" strokeWidth="4.2" strokeLinecap="round" />
         </svg>
       );
-    case 7: // شخص مدير وشارة زرقاء
+    case 'agents_management': // شخص مدير وشارة زرقاء
       return (
-        <svg viewBox="0 0 48 48" className="w-6 h-6 sm:w-8 sm:h-8 shrink-0 drop-shadow-sm" aria-hidden="true">
+        <svg viewBox="0 0 48 48" className="w-6 h-6 sm:w-[26px] sm:h-[26px] shrink-0 drop-shadow-xs" aria-hidden="true">
           <circle cx="21" cy="15" r="6.5" fill="#1A365D" stroke="#D4AF37" strokeWidth="1.8" />
           <path d="M9 38c0-6.5 5.2-11 12-11s12 4.5 12 11" fill="#1E40AF" stroke="#1A365D" strokeWidth="2" />
           <polygon points="21,27 18.5,33 21,36 23.5,33" fill="#D4AF37" />
@@ -118,9 +129,9 @@ const TileIconArtwork: React.FC<{ index: number }> = React.memo(({ index }) => {
           <path d="M32 31l2 2.2 4.2-4.4" fill="none" stroke="#FFFFFF" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       );
-    default: // أعمدة زرقاء وسهم صاعد برتقالي
+    default: // التقارير — أعمدة زرقاء وسهم صاعد برتقالي
       return (
-        <svg viewBox="0 0 48 48" className="w-6 h-6 sm:w-8 sm:h-8 shrink-0 drop-shadow-sm" aria-hidden="true">
+        <svg viewBox="0 0 48 48" className="w-6 h-6 sm:w-[26px] sm:h-[26px] shrink-0 drop-shadow-xs" aria-hidden="true">
           <rect x="8" y="28" width="7" height="12" rx="1.8" fill="#60A5FA" stroke="#1E40AF" strokeWidth="1.5" />
           <rect x="19" y="21" width="7" height="19" rx="1.8" fill="#2563EB" stroke="#1A365D" strokeWidth="1.5" />
           <rect x="30" y="15" width="7" height="25" rx="1.8" fill="#1A365D" stroke="#D4AF37" strokeWidth="1.5" />
@@ -136,6 +147,7 @@ interface GridTileItem {
   number: number;
   route: AppRoute;
   title: string;
+  iconBg: string;
   badgeCount?: number;
   badgeVariant?: 'red' | 'emerald';
   visible: boolean;
@@ -159,6 +171,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
     isSyncing,
     pendingOfflineSyncCount,
     totalAvailableCards,
+    personalStockSplit,
     unreadNotificationsCount,
     pendingRegistrations,
     pendingTopups,
@@ -205,66 +218,85 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
   }, [packages]);
   const agentsBadgeTotal =
     pendingRegistrations.length + (role === 'super_admin' ? pendingPasswordResets.length : 0);
+  const personalGrandStockTotal =
+    personalStockSplit.totalElectronic + personalStockSplit.totalPaper;
 
   const tiles = useMemo<GridTileItem[]>(() => {
-    const all: GridTileItem[] = [
+    const isAdminUser = role === 'super_admin';
+    const isAgentUser = role === 'agent';
+    const canManageWholesale = isAdminUser || isAgentUser;
+    const raw: Array<Omit<GridTileItem, 'number'>> = [
       {
-        number: 1,
         route: 'direct_sale',
         title: 'البيع المباشر',
+        iconBg: 'bg-blue-50 dark:bg-blue-950/50 border-blue-200 dark:border-blue-800/70',
         visible: true,
       },
       {
-        number: 2,
+        route: 'stock_count',
+        title: 'عدد المخزون',
+        iconBg: 'bg-sky-50 dark:bg-sky-950/50 border-sky-200 dark:border-sky-800/70',
+        badgeCount: personalGrandStockTotal,
+        badgeVariant: personalGrandStockTotal === 0 ? 'red' : 'emerald',
+        visible: !isAdminUser,
+      },
+      {
         route: 'electronic_cards',
         title: 'الكروت الإلكترونية',
+        iconBg: 'bg-indigo-50 dark:bg-indigo-950/50 border-indigo-200 dark:border-indigo-800/70',
         badgeCount: totalAvailableCards,
         badgeVariant: totalAvailableCards === 0 ? 'red' : 'emerald',
-        visible: true,
+        visible: canManageWholesale,
       },
       {
-        number: 3,
         route: 'invoices',
         title: 'الفواتير',
+        iconBg: 'bg-amber-50 dark:bg-amber-950/40 border-amber-200 dark:border-amber-800/60',
         visible: true,
       },
       {
-        number: 4,
         route: 'customers',
         title: 'العملاء',
+        iconBg: 'bg-teal-50 dark:bg-teal-950/50 border-teal-200 dark:border-teal-800/70',
         visible: true,
       },
       {
-        number: 5,
         route: 'packages',
         title: 'الباقات',
-        visible: role === 'super_admin',
+        iconBg: 'bg-violet-50 dark:bg-violet-950/50 border-violet-200 dark:border-violet-800/70',
+        visible: isAdminUser,
       },
       {
-        number: 6,
         route: 'topup_requests',
         title: 'طلبات التغذية',
+        iconBg: 'bg-emerald-50 dark:bg-emerald-950/50 border-emerald-200 dark:border-emerald-800/70',
         badgeCount: pendingTopups.length > 0 ? pendingTopups.length : undefined,
         badgeVariant: 'red',
         visible: true,
       },
       {
-        number: 7,
         route: 'agents_management',
         title: 'الوكلاء والعملاء',
+        iconBg: 'bg-cyan-50 dark:bg-cyan-950/50 border-cyan-200 dark:border-cyan-800/70',
         badgeCount: agentsBadgeTotal > 0 ? agentsBadgeTotal : undefined,
         badgeVariant: 'red',
-        visible: role === 'super_admin' || role === 'agent',
+        visible: canManageWholesale,
       },
       {
-        number: 8,
         route: 'reports',
         title: 'التقارير',
+        iconBg: 'bg-orange-50 dark:bg-orange-950/40 border-orange-200 dark:border-orange-800/70',
         visible: true,
       },
     ];
-    return all.filter((item) => item.visible);
-  }, [agentsBadgeTotal, pendingTopups.length, role, totalAvailableCards]);
+    // Strict sequential numbering (1, 2, 3, 4, 5...) with ZERO gaps for every role
+    return raw
+      .filter((item) => item.visible)
+      .map((item, idx) => ({
+        ...item,
+        number: idx + 1,
+      }));
+  }, [agentsBadgeTotal, pendingTopups.length, personalGrandStockTotal, role, totalAvailableCards]);
 
   const handleShareApp = async () => {
     const shareText = buildAppShareText(appSettings.appDescription);
@@ -449,11 +481,11 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
 
       {/* MAIN CONTENT BODY — Strictly 100% Viewport Fitted with Balanced 4-Sided Margins (ZERO SCROLL!) */}
       <main className="flex-1 min-h-0 flex flex-col w-full max-w-5xl mx-auto px-3 pt-2 pb-2 gap-1.5 overflow-hidden safe-x">
-        {/* 3. CONFIGURABLE HERO SLIDER (Enlarged slightly for richer presence while keeping zero scroll) */}
+        {/* 3. CONFIGURABLE HERO SLIDER (Compact proportioned height to keep 100% zero scroll with vertical tiles) */}
         {sliderEnabled && (
           <section
             aria-label="معرض راوتر MikroTik وشبكة طيبة نت"
-            className="relative shrink-0 h-[16.5vh] min-h-[96px] max-h-[158px] sm:h-[18.5vh] rounded-2xl overflow-hidden border-2 border-[#D4AF37] shadow-lg bg-[#0F172A]"
+            className="relative shrink-0 h-[14vh] min-h-[82px] max-h-[136px] sm:h-[16.5vh] rounded-2xl overflow-hidden border-2 border-[#D4AF37] shadow-lg bg-[#0F172A]"
           >
             {slides.map((slide, idx) => (
               <div
@@ -502,13 +534,13 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
         <section className="shrink-0 flex flex-col gap-1">
           {tickerEnabled && (
             <div className="h-7 rounded-xl bg-[#1A365D] dark:bg-slate-900 border-2 border-[#D4AF37] flex items-center overflow-hidden shadow-sm">
-              <span className="shrink-0 h-full px-2.5 bg-gradient-to-b from-[#F59E0B] to-[#D4AF37] text-[#0F172A] text-[10px] font-extrabold flex items-center gap-1">
+              <span className="shrink-0 h-full px-2.5 bg-gradient-to-b from-[#F59E0B] to-[#D4AF37] text-[#0F172A] text-[10.5px] font-extrabold flex items-center gap-1">
                 <Bell className="w-3 h-3" />
                 أخبار
               </span>
               <div className="flex-1 overflow-hidden px-2">
                 <div
-                  className="animate-marquee-rtl text-[11px] font-bold text-white"
+                  className="animate-marquee-rtl text-[11.5px] font-bold text-white"
                   style={{ ['--marquee-duration' as string]: `${tickerDurationSec}s` }}
                 >
                   {appSettings.newsTicker}
@@ -519,7 +551,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
 
           {!warningDismissed && (
             <div
-              className={`h-7 rounded-xl pr-2.5 pl-1 border flex items-center justify-between gap-1 text-[11px] font-extrabold transition-colors ${
+              className={`h-7 rounded-xl pr-2.5 pl-1 border flex items-center justify-between gap-1 text-[11.5px] font-bold transition-colors ${
                 role === 'super_admin' && pendingTopups.length > 0
                   ? 'bg-amber-50 dark:bg-amber-950/50 border-amber-500 text-amber-900 dark:text-amber-200'
                   : isLowStock || Boolean(lowestPackage)
@@ -535,7 +567,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
                   } else if (role !== 'super_admin' && lowestPackage) {
                     openTopupForPackage(lowestPackage.id);
                   } else {
-                    onNavigate(role === 'super_admin' ? 'packages' : 'electronic_cards');
+                    onNavigate(role === 'super_admin' ? 'packages' : 'stock_count');
                   }
                 }}
                 className="flex-1 min-w-0 flex items-center gap-1.5 text-right truncate"
@@ -565,7 +597,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
                 <button
                   type="button"
                   onClick={() => openTopupForPackage(lowestPackage.id)}
-                  className="shrink-0 px-2 py-0.5 rounded-lg bg-[#1A365D] text-[#FDE68A] border border-[#D4AF37]/80 text-[10px] font-extrabold whitespace-nowrap"
+                  className="shrink-0 px-2 py-0.5 rounded-lg bg-[#1A365D] text-[#FDE68A] border border-[#D4AF37]/80 text-[10.5px] font-extrabold whitespace-nowrap"
                 >
                   اطلب تغذية
                 </button>
@@ -582,47 +614,61 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
           )}
         </section>
 
-        {/* 5. THE 8-ICON 3D ROYAL GRID — Prominent White 3D Cards + Gold Border + Sharper Larger Text (ZERO SCROLL!) */}
+        {/* 5. SEQUENTIAL VERTICAL-CENTERED ROYAL GRID (ZERO SCROLL — 100% FIT ON EVERY SCREEN!) */}
         <section
-          aria-label="الأيقونات الرئيسية الثماني"
-          className="flex-1 min-h-0 grid grid-cols-2 md:grid-cols-4 auto-rows-fr gap-2 sm:gap-2.5 py-0.5 px-0.5"
+          aria-label="الأيقونات الرئيسية"
+          className={`flex-1 min-h-0 grid grid-cols-2 md:grid-cols-4 auto-rows-fr ${
+            tiles.length <= 6 ? 'gap-3' : 'gap-2 sm:gap-2.5'
+          } py-0.5 px-0.5`}
         >
-          {tiles.map((tile) => (
-            <button
-              key={tile.route}
-              type="button"
-              onClick={() => onNavigate(tile.route)}
-              className="royal-tile-3d relative w-full h-full min-h-0 rounded-2xl bg-gradient-to-b from-white via-white to-slate-50 dark:from-slate-900 dark:via-slate-900 dark:to-[#0F172A] border-2 border-[#D4AF37] px-2 py-1 sm:px-2.5 sm:py-1.5 flex items-center justify-between gap-1.5 overflow-hidden group"
-            >
-              {/* Right (RTL): Crisp Black Circle with Gold Border Number */}
-              <span className="w-5.5 h-5.5 sm:w-6.5 sm:h-6.5 rounded-full bg-slate-950 border-2 border-[#D4AF37] text-[#FDE68A] text-[10px] sm:text-[11px] font-extrabold flex items-center justify-center shadow shrink-0 tabular-nums">
-                {tile.number}
-              </span>
-
-              {/* Center: Larger, Sharper Crisp Arabic Title with zero clipping */}
-              <span className="flex-1 min-w-0 text-center text-[13.5px] sm:text-[15px] font-extrabold text-[#0F172A] dark:text-white leading-snug line-clamp-2 px-0.5">
-                {tile.title}
-              </span>
-
-              {/* Left (RTL): Prominent Custom 3D Colored Icon Artwork */}
-              <div className="shrink-0 group-hover:scale-105 transition-transform">
-                <TileIconArtwork index={tile.number} />
-              </div>
-
-              {/* Live Alert / Stock Counter Badge Top-Left */}
-              {tile.badgeCount !== undefined && (
-                <span
-                  className={`absolute top-1 left-1 min-w-[19px] h-[17px] px-1.5 rounded-full text-[9.5px] font-extrabold flex items-center justify-center shadow tabular-nums border border-white/40 ${
-                    tile.badgeVariant === 'emerald'
-                      ? 'bg-emerald-600 text-white'
-                      : 'bg-[#DC2626] text-white'
-                  }`}
-                >
-                  {formatCount(tile.badgeCount, hideNumbers)}
+          {tiles.map((tile, idx) => {
+            const isOddLast = tiles.length % 2 === 1 && idx === tiles.length - 1;
+            const spaciousMode = tiles.length <= 6;
+            return (
+              <button
+                key={tile.route}
+                type="button"
+                onClick={() => onNavigate(tile.route)}
+                className={`royal-tile-3d relative w-full h-full min-h-0 rounded-2xl bg-gradient-to-b from-white via-white to-slate-50 dark:from-slate-900 dark:via-slate-900 dark:to-[#0F172A] border-2 border-[#D4AF37] flex flex-col items-center justify-center text-center overflow-hidden group ${
+                  spaciousMode
+                    ? 'gap-2.5 py-3 px-3'
+                    : 'gap-1 sm:gap-2 py-1.5 sm:py-3 px-2.5'
+                } ${isOddLast ? 'col-span-2 md:col-span-1' : ''}`}
+              >
+                {/* Top-Right Corner: Sleek Sequential Number Badge (1, 2, 3...) */}
+                <span className="absolute top-1.5 right-1.5 w-5 h-5 sm:w-5.5 sm:h-5.5 rounded-full bg-slate-950 border-[1.5px] border-[#D4AF37] text-[#FDE68A] text-[10px] font-extrabold flex items-center justify-center shadow tabular-nums">
+                  {tile.number}
                 </span>
-              )}
-            </button>
-          ))}
+
+                {/* Top-Left Corner: Live Alert / Stock Counter Badge (Zero Overlap) */}
+                {tile.badgeCount !== undefined && (
+                  <span
+                    className={`absolute top-1.5 left-1.5 min-w-[20px] h-[18px] px-1.5 rounded-full text-[10px] font-extrabold flex items-center justify-center shadow tabular-nums border border-white/50 ${
+                      tile.badgeVariant === 'emerald'
+                        ? 'bg-emerald-600 text-white'
+                        : 'bg-[#DC2626] text-white'
+                    }`}
+                  >
+                    {formatCount(tile.badgeCount, hideNumbers)}
+                  </span>
+                )}
+
+                {/* Centered Prominent Icon Container */}
+                <div
+                  className={`${
+                    spaciousMode ? 'w-12 h-12' : 'w-10 h-10 sm:w-12 sm:h-12'
+                  } rounded-2xl border ${tile.iconBg} flex items-center justify-center shadow-xs shrink-0 group-hover:scale-105 transition-transform`}
+                >
+                  <TileIconArtwork route={tile.route} />
+                </div>
+
+                {/* Centered Bold Arabic Title Matching Icon Proportion */}
+                <span className="w-full text-center text-[14.5px] sm:text-[15px] font-bold leading-snug text-slate-900 dark:text-white px-1">
+                  {tile.title}
+                </span>
+              </button>
+            );
+          })}
         </section>
       </main>
 
@@ -651,7 +697,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
                 }`}
               >
                 <Icon className={`w-4 h-4 sm:w-[18px] sm:h-[18px] ${isActive ? 'text-[#D4AF37]' : ''}`} />
-                <span className="text-[9.5px] sm:text-[10px] font-extrabold whitespace-nowrap">{navItem.label}</span>
+                <span className="text-[10.5px] sm:text-[11px] font-bold whitespace-nowrap">{navItem.label}</span>
               </button>
             );
           })}

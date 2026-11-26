@@ -178,6 +178,7 @@ function buildSalePrintablePayload(
 
 export const SalesListScreen: React.FC<SalesListScreenProps> = ({ hideNumbers, onNavigate }) => {
   const {
+    profile,
     sales,
     appSettings,
     hasMoreSales,
@@ -338,15 +339,17 @@ export const SalesListScreen: React.FC<SalesListScreenProps> = ({ hideNumbers, o
         </div>
       </div>
 
-      {/* Wide Orange Wholesale Button with Partial Delivery Support */}
-      <button
-        type="button"
-        onClick={() => onNavigate('electronic_cards')}
-        className="w-full min-h-[48px] rounded-2xl bg-gradient-to-b from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 border-2 border-[#D4AF37] text-white font-extrabold text-sm shadow-lg active:scale-[0.99] transition-all flex items-center justify-center gap-2 px-4"
-      >
-        <Plus className="w-5 h-5" />
-        <span>+ بيع الجملة (مع دعم التسليم على دفعات)</span>
-      </button>
+      {/* Wide Orange Wholesale Button with Partial Delivery Support (Super Admin & Agent Only) */}
+      {(profile?.role === 'super_admin' || profile?.role === 'agent') && (
+        <button
+          type="button"
+          onClick={() => onNavigate('electronic_cards')}
+          className="w-full min-h-[48px] rounded-2xl bg-gradient-to-b from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 border-2 border-[#D4AF37] text-white font-extrabold text-sm shadow-lg active:scale-[0.99] transition-all flex items-center justify-center gap-2 px-4"
+        >
+          <Plus className="w-5 h-5" />
+          <span>+ بيع الجملة (مع دعم التسليم على دفعات)</span>
+        </button>
+      )}
 
       {/* Date Filter Bar */}
       <div className="grid grid-cols-4 gap-1.5 bg-white dark:bg-slate-900 p-1.5 rounded-2xl border border-[#D4AF37]/60 shadow-sm">

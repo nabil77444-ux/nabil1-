@@ -2,6 +2,7 @@ import React from 'react';
 import {
   BarChart3,
   Bell,
+  Boxes,
   CreditCard,
   DatabaseBackup,
   FileClock,
@@ -71,15 +72,22 @@ export const SidebarDrawer: React.FC<SidebarDrawerProps> = ({
       visible: true,
     },
     {
+      route: 'stock_count',
+      label: 'عدد المخزون',
+      icon: Boxes,
+      iconBg: 'bg-gradient-to-br from-blue-600 to-indigo-800 text-[#FDE68A]',
+      visible: !isAdmin,
+    },
+    {
       route: 'electronic_cards',
       label: 'الكروت الإلكترونية (جملة)',
       icon: CreditCard,
       iconBg: 'bg-gradient-to-br from-blue-600 to-indigo-800 text-white',
-      visible: true,
+      visible: isAdmin || isAgent,
     },
     {
       route: 'invoices',
-      label: 'الفواتير والكروت الورقية',
+      label: isAdmin || isAgent ? 'الفواتير والكروت الورقية' : 'الفواتير',
       icon: FileText,
       iconBg: 'bg-gradient-to-br from-indigo-500 to-slate-800 text-[#FDE68A]',
       visible: true,

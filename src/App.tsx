@@ -35,6 +35,7 @@ const HIDE_NUMBERS_KEY = 'taibah_hide_numbers_v1';
 const VALID_ROUTES: AppRoute[] = [
   'home',
   'direct_sale',
+  'stock_count',
   'electronic_cards',
   'invoices',
   'customers',
@@ -315,11 +316,16 @@ const TaibahAppShell: React.FC = () => {
   // Enforce role access guards on route navigation
   const handleNavigate = (nextRoute: AppRoute) => {
     const role = profile?.role;
+    const isAdminOrAgent = role === 'super_admin' || role === 'agent';
     if (nextRoute === 'packages' && role !== 'super_admin') {
       notifyInfo('صلاحية الإدارة فقط', 'شاشة إدارة الباقات مخصصة للمدير العام فقط.');
       return;
     }
-    if (nextRoute === 'agents_management' && role === 'client') {
+    if (nextRoute === 'electronic_cards' && !isAdminOrAgent) {
+      notifyInfo('صلاحية غير متاحة', 'شاشة الكروت الإلكترونية مخصصة للمدير والوكيل فقط.');
+      return;
+    }
+    if (nextRoute === 'agents_management' && !isAdminOrAgent) {
       notifyInfo('صلاحية غير متاحة', 'شاشة إدارة الوكلاء والعملاء مخصصة للمدير والوكيل.');
       return;
     }

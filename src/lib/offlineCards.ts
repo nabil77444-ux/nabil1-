@@ -1,10 +1,43 @@
 import { EXCLUSIVE_PACKAGES, type SaleDoc, type SaleLineItem } from '../types/taibah';
 
+export type CardInventoryKind = 'electronic' | 'paper';
+
 export interface CachedAvailableCard {
   id: string;
   packageId: string;
   cardNumber: string;
   ownerId: string;
+  cardType?: CardInventoryKind;
+}
+
+/**
+ * Determine whether a card document belongs to electronic or paper inventory.
+ * Any card without an explicit paper indicator defaults to 'electronic'.
+ */
+export function resolveCardKind(raw?: {
+  cardType?: unknown;
+  type?: unknown;
+  format?: unknown;
+  isPaper?: unknown;
+  saleType?: unknown;
+}): CardInventoryKind {
+  if (!raw) return 'electronic';
+  if (raw.isPaper === true || raw.isPaper === 'true') return 'paper';
+  const candidates = [raw.cardType, raw.type, raw.format, raw.saleType];
+  for (const val of candidates) {
+    if (typeof val !== 'string') continue;
+    const norm = val.trim().toLowerCase();
+    if (
+      norm === 'paper' ||
+      norm === 'paper_invoice' ||
+      norm.includes('paper') ||
+      norm.includes('ورقي') ||
+      norm.includes('ورقية')
+    ) {
+      return 'paper';
+    }
+  }
+  return 'electronic';
 }
 
 /**
@@ -156,6 +189,7 @@ export function saveCachedAvailableCards(
       packageId: normPkg,
       cardNumber: c.cardNumber,
       ownerId: c.ownerId || ownerId,
+      cardType: resolveCardKind(c),
     });
     if (clean.length >= 6000) break;
   }
@@ -210,6 +244,7 @@ export function getCachedAvailableCards(ownerId: string, packageId?: string): Ca
             .map((c) => ({
               ...c,
               packageId: canonicalPackageId(c.packageId),
+              cardType: resolveCardKind(c),
             }));
           memoryCardPoolByOwner.set(ownerId, pool);
         }

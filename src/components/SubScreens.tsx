@@ -76,6 +76,8 @@ const loadReportsCenter = () =>
   import('./ReportsCenterScreen').then((m) => ({ default: m.ReportsCenterScreen }));
 const loadRecallCardsPanel = () =>
   import('./RecallCardsPanel').then((m) => ({ default: m.RecallCardsPanel }));
+const loadStockCount = () =>
+  import('./StockCountScreen').then((m) => ({ default: m.StockCountScreen }));
 
 const SalesListScreen = lazy(loadSalesList);
 const WholesaleCardsScreen = lazy(loadWholesaleCards);
@@ -85,6 +87,7 @@ const TopupRequestsScreen = lazy(loadTopupRequests);
 const AgentsManagementScreen = lazy(loadAgentsManagement);
 const ReportsCenterScreen = lazy(loadReportsCenter);
 const RecallCardsPanel = lazy(loadRecallCardsPanel);
+const StockCountScreen = lazy(loadStockCount);
 
 let preloadedOnce = false;
 export function preloadCoreSubScreens(): void {
@@ -92,6 +95,7 @@ export function preloadCoreSubScreens(): void {
   preloadedOnce = true;
   void Promise.allSettled([
     loadSalesList(),
+    loadStockCount(),
     loadWholesaleCards(),
     loadCustomersLedger(),
     loadTopupRequests(),
@@ -350,13 +354,14 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
 
   const isAdmin = profile?.role === 'super_admin';
   const isAgent = profile?.role === 'agent';
+  const isAdminOrAgent = isAdmin || isAgent;
 
-  // Strict route guard for non-admin accounts
+  // Strict route guards by role
   if ((route === 'packages' || route === 'audit_logs') && !isAdmin) {
     onBack();
     return null;
   }
-  if (route === 'agents_management' && !isAdmin && !isAgent) {
+  if ((route === 'electronic_cards' || route === 'agents_management') && !isAdminOrAgent) {
     onBack();
     return null;
   }
@@ -364,6 +369,20 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
   // =========================================================================
   // DEDICATED OPERATIONAL SCREENS
   // =========================================================================
+  if (route === 'stock_count') {
+    return (
+      <SubScreenShell
+        title="عدد المخزون"
+        subtitle="الكروت الإلكترونية والورقية المتوفرة بحسابك"
+        onBack={onBack}
+      >
+        <Suspense fallback={<LazyFallback />}>
+          <StockCountScreen hideNumbers={hideNumbers} />
+        </Suspense>
+      </SubScreenShell>
+    );
+  }
+
   if (route === 'sales_list') {
     return (
       <SubScreenShell
@@ -405,6 +424,19 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
   }
 
   if (route === 'invoices') {
+    if (!isAdminOrAgent) {
+      return (
+        <SubScreenShell
+          title="الفواتير"
+          subtitle="سجل الفواتير والمبيعات • طباعة ومشاركة PDF وواتساب"
+          onBack={onBack}
+        >
+          <Suspense fallback={<LazyFallback />}>
+            <SalesListScreen hideNumbers={hideNumbers} onNavigate={onNavigate} />
+          </Suspense>
+        </SubScreenShell>
+      );
+    }
     return (
       <SubScreenShell
         title="الفواتير والكروت الورقية"
