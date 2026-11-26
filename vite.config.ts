@@ -17,10 +17,14 @@ export default defineConfig(({ mode }) => {
   const nativeVersion = String(
     process.env.APP_NATIVE_VERSION || process.env.VITE_NATIVE_VERSION || '2.1.0'
   ).trim();
+  const githubRepo = String(
+    process.env.VITE_GITHUB_REPO || process.env.GITHUB_REPOSITORY || ''
+  ).trim();
   return {
     define: {
       __APP_BUILD_NUMBER__: JSON.stringify(buildNumber),
       __APP_NATIVE_VERSION__: JSON.stringify(nativeVersion),
+      __GITHUB_REPO__: JSON.stringify(githubRepo),
     },
     plugins: [
       react(),

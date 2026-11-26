@@ -1,14 +1,22 @@
 import { Capacitor, CapacitorHttp, registerPlugin, type PluginListenerHandle } from '@capacitor/core';
+import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
+import { auth, db } from '../lib/firebase';
 
 declare const __APP_BUILD_NUMBER__: number | undefined;
 declare const __APP_NATIVE_VERSION__: string | undefined;
+declare const __GITHUB_REPO__: string | undefined;
 
 interface TaibahUpdateNotifierNativePlugin {
+  getBuildConfig(): Promise<{
+    githubRepo?: string;
+    appBuildNumber?: number;
+    versionJsonUrl?: string;
+  }>;
   configure(options: {
     currentBuildNumber: number;
     versionJsonUrl: string;
     checkNow?: boolean;
-  }): Promise<{ scheduled?: boolean }>;
+  }): Promise<{ scheduled?: boolean; githubRepo?: string }>;
   requestNotificationPermission(): Promise<{ granted?: boolean }>;
   checkPendingUpdateIntent(): Promise<{ openUpdateDialog?: boolean }>;
   clearUpdateNotification(options?: { buildNumber?: number }): Promise<{ cleared?: boolean }>;
@@ -61,8 +69,12 @@ export const APP_BUILD_NUMBER =
   Number.parseInt(String(import.meta.env.VITE_APP_BUILD_NUMBER || '0').trim(), 10) ||
   0;
 
-const DEFAULT_GITHUB_REPO =
-  (import.meta.env.VITE_GITHUB_REPO as string | undefined)?.trim() || '';
+const COMPILE_TIME_GITHUB_REPO =
+  (import.meta.env.VITE_GITHUB_REPO as string | undefined)?.trim() ||
+  (typeof __GITHUB_REPO__ !== 'undefined' ? String(__GITHUB_REPO__ || '').trim() : '');
+
+let cachedNativeRepo = '';
+let cachedNativeBuildNumber = 0;
 
 const APPLIED_OTA_VERSION_KEY = 'taibah_applied_ota_version_v1';
 const APPLIED_OTA_BUILD_NUMBER_KEY = 'taibah_applied_ota_build_number_v1';
@@ -70,6 +82,13 @@ const UPDATE_SNOOZE_LOCAL_KEY = 'taibah_update_snooze_v1';
 const UPDATE_SNOOZE_SESSION_KEY = 'taibah_update_snooze_session_v1';
 const NOTIF_PERMISSION_ASKED_KEY = 'taibah_notif_perm_asked_v1';
 const DEFERRED_UPDATE_EVENT = 'taibah:deferred-update-changed';
+
+function isValidRepoSlug(value?: string | null): value is string {
+  const clean = String(value || '').trim();
+  if (!clean) return false;
+  if (clean.includes('<') || clean.includes('>') || clean.includes(' ')) return false;
+  return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(clean);
+}
 
 export function formatUpdateSizeAr(bytes?: number, fallbackMb?: number): string {
   if (typeof bytes === 'number' && Number.isFinite(bytes) && bytes > 0) {
@@ -171,6 +190,22 @@ function isNativePlatformSafe(): boolean {
   }
 }
 
+async function hydrateNativeBuildConfig(): Promise<void> {
+  if (!isNativePlatformSafe()) return;
+  if (cachedNativeRepo && cachedNativeBuildNumber > 0) return;
+  try {
+    const res = await TaibahUpdateNotifier.getBuildConfig();
+    if (res?.githubRepo && isValidRepoSlug(res.githubRepo)) {
+      cachedNativeRepo = res.githubRepo.trim();
+    }
+    if (typeof res?.appBuildNumber === 'number' && res.appBuildNumber > 0) {
+      cachedNativeBuildNumber = res.appBuildNumber;
+    }
+  } catch {
+    // Older native builds without getBuildConfig — ignore cleanly
+  }
+}
+
 async function loadNativeCapacitorUpdater() {
   if (!isNativePlatformSafe()) return null;
   try {
@@ -211,14 +246,17 @@ export async function configureNativeUpdateNotifier(
   checkNow = false
 ): Promise<void> {
   if (!isNativePlatformSafe()) return;
-  const versionJsonUrl = resolveVersionJsonUrl(apkDownloadUrl);
-  if (!versionJsonUrl) return;
+  await hydrateNativeBuildConfig();
+  const versionJsonUrl = resolveVersionJsonUrl(apkDownloadUrl) || '';
   try {
-    await TaibahUpdateNotifier.configure({
+    const res = await TaibahUpdateNotifier.configure({
       currentBuildNumber: getInstalledBuildNumber(),
       versionJsonUrl,
       checkNow,
     });
+    if (res?.githubRepo && isValidRepoSlug(res.githubRepo)) {
+      cachedNativeRepo = res.githubRepo.trim();
+    }
   } catch {
     // Non-fatal on older builds without native plugin
   }
@@ -297,7 +335,7 @@ export function getInstalledAppVersion(): string {
 }
 
 export function getInstalledBuildNumber(): number {
-  let baseBuild = APP_BUILD_NUMBER;
+  let baseBuild = Math.max(APP_BUILD_NUMBER, cachedNativeBuildNumber);
   if (baseBuild <= 0) {
     const parts = APP_CURRENT_VERSION.replace(/^v/i, '').split(/[^\d]+/).filter(Boolean);
     if (parts.length >= 3) {
@@ -344,13 +382,19 @@ export function compareVersions(a: string, b: string): number {
 }
 
 export function resolveGitHubRepo(apkDownloadUrl?: string): string | null {
-  if (DEFAULT_GITHUB_REPO && /^[^/\s]+\/[^/\s]+$/.test(DEFAULT_GITHUB_REPO)) {
-    return DEFAULT_GITHUB_REPO;
+  if (isValidRepoSlug(COMPILE_TIME_GITHUB_REPO)) {
+    return COMPILE_TIME_GITHUB_REPO;
+  }
+  if (isValidRepoSlug(cachedNativeRepo)) {
+    return cachedNativeRepo;
   }
   if (apkDownloadUrl) {
     const match = apkDownloadUrl.match(/github\.com\/([^/\s]+\/[^/\s]+)/i);
     if (match?.[1]) {
-      return match[1].replace(/\.git$/i, '');
+      const cleaned = match[1].replace(/\.git$/i, '').trim();
+      if (isValidRepoSlug(cleaned)) {
+        return cleaned;
+      }
     }
   }
   return null;
@@ -387,6 +431,7 @@ async function httpGetJson<T>(url: string, timeoutMs = 9500): Promise<HttpJsonRe
         headers: {
           Accept: 'application/vnd.github+json, application/json',
           'Cache-Control': 'no-cache',
+          'User-Agent': 'TaibahNet-Android-Updater/2.1',
         },
         connectTimeout: timeoutMs,
         readTimeout: timeoutMs,
@@ -442,6 +487,8 @@ interface GitHubReleasePayload {
   tag_name?: string;
   name?: string;
   body?: string;
+  draft?: boolean;
+  prerelease?: boolean;
   published_at?: string;
   assets?: GitHubReleaseAsset[];
 }
@@ -517,13 +564,77 @@ function extractVersionFromReleaseBody(body?: string, tagName?: string): string 
 }
 
 /**
- * Checks `version.json` & GitHub Releases Latest API via `CapacitorHttp.get` on Android
- * (zero CORS issues) and `fetch` on Web. Works for ALL users (Admin, Agent, Client).
+ * Fallback Stage 3: Read lightweight OTA manifest mirror from Firestore (`app_meta/latest_update`).
+ */
+async function readFirestoreUpdateMirror(
+  fallbackApkUrl?: string
+): Promise<AppUpdateManifest | null> {
+  if (!auth.currentUser) return null;
+  try {
+    const snap = await getDoc(doc(db, 'app_meta', 'latest_update'));
+    if (!snap.exists()) return null;
+    const data = snap.data() as Partial<AppUpdateManifest>;
+    return parseManifestObject(data, fallbackApkUrl);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Super Admin helper: silently mirror a verified GitHub manifest into Firestore `app_meta/latest_update`
+ * so Agents and Clients always have a resilient fallback even if GitHub is rate-limited or unreachable.
+ */
+async function mirrorManifestToFirestoreSilently(manifest: AppUpdateManifest): Promise<void> {
+  if (!auth.currentUser) return;
+  try {
+    const payload: Record<string, unknown> = {
+      version: manifest.version.slice(0, 32),
+      updatedAt: serverTimestamp(),
+    };
+    if (typeof manifest.buildNumber === 'number' && manifest.buildNumber > 0) {
+      payload.buildNumber = manifest.buildNumber;
+    }
+    if (manifest.nativeVersion) payload.nativeVersion = manifest.nativeVersion.slice(0, 32);
+    if (manifest.minNativeVersion) payload.minNativeVersion = manifest.minNativeVersion.slice(0, 32);
+    if (typeof manifest.updateSizeBytes === 'number' && manifest.updateSizeBytes > 0) {
+      payload.updateSizeBytes = manifest.updateSizeBytes;
+    }
+    if (manifest.updateSizeText) payload.updateSizeText = manifest.updateSizeText.slice(0, 64);
+    if (typeof manifest.sizeMb === 'number' && manifest.sizeMb > 0) {
+      payload.sizeMb = manifest.sizeMb;
+    }
+    if (manifest.notes) payload.notes = manifest.notes.slice(0, 600);
+    if (manifest.bundleUrl) payload.bundleUrl = manifest.bundleUrl.slice(0, 400);
+    if (manifest.otaUrl) payload.otaUrl = manifest.otaUrl.slice(0, 400);
+    if (manifest.apkUrl) payload.apkUrl = manifest.apkUrl.slice(0, 400);
+    if (manifest.publishedAt) payload.publishedAt = manifest.publishedAt.slice(0, 64);
+
+    await setDoc(doc(db, 'app_meta', 'latest_update'), payload, { merge: false });
+  } catch {
+    // Non-fatal mirror write
+  }
+}
+
+/**
+ * Multi-stage resilient update checker using `CapacitorHttp.get` on Native Android
+ * (zero CORS issues, full cross-domain redirects) and `fetch` on Web:
+ *
+ * Stage 1 (Primary Fast, Zero API Rate Limit):
+ *   Direct `https://github.com/${REPO}/releases/latest/download/version.json?t=...`
+ *   (or explicit `VITE_UPDATE_MANIFEST_URL`).
+ * Stage 2 (Auto Fallback #1 on 404 / prerelease / Web CORS):
+ *   `https://api.github.com/repos/${REPO}/releases?per_page=1&t=...`
+ *   (locates `version.json` & `update.zip` even if a release is marked pre-release).
+ * Stage 3 (Auto Fallback #2 — Cloud Mirror):
+ *   Lightweight Firestore document `app_meta/latest_update`.
  */
 export async function checkForAppUpdate(options?: {
   apkDownloadUrl?: string;
   silent?: boolean;
+  canMirrorToFirestore?: boolean;
 }): Promise<UpdateCheckResult> {
+  await hydrateNativeBuildConfig();
+
   const currentVersion = getInstalledAppVersion();
   const currentBuildNumber = getInstalledBuildNumber();
   const isNative = isNativePlatformSafe();
@@ -543,26 +654,14 @@ export async function checkForAppUpdate(options?: {
     import.meta.env.VITE_UPDATE_MANIFEST_URL as string | undefined
   )?.trim();
   const repo = resolveGitHubRepo(options?.apkDownloadUrl);
-  const fallbackVersionUrl = resolveVersionJsonUrl(options?.apkDownloadUrl);
-
-  if (!explicitManifestUrl && !repo && !fallbackVersionUrl) {
-    return {
-      hasUpdate: false,
-      requiresNativeApk: false,
-      currentVersion,
-      currentBuildNumber,
-      manifest: null,
-      error: options?.silent
-        ? undefined
-        : 'رابط سيرفر التحديثات غير مُعدّ بعد في هذا الإصدار.',
-    };
-  }
+  const directVersionUrl = resolveVersionJsonUrl(options?.apkDownloadUrl);
 
   let manifest: AppUpdateManifest | null = null;
+  let fetchedFromGitHub = false;
   let lastHttpStatus = 0;
 
   try {
-    // Strategy 1: Explicit custom manifest URL
+    // Stage 0: Explicit custom manifest URL (if configured)
     if (explicitManifestUrl && /^https?:\/\//i.test(explicitManifestUrl)) {
       const sep = explicitManifestUrl.includes('?') ? '&' : '?';
       const res = await httpGetJson<Partial<AppUpdateManifest>>(
@@ -571,29 +670,34 @@ export async function checkForAppUpdate(options?: {
       lastHttpStatus = res.status;
       if (res.ok && res.data) {
         manifest = parseManifestObject(res.data, options?.apkDownloadUrl);
+        if (manifest) fetchedFromGitHub = true;
       }
     }
 
-    // Strategy 2: Direct version.json via CapacitorHttp on Native Android (fastest, ~300 bytes, zero API rate limits)
-    if (!manifest && isNative && fallbackVersionUrl) {
-      const sep = fallbackVersionUrl.includes('?') ? '&' : '?';
+    // Stage 1 (Fast Primary, Zero Rate Limit): Direct releases/latest/download/version.json
+    if (!manifest && directVersionUrl) {
+      const sep = directVersionUrl.includes('?') ? '&' : '?';
       const directRes = await httpGetJson<Partial<AppUpdateManifest>>(
-        `${fallbackVersionUrl}${sep}t=${Date.now()}`
+        `${directVersionUrl}${sep}t=${Date.now()}`
       );
-      lastHttpStatus = directRes.status || lastHttpStatus;
+      if (directRes.status > 0) lastHttpStatus = directRes.status;
       if (directRes.ok && directRes.data) {
         manifest = parseManifestObject(directRes.data, options?.apkDownloadUrl);
+        if (manifest) fetchedFromGitHub = true;
       }
     }
 
-    // Strategy 3: GitHub Releases Latest API (Web CORS-friendly + Native fallback)
+    // Stage 2 (Auto Fallback #1 on 404 / prerelease / Web CORS): GitHub Releases list (?per_page=1)
     if (!manifest && repo) {
-      const releaseApiUrl = `https://api.github.com/repos/${repo}/releases/latest?t=${Date.now()}`;
-      const releaseRes = await httpGetJson<GitHubReleasePayload>(releaseApiUrl);
-      lastHttpStatus = releaseRes.status || lastHttpStatus;
+      const releasesListUrl = `https://api.github.com/repos/${repo}/releases?per_page=1&t=${Date.now()}`;
+      const listRes = await httpGetJson<GitHubReleasePayload[]>(releasesListUrl);
+      if (listRes.status > 0) lastHttpStatus = listRes.status;
 
-      if (releaseRes.ok && releaseRes.data) {
-        const assets = Array.isArray(releaseRes.data.assets) ? releaseRes.data.assets : [];
+      const releases = Array.isArray(listRes.data) ? listRes.data : [];
+      const latestRelease = releases.find((r) => r && !r.draft) || releases[0];
+
+      if (listRes.ok && latestRelease) {
+        const assets = Array.isArray(latestRelease.assets) ? latestRelease.assets : [];
         const versionAsset = assets.find((a) => a.name?.toLowerCase() === 'version.json');
         const zipAsset = assets.find((a) => a.name?.toLowerCase() === 'update.zip');
         const apkAsset = assets.find((a) => a.name?.toLowerCase().endsWith('.apk'));
@@ -606,7 +710,7 @@ export async function checkForAppUpdate(options?: {
           options?.apkDownloadUrl ||
           `https://github.com/${repo}/releases/latest/download/TaibahNet-Cards.apk`;
 
-        if (isNative && versionAsset?.browser_download_url) {
+        if (versionAsset?.browser_download_url && isNative) {
           const sep = versionAsset.browser_download_url.includes('?') ? '&' : '?';
           const verRes = await httpGetJson<Partial<AppUpdateManifest>>(
             `${versionAsset.browser_download_url}${sep}t=${Date.now()}`
@@ -618,13 +722,14 @@ export async function checkForAppUpdate(options?: {
               fallbackBundleUrl,
               zipAsset?.size
             );
+            if (manifest) fetchedFromGitHub = true;
           }
         }
 
         if (!manifest) {
           const derivedVersion = extractVersionFromReleaseBody(
-            releaseRes.data.body,
-            releaseRes.data.tag_name
+            latestRelease.body,
+            latestRelease.tag_name
           );
           if (derivedVersion && /\d+\.\d+/.test(derivedVersion)) {
             const parts = derivedVersion.split('.');
@@ -647,25 +752,49 @@ export async function checkForAppUpdate(options?: {
               bundleUrl: fallbackBundleUrl,
               otaUrl: fallbackBundleUrl,
               apkUrl: fallbackApkUrl,
-              publishedAt: releaseRes.data.published_at,
+              publishedAt: latestRelease.published_at,
             };
+            fetchedFromGitHub = true;
           }
         }
       }
     }
 
+    // Stage 3 (Auto Fallback #2): Lightweight Firestore Mirror (`app_meta/latest_update`)
     if (!manifest) {
+      manifest = await readFirestoreUpdateMirror(options?.apkDownloadUrl);
+    }
+
+    // If Super Admin successfully fetched a live manifest from GitHub, update the Firestore mirror silently
+    if (manifest && fetchedFromGitHub && options?.canMirrorToFirestore) {
+      void mirrorManifestToFirestoreSilently(manifest);
+    }
+
+    if (!manifest) {
+      let friendlyError: string | undefined;
+      if (!options?.silent) {
+        if (!explicitManifestUrl && !repo) {
+          friendlyError =
+            'لم يتم العثور على إصدار منشور بعد — عند بناء التطبيق عبر GitHub Actions سيتم ربط سيرفر التحديثات تلقائياً.';
+        } else if (lastHttpStatus === 404) {
+          friendlyError =
+            'تعذر العثور على ملف التحديث (404) — تأكد من أن مستودع GitHub عام (Public) وأنه تم نشر إصدار رسمي (Release) يحتوي على version.json.';
+        } else if (lastHttpStatus === 403 || lastHttpStatus === 429) {
+          friendlyError =
+            'تم تجاوز حد الطلبات المؤقت لسيرفر التحديثات — يرجى المحاولة مجدداً بعد دقائق.';
+        } else if (lastHttpStatus > 0) {
+          friendlyError = `تعذر الاتصال بسيرفر التحديثات (رمز ${lastHttpStatus}) — تأكد من اتصال الإنترنت وحاول لاحقاً.`;
+        } else {
+          friendlyError = 'تعذر الاتصال بسيرفر التحديثات — تحقق من اتصال الإنترنت وحاول مجدداً.';
+        }
+      }
       return {
         hasUpdate: false,
         requiresNativeApk: false,
         currentVersion,
         currentBuildNumber,
         manifest: null,
-        error: options?.silent
-          ? undefined
-          : lastHttpStatus > 0
-            ? `تعذر الاتصال بسيرفر التحديثات (رمز ${lastHttpStatus})`
-            : 'تعذر الاتصال بسيرفر التحديثات — تحقق من اتصال الإنترنت وحاول مجدداً.',
+        error: friendlyError,
       };
     }
 
@@ -701,7 +830,7 @@ export async function checkForAppUpdate(options?: {
       manifest: null,
       error: options?.silent
         ? undefined
-        : 'تعذر الاتصال بسيرفر التحديثات — حاول مرة أخرى لاحقاً.',
+        : 'تعذر الاتصال بسيرفر التحديثات — تحقق من اتصال الإنترنت وحاول مرة أخرى لاحقاً.',
     };
   }
 }

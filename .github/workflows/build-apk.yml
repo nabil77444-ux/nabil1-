@@ -356,10 +356,51 @@ jobs:
           fi
 
           python3 - <<'PYEOF'
-          import re
+          import re, textwrap
           gradle_path = "android/app/build.gradle"
           with open(gradle_path, "r", encoding="utf-8") as f:
               txt = f.read()
+
+          # Inject GITHUB_REPO and APP_BUILD_NUMBER properties cleanly as BuildConfig fields (AGP 8+ requires buildFeatures.buildConfig = true)
+          repo_props_block = textwrap.dedent("""\
+              def taibahGithubRepo = (project.findProperty('GITHUB_REPO') ?: System.getenv('GITHUB_REPOSITORY') ?: '').toString().trim().replace('"', '')
+              def taibahBuildNumRaw = (project.findProperty('APP_BUILD_NUMBER') ?: System.getenv('GITHUB_RUN_NUMBER') ?: '0').toString().trim()
+              def taibahBuildNum = taibahBuildNumRaw.isInteger() ? taibahBuildNumRaw.toInteger() : 0
+          """)
+          if 'taibahGithubRepo' not in txt:
+              txt = re.sub(
+                  r'(android\s*\{)',
+                  lambda m: repo_props_block + '\n' + m.group(1),
+                  txt,
+                  count=1
+              )
+
+          if 'buildFeatures' not in txt:
+              txt = re.sub(
+                  r'(android\s*\{)',
+                  lambda m: m.group(1) + '\n    buildFeatures {\n        buildConfig true\n    }',
+                  txt,
+                  count=1
+              )
+          elif 'buildConfig' not in txt:
+              txt = re.sub(
+                  r'(buildFeatures\s*\{)',
+                  lambda m: m.group(1) + '\n        buildConfig true',
+                  txt,
+                  count=1
+              )
+
+          if 'buildConfigField "String", "GITHUB_REPO"' not in txt:
+              bc_lines = (
+                  '\n        buildConfigField "String", "GITHUB_REPO", "\\"${taibahGithubRepo}\\""'
+                  '\n        buildConfigField "int", "APP_BUILD_NUMBER", "${taibahBuildNum}"'
+              )
+              txt = re.sub(
+                  r'(defaultConfig\s*\{)',
+                  lambda m: m.group(1) + bc_lines,
+                  txt,
+                  count=1
+              )
 
           # Add resConfigs "ar", "en" inside defaultConfig to strip unused AndroidX/Play Services locales
           if 'resConfigs' not in txt and 'resourceConfigurations' not in txt:
@@ -388,13 +429,13 @@ jobs:
 
           with open(gradle_path, "w", encoding="utf-8") as f:
               f.write(txt)
-          print("Enabled minifyEnabled, shrinkResources, and resConfigs ar/en in android/app/build.gradle")
+          print("Enabled BuildConfig (GITHUB_REPO + APP_BUILD_NUMBER), minifyEnabled, shrinkResources, and resConfigs ar/en in android/app/build.gradle")
           PYEOF
 
           echo "=== Verified AndroidManifest.xml permissions & keyboard mode ==="
           grep -E "uses-permission|windowSoftInputMode" "$MANIFEST" || true
-          echo "=== Verified android/app/build.gradle shrinking & resConfigs ==="
-          grep -E "resConfigs|minifyEnabled|shrinkResources|proguardFiles" "$APP_GRADLE" || true
+          echo "=== Verified android/app/build.gradle BuildConfig, shrinking & resConfigs ==="
+          grep -E "buildConfig|GITHUB_REPO|APP_BUILD_NUMBER|resConfigs|minifyEnabled|shrinkResources|proguardFiles" "$APP_GRADLE" || true
 
       - name: Restore Persistent Fallback Release Keystore (Seamless In-Place Upgrades)
         uses: actions/cache@v4
@@ -427,14 +468,18 @@ jobs:
 
           if [ "$BUILD_TYPE" = "debug" ]; then
             echo "=== Building Signed Android Debug APK ==="
-            ./gradlew assembleDebug
+            ./gradlew assembleDebug \
+              -PGITHUB_REPO="${{ github.repository }}" \
+              -PAPP_BUILD_NUMBER="${{ github.run_number }}"
             DEBUG_APK="app/build/outputs/apk/debug/app-debug.apk"
             test -s "$DEBUG_APK" || { echo "::error::Debug APK not produced at $DEBUG_APK"; exit 1; }
             cp -f "$DEBUG_APK" ../TaibahNet-Cards.apk
             echo "SIGNING_STATUS=DEBUG_SIGNED" >> "$GITHUB_ENV"
           else
             echo "=== Building Signed Android Release APK ==="
-            ./gradlew assembleRelease
+            ./gradlew assembleRelease \
+              -PGITHUB_REPO="${{ github.repository }}" \
+              -PAPP_BUILD_NUMBER="${{ github.run_number }}"
 
             if [ -s "app/build/outputs/apk/release/app-release-unsigned.apk" ]; then
               RAW_RELEASE_APK="app/build/outputs/apk/release/app-release-unsigned.apk"
@@ -533,6 +578,9 @@ jobs:
         with:
           tag_name: latest
           name: كروت طيبة نت — TAIBAH NET (Android Release APK + OTA)
+          draft: false
+          prerelease: false
+          make_latest: true
           body: |
             الإصدار النهائي الجاهز للتثبيت والتحديث المباشر أو التحديث الخفيف (OTA) لتطبيق **كروت طيبة نت – TAIBAH NET**.
             - **applicationId:** `net.taibah.wireless`
@@ -544,9 +592,8 @@ jobs:
             - يدعم مشاركة الفواتير والكشوفات (PDF عربي + صور HD) وجلب جهات الاتصال مباشرة من سجل الهاتف الرسمي
             - مزامنة لحظية مع Firebase Firestore
           files: |
-            TaibahNet-Cards.apk
-            update.zip
             version.json
-          make_latest: true
+            update.zip
+            TaibahNet-Cards.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

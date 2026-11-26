@@ -680,7 +680,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
         subtitle={SUPER_ADMIN_CONFIG.developerCredit}
         onBack={onBack}
       >
-        <div className="space-y-3.5 pb-[calc(env(safe-area-inset-bottom,0px)+96px)]">
+        <div className="space-y-3.5 pb-28 [padding-bottom:calc(7rem+env(safe-area-inset-bottom,0px))]">
           {/* Device & Security Preferences */}
           <div className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37]/70 p-3.5 shadow-md space-y-2.5">
             <h2 className="text-sm font-extrabold text-[#1A365D] dark:text-[#FDE68A] flex items-center gap-2">

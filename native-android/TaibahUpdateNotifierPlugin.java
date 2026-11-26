@@ -91,6 +91,15 @@ public class TaibahUpdateNotifierPlugin extends Plugin {
     }
 
     @PluginMethod
+    public void getBuildConfig(PluginCall call) {
+        JSObject out = new JSObject();
+        out.put("githubRepo", UpdateCheckWorker.resolveBuildConfigRepo());
+        out.put("appBuildNumber", UpdateCheckWorker.resolveBuildConfigBuildNumber());
+        out.put("versionJsonUrl", UpdateCheckWorker.resolveDefaultVersionUrl());
+        call.resolve(out);
+    }
+
+    @PluginMethod
     public void configure(PluginCall call) {
         try {
             Context ctx = getContext();
@@ -100,7 +109,15 @@ public class TaibahUpdateNotifierPlugin extends Plugin {
             }
 
             int currentBuild = call.getInt("currentBuildNumber", 0);
+            int nativeBuild = UpdateCheckWorker.resolveBuildConfigBuildNumber();
+            if (nativeBuild > currentBuild) {
+                currentBuild = nativeBuild;
+            }
+
             String versionUrl = call.getString("versionJsonUrl", "");
+            if (versionUrl == null || versionUrl.trim().isEmpty()) {
+                versionUrl = UpdateCheckWorker.resolveDefaultVersionUrl();
+            }
             boolean triggerImmediate = Boolean.TRUE.equals(call.getBoolean("checkNow", false));
 
             SharedPreferences prefs = ctx.getSharedPreferences(UpdateCheckWorker.PREFS_NAME, Context.MODE_PRIVATE);
@@ -149,6 +166,7 @@ public class TaibahUpdateNotifierPlugin extends Plugin {
 
             JSObject out = new JSObject();
             out.put("scheduled", true);
+            out.put("githubRepo", UpdateCheckWorker.resolveBuildConfigRepo());
             call.resolve(out);
         } catch (Throwable t) {
             JSObject out = new JSObject();

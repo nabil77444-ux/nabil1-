@@ -115,6 +115,7 @@ const TaibahAppShell: React.FC = () => {
         const result = await checkForAppUpdate({
           apkDownloadUrl: appSettings?.apkDownloadUrl,
           silent,
+          canMirrorToFirestore: profile?.role === 'super_admin',
         });
 
         if (result.hasUpdate && result.manifest) {
@@ -145,7 +146,7 @@ const TaibahAppShell: React.FC = () => {
         }
       }
     },
-    [appSettings?.apkDownloadUrl, notifyInfo, notifySuccess]
+    [appSettings?.apkDownloadUrl, notifyInfo, notifySuccess, profile?.role]
   );
 
   // ONLY lock the session when the user explicitly clicks manual "تسجيل الخروج"

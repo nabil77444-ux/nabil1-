@@ -838,5 +838,42 @@ service cloud.firestore {
         );
       allow delete: if isValidId(statId) && isSuperAdmin();
     }
+
+    // =========================================================================
+    // 15. Lightweight OTA Update Manifest Mirror (app_meta/latest_update)
+    // =========================================================================
+    function isValidAppUpdateMetaDoc(data) {
+      return data.keys().hasAll(['version', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'version', 'buildNumber', 'nativeVersion', 'minNativeVersion',
+          'updateSizeBytes', 'updateSizeText', 'sizeMb', 'notes',
+          'bundleUrl', 'otaUrl', 'apkUrl', 'publishedAt', 'updatedAt'
+        ]) &&
+        isValidString(data.version, 1, 32) &&
+        (!('buildNumber' in data) || (data.buildNumber is number && data.buildNumber >= 0 && data.buildNumber <= 1000000)) &&
+        (!('nativeVersion' in data) || isValidString(data.nativeVersion, 0, 32)) &&
+        (!('minNativeVersion' in data) || isValidString(data.minNativeVersion, 0, 32)) &&
+        (!('updateSizeBytes' in data) || (data.updateSizeBytes is number && data.updateSizeBytes >= 0 && data.updateSizeBytes <= 200000000)) &&
+        (!('updateSizeText' in data) || isValidString(data.updateSizeText, 0, 64)) &&
+        (!('sizeMb' in data) || (data.sizeMb is number && data.sizeMb >= 0 && data.sizeMb <= 200)) &&
+        (!('notes' in data) || isValidString(data.notes, 0, 600)) &&
+        (!('bundleUrl' in data) || isValidString(data.bundleUrl, 0, 400)) &&
+        (!('otaUrl' in data) || isValidString(data.otaUrl, 0, 400)) &&
+        (!('apkUrl' in data) || isValidString(data.apkUrl, 0, 400)) &&
+        (!('publishedAt' in data) || isValidString(data.publishedAt, 0, 64)) &&
+        data.updatedAt is timestamp;
+    }
+
+    match /app_meta/{docId} {
+      allow get: if isValidId(docId) && docId == 'latest_update' && isSignedIn();
+      allow list: if isSuperAdmin();
+      allow create: if isValidId(docId) && docId == 'latest_update' && isSuperAdmin() &&
+        isValidAppUpdateMetaDoc(incoming()) &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(docId) && docId == 'latest_update' && isSuperAdmin() &&
+        isValidAppUpdateMetaDoc(incoming()) &&
+        incoming().updatedAt == request.time;
+      allow delete: if isValidId(docId) && isSuperAdmin();
+    }
   }
 }

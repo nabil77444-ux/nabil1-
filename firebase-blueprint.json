@@ -308,6 +308,27 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["updatedAt"]
+    },
+    "AppUpdateMetaDoc": {
+      "title": "AppUpdateMetaDoc",
+      "description": "Lightweight OTA update manifest mirror (app_meta/latest_update) readable by all authenticated users as a fallback if GitHub is unreachable",
+      "type": "object",
+      "properties": {
+        "version": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "buildNumber": { "type": "number" },
+        "nativeVersion": { "type": "string", "maxLength": 32 },
+        "minNativeVersion": { "type": "string", "maxLength": 32 },
+        "updateSizeBytes": { "type": "number" },
+        "updateSizeText": { "type": "string", "maxLength": 64 },
+        "sizeMb": { "type": "number" },
+        "notes": { "type": "string", "maxLength": 600 },
+        "bundleUrl": { "type": "string", "maxLength": 400 },
+        "otaUrl": { "type": "string", "maxLength": 400 },
+        "apkUrl": { "type": "string", "maxLength": 400 },
+        "publishedAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["version", "updatedAt"]
     }
   },
   "firestore": {
@@ -327,6 +348,7 @@
     "/notifications/{notificationId}": { "schema": { "$ref": "#/entities/NotificationDoc" }, "description": "Real-time notification center" },
     "/auditLogs/{logId}": { "schema": { "$ref": "#/entities/AuditLogDoc" }, "description": "Immutable operation audit logs" },
     "/audit_logs/{logId}": { "schema": { "$ref": "#/entities/AuditLogDoc" }, "description": "Legacy alias audit logs collection for historical account recovery" },
-    "/settings/{settingId}": { "schema": { "$ref": "#/entities/AppSettingsDoc" }, "description": "Global Taibah Net configuration" }
+    "/settings/{settingId}": { "schema": { "$ref": "#/entities/AppSettingsDoc" }, "description": "Global Taibah Net configuration" },
+    "/app_meta/{docId}": { "schema": { "$ref": "#/entities/AppUpdateMetaDoc" }, "description": "Lightweight OTA update manifest mirror (latest_update)" }
   }
 }
