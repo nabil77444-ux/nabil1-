@@ -361,21 +361,27 @@ public class UpdateCheckWorker extends Worker {
         return null;
     }
 
-    private String mapChangeTypeArabic(String type) {
-        if (type == null) return "تحسين";
-        switch (type.trim().toLowerCase(java.util.Locale.US)) {
-            case "add":
-                return "إضافة";
-            case "fix":
-                return "إصلاح";
-            case "security":
-                return "أمان";
-            case "remove":
-                return "إزالة";
-            case "improve":
-            default:
-                return "تحسين";
+    private String stripDuplicateCategoryPrefix(String rawText) {
+        if (rawText == null) return "";
+        String cleaned = rawText.trim();
+        String[] prefixes = new String[] {
+                "إضافة:", "اضافة:", "إضافة :", "اضافة :",
+                "تحسين:", "تحسين :",
+                "إصلاح:", "اصلاح:", "إصلاح :", "اصلاح :",
+                "أمان:", "امان:", "أمان :", "امان :",
+                "إزالة:", "ازالة:", "إزالة :", "ازالة :"
+        };
+        boolean changed = true;
+        while (changed) {
+            changed = false;
+            for (String p : prefixes) {
+                if (cleaned.startsWith(p)) {
+                    cleaned = cleaned.substring(p.length()).trim();
+                    changed = true;
+                }
+            }
         }
+        return cleaned;
     }
 
     private void showUpdateNotification(
@@ -441,10 +447,9 @@ public class UpdateCheckWorker extends Worker {
             for (int i = 0; i < maxItems; i++) {
                 JSONObject item = changesArr.optJSONObject(i);
                 if (item == null) continue;
-                String itemText = item.optString("text", "").trim();
+                String itemText = stripDuplicateCategoryPrefix(item.optString("text", ""));
                 if (itemText.isEmpty()) continue;
-                String label = mapChangeTypeArabic(item.optString("type", "improve"));
-                expanded.append("\n• ").append(label).append(": ").append(itemText);
+                expanded.append("\n• ").append(itemText);
             }
         }
         expanded.append("\nاضغط للتحديث الفوري دون فقدان بياناتك.");

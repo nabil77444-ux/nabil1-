@@ -20,7 +20,7 @@ import {
 } from 'lucide-react';
 import { useFirebase } from '../contexts/FirebaseContext';
 import { useFeedback } from '../lib/feedback';
-import { buildAppShareText } from '../lib/exportUtils';
+import { shareInstalledAppApk } from '../services/appShareService';
 import {
   DEFAULT_HERO_SLIDES,
   formatCount,
@@ -297,21 +297,14 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
   }, [agentsBadgeTotal, pendingTopups.length, personalGrandStockTotal, role, totalAvailableCards]);
 
   const handleShareApp = async () => {
-    const shareText = buildAppShareText(appSettings.appDescription);
-    try {
-      if (navigator.share) {
-        await navigator.share({
-          title: 'كروت طيبة نت — TAIBAH NET',
-          text: shareText,
-          url: window.location.origin,
-        });
-        notifySuccess('تمت مشاركة التطبيق والوصف والرابط المباشر');
-      } else {
-        await navigator.clipboard.writeText(shareText);
-        notifySuccess('تم نسخ نص المشاركة والرابط المباشر إلى الحافظة');
-      }
-    } catch {
-      notifyInfo('تم إلغاء المشاركة');
+    const res = await shareInstalledAppApk({
+      description: appSettings.appDescription,
+      apkUrl: appSettings.apkDownloadUrl,
+    });
+    if (res.ok) {
+      notifySuccess(res.message);
+    } else if (res.mode === 'cancelled') {
+      notifyInfo(res.message);
     }
   };
 

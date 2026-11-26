@@ -49,6 +49,11 @@ export interface UserProfile {
   fcmTokens?: string[];
   rejectionReason?: string;
   linkedSourceId?: string;
+  localPasswordHash?: string;
+  localPasswordSalt?: string;
+  localHashRounds?: number;
+  passwordVersion?: string;
+  passwordUpdatedAt?: Timestamp;
   createdAt?: Timestamp;
   updatedAt?: Timestamp;
 }

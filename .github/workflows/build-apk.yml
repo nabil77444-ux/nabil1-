@@ -64,8 +64,10 @@ jobs:
             -x "pwa-maskable-512x512.png" \
             -x "apple-touch-icon.png")
           test -s update.zip || { echo "::error::update.zip was not created"; exit 1; }
+          # Verify index.html exists directly at the root of update.zip
+          zipinfo -1 update.zip | grep -qx 'index.html' || { echo "::error::index.html missing from update.zip root"; exit 1; }
           python3 - <<'PYEOF'
-          import json, os, datetime
+          import json, os, re, datetime
 
           size_bytes = os.path.getsize("update.zip")
           size_mb = round(size_bytes / (1024 * 1024), 2)
@@ -87,6 +89,14 @@ jobs:
               "security": "أمان",
               "remove": "إزالة",
           }
+          prefix_re = re.compile(r'^(?:إضافة|اضافة|تحسين|إصلاح|اصلاح|أمان|امان|إزالة|ازالة)\s*[:\-–—]\s*')
+
+          def clean_change_text(raw: str) -> str:
+              s = str(raw or "").strip()
+              while prefix_re.match(s):
+                  s = prefix_re.sub("", s, count=1).strip()
+              return s[:260]
+
           release_title = "تحديث جديد لتطبيق كروت طيبة نت"
           release_summary = "تحسينات شاملة للأداء والمزامنة والأمان وتجربة الاستخدام."
           changes_list = []
@@ -107,7 +117,7 @@ jobs:
                               ctype = str(item.get("type", "improve")).strip().lower()
                               if ctype not in type_labels:
                                   ctype = "improve"
-                              ctext = str(item.get("text", "")).strip()[:260]
+                              ctext = clean_change_text(item.get("text", ""))
                               if ctext:
                                   changes_list.append({"type": ctype, "text": ctext})
               except Exception as ex:
@@ -115,21 +125,21 @@ jobs:
 
           notes_lines = [release_summary]
           for ch in changes_list:
-              notes_lines.append(f"• {type_labels.get(ch['type'], 'تحسين')}: {ch['text']}")
+              notes_lines.append(f"• {ch['text']}")
           combined_notes = "\n".join(notes_lines)[:600]
 
-          # Write markdown changelog file for GitHub Release body
+          # Write clean non-repetitive markdown changelog file for GitHub Release body
           md_lines = [f"### {release_title}", f"> {release_summary}", ""]
           for ch in changes_list:
-              md_lines.append(f"- **{type_labels.get(ch['type'], 'تحسين')}:** {ch['text']}")
+              md_lines.append(f"- {ch['text']}")
           with open(".release-notes-body.md", "w", encoding="utf-8") as mf:
               mf.write("\n".join(md_lines))
 
-          # Ordered fastest-to-slowest OTA mirrors (CDN -> GitHub Raw -> GitHub Releases)
-          jsdelivr_url = f"https://cdn.jsdelivr.net/gh/{repo}@ota-dist/update.zip?v={run_num}"
+          # Ordered OTA mirrors (GitHub Raw Direct -> jsDelivr CDN -> GitHub Releases)
           raw_url = f"https://raw.githubusercontent.com/{repo}/ota-dist/update.zip?v={run_num}"
+          jsdelivr_url = f"https://cdn.jsdelivr.net/gh/{repo}@ota-dist/update.zip?v={run_num}"
           release_url = f"https://github.com/{repo}/releases/latest/download/update.zip"
-          bundle_mirrors = [jsdelivr_url, raw_url, release_url]
+          bundle_mirrors = [raw_url, jsdelivr_url, release_url]
 
           manifest = {
               "version": version,
@@ -143,8 +153,8 @@ jobs:
               "releaseSummary": release_summary,
               "changes": changes_list,
               "notes": combined_notes,
-              "bundleUrl": jsdelivr_url,
-              "otaUrl": jsdelivr_url,
+              "bundleUrl": raw_url,
+              "otaUrl": raw_url,
               "bundleMirrors": bundle_mirrors,
               "apkUrl": f"https://github.com/{repo}/releases/latest/download/TaibahNet-Cards.apk",
               "publishedAt": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -191,17 +201,48 @@ jobs:
           fi
           npx cap sync android
 
-          # Integrate Native AndroidX BiometricPrompt & WorkManager OTA Update Notifier Plugins
+          # Integrate Native AndroidX BiometricPrompt, WorkManager OTA Notifier & Direct APK Share Plugins
           JAVA_PKG_DIR="android/app/src/main/java/net/taibah/wireless"
           mkdir -p "$JAVA_PKG_DIR"
           cp -f native-android/TaibahBiometricPlugin.java "$JAVA_PKG_DIR/TaibahBiometricPlugin.java"
           cp -f native-android/UpdateCheckWorker.java "$JAVA_PKG_DIR/UpdateCheckWorker.java"
           cp -f native-android/TaibahUpdateNotifierPlugin.java "$JAVA_PKG_DIR/TaibahUpdateNotifierPlugin.java"
+          cp -f native-android/TaibahAppSharePlugin.java "$JAVA_PKG_DIR/TaibahAppSharePlugin.java"
           test -s "$JAVA_PKG_DIR/TaibahBiometricPlugin.java" || { echo "::error::TaibahBiometricPlugin.java copy failed"; exit 1; }
           test -s "$JAVA_PKG_DIR/UpdateCheckWorker.java" || { echo "::error::UpdateCheckWorker.java copy failed"; exit 1; }
           test -s "$JAVA_PKG_DIR/TaibahUpdateNotifierPlugin.java" || { echo "::error::TaibahUpdateNotifierPlugin.java copy failed"; exit 1; }
+          test -s "$JAVA_PKG_DIR/TaibahAppSharePlugin.java" || { echo "::error::TaibahAppSharePlugin.java copy failed"; exit 1; }
 
-          # Register TaibahBiometricPlugin & TaibahUpdateNotifierPlugin BEFORE super.onCreate,
+          # Ensure res/xml/file_paths.xml includes <cache-path name="shared_apk" path="shared_apk/" />
+          python3 - <<'PYEOF'
+          import os
+          fp_path = "android/app/src/main/res/xml/file_paths.xml"
+          os.makedirs(os.path.dirname(fp_path), exist_ok=True)
+          shared_entry = '    <cache-path name="shared_apk" path="shared_apk/" />'
+          if os.path.exists(fp_path):
+              with open(fp_path, "r", encoding="utf-8") as f:
+                  xml = f.read()
+              if 'shared_apk' not in xml:
+                  xml = xml.replace("</paths>", f"{shared_entry}\n</paths>", 1)
+                  with open(fp_path, "w", encoding="utf-8") as f:
+                      f.write(xml)
+          else:
+              xml = (
+                  '<?xml version="1.0" encoding="utf-8"?>\n'
+                  '<paths xmlns:android="http://schemas.android.com/apk/res/android">\n'
+                  '    <external-path name="my_images" path="." />\n'
+                  '    <cache-path name="my_cache_images" path="." />\n'
+                  f'{shared_entry}\n'
+                  '</paths>\n'
+              )
+              with open(fp_path, "w", encoding="utf-8") as f:
+                  f.write(xml)
+          print("=== Verified file_paths.xml ===")
+          print(xml)
+          PYEOF
+
+          # Register TaibahBiometricPlugin, TaibahUpdateNotifierPlugin & TaibahAppSharePlugin BEFORE super.onCreate,
+          # restore verified OTA active_bundle_path (matching BuildConfig.VERSION_CODE),
           # and disable Android 8+ WebView Autofill AFTER super.onCreate to eliminate keyboard freeze/lag
           python3 - <<'PYEOF'
           import os, re
@@ -223,6 +264,7 @@ jobs:
           plugins_to_register = [
               "TaibahBiometricPlugin.class",
               "TaibahUpdateNotifierPlugin.class",
+              "TaibahAppSharePlugin.class",
           ]
           missing = [p for p in plugins_to_register if p not in src]
           if missing:
@@ -242,20 +284,64 @@ jobs:
                       count=1
                   )
 
-          autofill_guard = (
+          post_create_block = (
               "if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O "
               "&& getBridge() != null && getBridge().getWebView() != null) {\n"
               "            getBridge().getWebView().setImportantForAutofill("
               "android.view.View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS);\n"
-              "        }"
+              "        }\n"
+              "        restoreActiveOtaBundlePath();"
           )
           if "setImportantForAutofill" not in src:
               src = re.sub(
                   r'(super\.onCreate\s*\(\s*savedInstanceState\s*\)\s*;)',
-                  f'\\1\n        {autofill_guard}',
+                  f'\\1\n        {post_create_block}',
                   src,
                   count=1
               )
+          elif "restoreActiveOtaBundlePath();" not in src:
+              src = re.sub(
+                  r'(setImportantForAutofill\([^\)]*\);\s*\})',
+                  '\\1\n        restoreActiveOtaBundlePath();',
+                  src,
+                  count=1
+              )
+
+          ota_restore_method = """
+    private void restoreActiveOtaBundlePath() {
+        try {
+            android.content.SharedPreferences otaPrefs = getSharedPreferences(
+                    TaibahUpdateNotifierPlugin.OTA_PREFS_NAME, MODE_PRIVATE);
+            String savedPath = otaPrefs.getString(
+                    TaibahUpdateNotifierPlugin.KEY_PREFS_ACTIVE_BUNDLE_PATH, "");
+            int savedVerCode = otaPrefs.getInt(
+                    TaibahUpdateNotifierPlugin.KEY_PREFS_ACTIVE_VERSION_CODE, -1);
+            int currentVerCode = BuildConfig.VERSION_CODE;
+            if (savedPath == null || savedPath.trim().isEmpty()) {
+                return;
+            }
+            if (savedVerCode != currentVerCode) {
+                otaPrefs.edit()
+                        .remove(TaibahUpdateNotifierPlugin.KEY_PREFS_ACTIVE_BUNDLE_PATH)
+                        .remove(TaibahUpdateNotifierPlugin.KEY_PREFS_ACTIVE_VERSION_CODE)
+                        .apply();
+                getSharedPreferences("CapWebViewSettings", MODE_PRIVATE)
+                        .edit().remove("serverBasePath").apply();
+                return;
+            }
+            java.io.File indexFile = new java.io.File(savedPath, "index.html");
+            if (indexFile.isFile() && getBridge() != null) {
+                getBridge().setServerBasePath(savedPath);
+            }
+        } catch (Throwable ignored) {
+            // Non-fatal: fall back cleanly to built-in APK assets
+        }
+    }
+"""
+          if "private void restoreActiveOtaBundlePath()" not in src:
+              last_brace = src.rfind("}")
+              if last_brace != -1:
+                  src = src[:last_brace] + ota_restore_method + "}\n"
 
           with open(main_activity, "w", encoding="utf-8") as f:
               f.write(src)

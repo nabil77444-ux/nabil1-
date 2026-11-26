@@ -5,7 +5,7 @@ import {
   sendPasswordResetEmail,
   signInWithEmailAndPassword,
 } from 'firebase/auth';
-import { collection, doc, getDocs, limit, query, serverTimestamp, setDoc, where } from 'firebase/firestore';
+import { collection, doc, getDocFromServer, getDocs, limit, query, serverTimestamp, setDoc, where } from 'firebase/firestore';
 import {
   AlertCircle,
   Clock,
@@ -62,8 +62,10 @@ import {
   findVaultAccountByIdentifier,
   raceWithTimeout,
   saveAccountToLocalVaultSync,
+  updateVaultAccountHashDirectly,
   vaultAccountToUserProfile,
   verifyLocalVaultPassword,
+  verifyPasswordAgainstSaltedHash,
 } from '../lib/localAuthVault';
 import { SUPER_ADMIN_CONFIG, TAIBAH_ASSETS, type UserProfile } from '../types/taibah';
 import { ContactPickerButton } from './ContactPickerButton';
@@ -556,8 +558,72 @@ export const AuthScreen: React.FC<AuthScreenProps> = React.memo(function AuthScr
       }
 
       if (localCheck.status === 'wrong_password') {
-        notifyError('كلمة المرور غير صحيحة', 'تأكد من كلمة المرور المدخلة وحاول مجدداً.');
-        return;
+        const isOfflineNow = typeof navigator !== 'undefined' && !navigator.onLine;
+        const staleVaultAccount = localCheck.account;
+
+        // If online and this account's password was updated remotely by Super Admin,
+        // check Firestore salted hash before rejecting the password.
+        if (!isOfflineNow && staleVaultAccount && auth.currentUser?.uid === staleVaultAccount.uid) {
+          try {
+            const remoteSnap = await raceWithTimeout(
+              getDocFromServer(doc(db, 'users', staleVaultAccount.uid)),
+              4500
+            );
+            if (remoteSnap.exists()) {
+              const remoteData = remoteSnap.data() as UserProfile;
+              if (remoteData.status === 'suspended' || remoteData.status === 'rejected') {
+                notifyError('تم إيقاف الحساب', 'تم إيقاف هذا الحساب مؤقتاً من قِبل الإدارة.');
+                return;
+              }
+              if (
+                remoteData.localPasswordHash &&
+                remoteData.localPasswordSalt &&
+                verifyPasswordAgainstSaltedHash(
+                  rawPassword,
+                  remoteData.localPasswordHash,
+                  remoteData.localPasswordSalt,
+                  remoteData.localHashRounds
+                )
+              ) {
+                updateVaultAccountHashDirectly(
+                  staleVaultAccount.uid,
+                  remoteData.localPasswordHash,
+                  remoteData.localPasswordSalt,
+                  remoteData.passwordVersion,
+                  remoteData.localHashRounds
+                );
+                const refreshedProfile: UserProfile = {
+                  ...vaultAccountToUserProfile(staleVaultAccount),
+                  ...remoteData,
+                  uid: staleVaultAccount.uid,
+                };
+                clearManualSignOutForBiometric();
+                activateLocalSession(refreshedProfile, {
+                  email: refreshedProfile.email,
+                  password: rawPassword,
+                });
+                onUnlockSession(refreshedProfile.uid, refreshedProfile.email);
+                void syncBiometricVaultOnPasswordLogin(
+                  refreshedProfile.email,
+                  rawPassword,
+                  cleanId,
+                  refreshedProfile.name
+                );
+                setBioStatus(getBiometricMethodStatus());
+                notifySuccess('تم التحقق من كلمة المرور الجديدة وتسجيل الدخول بنجاح ✅');
+                return;
+              }
+            }
+          } catch {
+            // Fall through to standard cloud sign-in or wrong_password error below
+          }
+        }
+
+        if (isOfflineNow) {
+          notifyError('كلمة المرور غير صحيحة', 'تأكد من كلمة المرور المدخلة وحاول مجدداً.');
+          return;
+        }
+        // When online, allow falling through to Step 2 cloud sign-in in case password was changed remotely
       }
 
       if (localCheck.status === 'matched' && localCheck.account && localCheck.account.status === 'active') {

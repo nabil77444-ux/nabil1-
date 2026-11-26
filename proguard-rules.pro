@@ -22,6 +22,11 @@
 -keep interface com.getcapacitor.** { *; }
 -keep class * extends androidx.fragment.app.FragmentActivity { *; }
 -keep class net.taibah.wireless.** { *; }
+-keep class net.taibah.wireless.TaibahAppSharePlugin { *; }
+-keep class net.taibah.wireless.TaibahUpdateNotifierPlugin { *; }
+-keep class net.taibah.wireless.TaibahBiometricPlugin { *; }
+-keep class net.taibah.wireless.UpdateCheckWorker { *; }
+-keep class androidx.core.content.FileProvider { *; }
 -keepclassmembers class * {
     @android.webkit.JavascriptInterface <methods>;
 }

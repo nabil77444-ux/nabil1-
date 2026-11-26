@@ -31,6 +31,11 @@
         "fcmTokens": { "type": "array" },
         "rejectionReason": { "type": "string", "maxLength": 300 },
         "linkedSourceId": { "type": "string", "maxLength": 128 },
+        "localPasswordHash": { "type": "string", "minLength": 32, "maxLength": 128 },
+        "localPasswordSalt": { "type": "string", "minLength": 8, "maxLength": 64 },
+        "localHashRounds": { "type": "number" },
+        "passwordVersion": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "passwordUpdatedAt": { "type": "string", "format": "date-time" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },

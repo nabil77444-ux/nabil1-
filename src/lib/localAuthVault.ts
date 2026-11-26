@@ -580,13 +580,46 @@ export function updateVaultAccountProfile(
 }
 
 /**
+ * Generates a fresh random 16-byte salt and pure-JS iterated SHA-256 hash
+ * (identical to localAuthVault login verification) for Admin-managed password updates.
+ */
+export function createSaltedPasswordCredential(password: string): {
+  passwordHash: string;
+  passwordSalt: string;
+  hashRounds: number;
+  passwordVersion: string;
+} {
+  const passwordSalt = generateSaltHex();
+  const hashRounds = DEFAULT_HASH_ROUNDS;
+  const passwordHash = hashPasswordWithSaltSync(password, passwordSalt, hashRounds);
+  const passwordVersion = String(Date.now());
+  return { passwordHash, passwordSalt, hashRounds, passwordVersion };
+}
+
+/**
+ * Verifies a plaintext password against a stored salted SHA-256 hash using timing-safe comparison.
+ */
+export function verifyPasswordAgainstSaltedHash(
+  password: string,
+  expectedHash: string,
+  passwordSalt: string,
+  hashRounds?: number
+): boolean {
+  if (!password || !expectedHash || !passwordSalt) return false;
+  const rounds = typeof hashRounds === 'number' && hashRounds > 0 ? hashRounds : DEFAULT_HASH_ROUNDS;
+  const computed = hashPasswordWithSaltSync(password, passwordSalt, rounds);
+  return timingSafeEqualHex(computed, expectedHash);
+}
+
+/**
  * Directly update a user's local salted SHA-256 hash when synced from admin password change.
  */
 export function updateVaultAccountHashDirectly(
   uid: string,
   passwordHash: string,
   passwordSalt: string,
-  passwordVersion?: string
+  passwordVersion?: string,
+  hashRounds?: number
 ): boolean {
   if (!uid || !passwordHash || !passwordSalt) return false;
   const all = readVaultRecords();
@@ -597,6 +630,7 @@ export function updateVaultAccountHashDirectly(
     ...all[idx],
     passwordHash,
     passwordSalt,
+    hashRounds: typeof hashRounds === 'number' && hashRounds > 0 ? hashRounds : DEFAULT_HASH_ROUNDS,
     passwordVersion: passwordVersion ?? all[idx].passwordVersion,
     updatedAt: Date.now(),
   };

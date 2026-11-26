@@ -65,7 +65,7 @@ import java.util.zip.ZipFile;
  *    - Strict 12s connect/read timeouts + 10s 0-KB/s stall watchdog that disconnects hung sockets immediately.
  *    - Manual cross-domain redirect resolution up to 5 hops (301/302/303/307/308) with `Accept-Encoding: identity`.
  *    - 16KB buffered direct disk writes (`update_part.zip`) with automatic `Range: bytes=<downloaded>-` HTTP 206 resume (up to 2 retries per mirror) and automatic mirror failover.
- *    - Throttled 200ms progress events (`otaDownloadProgress`) carrying downloadedBytes, totalBytes, percent, speedKbps, mirrorIndex, mirrorCount, mirrorLabel, and status.
+ *    - Throttled 250ms progress events (`otaProgress`) carrying downloadedBytes, totalBytes, percent, speedKbps, mirrorIndex, mirrorCount, mirrorLabel, and status.
  *    - Pre-apply integrity verification via `new ZipFile(partFile)` (validates entries + `index.html` + Zip Slip protection) before extracting & activating via Capacitor Bridge `setServerBasePath`.
  */
 @CapacitorPlugin(
@@ -82,6 +82,10 @@ public class TaibahUpdateNotifierPlugin extends Plugin {
     private static final String PERIODIC_WORK_NAME = "taibah_periodic_update_check";
     private static final String IMMEDIATE_WORK_NAME = "taibah_immediate_update_check";
 
+    public static final String OTA_PREFS_NAME = "taibah_ota_prefs";
+    public static final String KEY_PREFS_ACTIVE_BUNDLE_PATH = "active_bundle_path";
+    public static final String KEY_PREFS_ACTIVE_VERSION_CODE = "active_bundle_version_code";
+
     private static final String KEY_ACTIVE_OTA_PATH = "activeOtaBundlePath";
     private static final String KEY_ACTIVE_OTA_BUILD = "activeOtaBundleBuild";
     private static final String KEY_ACTIVE_OTA_VERSION = "activeOtaBundleVersion";
@@ -92,7 +96,7 @@ public class TaibahUpdateNotifierPlugin extends Plugin {
     private static final int CONNECT_TIMEOUT_MS = 12000;
     private static final int READ_TIMEOUT_MS = 12000;
     private static final long STALL_TIMEOUT_MS = 10000L;
-    private static final long PROGRESS_INTERVAL_MS = 200L;
+    private static final long PROGRESS_INTERVAL_MS = 250L;
     private static final int MAX_REDIRECT_HOPS = 5;
     private static final int MAX_RESUMES_PER_MIRROR = 2;
     private static final int STREAM_BUFFER_BYTES = 16 * 1024; // 16KB direct disk streaming buffer
@@ -182,6 +186,11 @@ public class TaibahUpdateNotifierPlugin extends Plugin {
                     .remove(KEY_ACTIVE_OTA_BUILD)
                     .remove(KEY_ACTIVE_OTA_VERSION)
                     .remove(KEY_ACTIVE_OTA_NATIVE_BUILD)
+                    .apply();
+            SharedPreferences otaPrefs = ctx.getSharedPreferences(OTA_PREFS_NAME, Context.MODE_PRIVATE);
+            otaPrefs.edit()
+                    .remove(KEY_PREFS_ACTIVE_BUNDLE_PATH)
+                    .remove(KEY_PREFS_ACTIVE_VERSION_CODE)
                     .apply();
             SharedPreferences capPrefs = ctx.getSharedPreferences(CAP_WEBVIEW_PREFS, Context.MODE_PRIVATE);
             if (capPrefs.contains(CAP_SERVER_BASE_PATH_KEY)) {
@@ -482,7 +491,7 @@ public class TaibahUpdateNotifierPlugin extends Plugin {
                     int displayMirrorNum = mIdx + 1;
                     String mirrorLabel = detectMirrorLabel(mirrorUrl, displayMirrorNum);
 
-                    emitProgress(0L, expectedBytes, 1, 0.0, displayMirrorNum, mirrorCount, mirrorLabel, "downloading");
+                    emitProgress(0L, expectedBytes, 0, 0.0, displayMirrorNum, mirrorCount, mirrorLabel, "downloading");
 
                     for (int attempt = 0; attempt <= MAX_RESUMES_PER_MIRROR; attempt++) {
                         if (cancelRequested.get()) {
@@ -558,20 +567,30 @@ public class TaibahUpdateNotifierPlugin extends Plugin {
                 String label = detectMirrorLabel(mirrors.get(Math.max(0, succeededMirrorIndex - 1)), succeededMirrorIndex);
                 emitProgress(partFile.length(), partFile.length(), 98, 0.0, succeededMirrorIndex, mirrorCount, label, "extracting");
 
-                File bundlesRoot = new File(ctx.getFilesDir(), "taibah_ota_bundles");
+                File bundlesRoot = new File(ctx.getFilesDir(), "taibah_ota");
                 if (!bundlesRoot.exists()) {
                     //noinspection ResultOfMethodCallIgnored
                     bundlesRoot.mkdirs();
                 }
 
-                String dirName = "b_" + (targetBuild > 0 ? targetBuild : 0) + "_" + System.currentTimeMillis();
+                String dirName = "b_" + (targetBuild > 0 ? targetBuild : System.currentTimeMillis());
                 File extractDir = new File(bundlesRoot, dirName);
+                if (extractDir.exists()) {
+                    deleteRecursive(extractDir);
+                }
                 File bundleRoot = extractVerifiedZip(partFile, extractDir);
 
                 // Clean up temporary archive after successful extraction
                 deleteQuietly(partFile);
 
-                // Persist active OTA bundle metadata and Capacitor serverBasePath
+                // Persist active OTA bundle metadata for MainActivity startup restoration + Capacitor serverBasePath
+                int currentApkVersionCode = resolveApkVersionCode();
+                SharedPreferences otaPrefs = ctx.getSharedPreferences(OTA_PREFS_NAME, Context.MODE_PRIVATE);
+                otaPrefs.edit()
+                        .putString(KEY_PREFS_ACTIVE_BUNDLE_PATH, bundleRoot.getAbsolutePath())
+                        .putInt(KEY_PREFS_ACTIVE_VERSION_CODE, currentApkVersionCode)
+                        .apply();
+
                 SharedPreferences prefs = ctx.getSharedPreferences(UpdateCheckWorker.PREFS_NAME, Context.MODE_PRIVATE);
                 SharedPreferences.Editor editor = prefs.edit();
                 editor.putString(KEY_ACTIVE_OTA_PATH, bundleRoot.getAbsolutePath());
@@ -964,18 +983,30 @@ public class TaibahUpdateNotifierPlugin extends Plugin {
             payload.put("mirrorCount", mirrorCount);
             payload.put("mirrorLabel", mirrorLabel);
             payload.put("status", status);
-            notifyListeners("otaDownloadProgress", payload, false);
+            notifyListeners("otaProgress", payload, false);
         } catch (Throwable ignored) {
             // Non-fatal UI notification error
         }
     }
 
     private static int computePercent(long downloaded, long total) {
+        if (downloaded <= 0L) {
+            return 0;
+        }
         if (total <= 0L) {
-            return Math.min(90, Math.max(5, (int) ((downloaded / 10240L) % 85) + 5));
+            return Math.min(90, Math.max(1, (int) ((downloaded / 16384L) % 88) + 1));
         }
         int pct = (int) Math.round((downloaded * 94.0) / total);
-        return Math.max(1, Math.min(95, pct));
+        return Math.max(0, Math.min(95, pct));
+    }
+
+    private static int resolveApkVersionCode() {
+        try {
+            Class<?> bc = Class.forName("net.taibah.wireless.BuildConfig");
+            return bc.getField("VERSION_CODE").getInt(null);
+        } catch (Throwable ignored) {
+            return 1;
+        }
     }
 
     private static long getContentLengthSafe(HttpURLConnection conn) {

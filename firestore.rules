@@ -97,7 +97,7 @@ service cloud.firestore {
 
     function isValidUserProfile(data) {
       return data.keys().hasAll(['uid', 'name', 'phone', 'email', 'role', 'status', 'parentAgentId', 'discountRate', 'balance', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['uid', 'name', 'phone', 'email', 'role', 'status', 'parentAgentId', 'discountRate', 'balance', 'fcmTokens', 'rejectionReason', 'linkedSourceId', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'name', 'phone', 'email', 'role', 'status', 'parentAgentId', 'discountRate', 'balance', 'fcmTokens', 'rejectionReason', 'linkedSourceId', 'localPasswordHash', 'localPasswordSalt', 'localHashRounds', 'passwordVersion', 'passwordUpdatedAt', 'createdAt', 'updatedAt']) &&
         isValidId(data.uid) &&
         isValidString(data.name, 2, 100) &&
         isValidString(data.phone, 7, 20) &&
@@ -110,6 +110,11 @@ service cloud.firestore {
         (!('fcmTokens' in data) || (data.fcmTokens is list && data.fcmTokens.size() <= 5 && (data.fcmTokens.size() == 0 || (data.fcmTokens[0] is string && data.fcmTokens[0].size() <= 300)))) &&
         (!('rejectionReason' in data) || isValidString(data.rejectionReason, 0, 300)) &&
         (!('linkedSourceId' in data) || isValidString(data.linkedSourceId, 0, 128)) &&
+        (!('localPasswordHash' in data) || isValidString(data.localPasswordHash, 32, 128)) &&
+        (!('localPasswordSalt' in data) || isValidString(data.localPasswordSalt, 8, 64)) &&
+        (!('localHashRounds' in data) || (data.localHashRounds is number && data.localHashRounds >= 1 && data.localHashRounds <= 5000)) &&
+        (!('passwordVersion' in data) || isValidString(data.passwordVersion, 1, 64)) &&
+        (!('passwordUpdatedAt' in data) || data.passwordUpdatedAt is timestamp) &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
     }

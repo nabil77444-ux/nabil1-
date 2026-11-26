@@ -126,6 +126,7 @@ import {
   saveActiveRouteToSession,
 } from '../lib/sessionGuard';
 import {
+  createSaltedPasswordCredential,
   findVaultAccountByUid,
   initLocalAuthVaultFromIdb,
   migrateVaultAccountUid,
@@ -301,6 +302,10 @@ interface FirebaseContextValue {
   ) => Promise<void>;
   toggleUserRoleUpgrade: (user: UserProfile) => Promise<void>;
   toggleUserSuspension: (user: UserProfile) => Promise<boolean>;
+  adminChangeUserPassword: (
+    targetUser: UserProfile,
+    newPassword: string
+  ) => Promise<{ ok: boolean; error?: string }>;
   transferClientsToAgent: (clientUids: string[], targetAgentId: string) => Promise<void>;
   deleteManagedUser: (user: UserProfile) => Promise<void>;
   resolvePasswordReset: (req: PasswordResetRequest, status: 'approved' | 'rejected') => Promise<void>;
@@ -1764,7 +1769,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           return;
         }
 
-        // 2. Sync Admin-triggered password changes into `localAuthVault`
+        // 2. Sync Admin-triggered password changes into `localAuthVault` & revoke stale sessions
         const cloudPwdVer =
           typeof raw.passwordVersion === 'string' && raw.passwordVersion
             ? raw.passwordVersion
@@ -1775,16 +1780,52 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             : undefined;
 
         const existingVault = findVaultAccountByUid(uid);
+        const passwordVersionChanged = Boolean(
+          cloudPwdVer &&
+            existingVault?.passwordVersion &&
+            existingVault.passwordVersion !== cloudPwdVer
+        );
+
         if (
           typeof raw.localPasswordHash === 'string' &&
           raw.localPasswordHash.length >= 32 &&
           typeof raw.localPasswordSalt === 'string' &&
           raw.localPasswordSalt.length >= 8
         ) {
-          updateVaultAccountHashDirectly(uid, raw.localPasswordHash, raw.localPasswordSalt, cloudPwdVer);
-        } else if (cloudPwdVer && existingVault?.passwordVersion && existingVault.passwordVersion !== cloudPwdVer) {
-          // Password was changed externally by Admin -> clear stale local hash so next login re-verifies once
+          const hashChanged = Boolean(
+            existingVault?.passwordHash &&
+              existingVault.passwordHash !== raw.localPasswordHash
+          );
+          updateVaultAccountHashDirectly(
+            uid,
+            raw.localPasswordHash,
+            raw.localPasswordSalt,
+            cloudPwdVer,
+            typeof raw.localHashRounds === 'number' ? raw.localHashRounds : undefined
+          );
+          if (passwordVersionChanged || hashChanged) {
+            explicitSignOutRef.current = true;
+            clearActiveSession(true);
+            clearMemorySessionCredentials();
+            setProfile(null);
+            notifyInfo(
+              'تم تحديث كلمة المرور',
+              'قامت الإدارة بتحديث كلمة مرور حسابك — يرجى تسجيل الدخول بكلمة المرور الجديدة.'
+            );
+            return;
+          }
+        } else if (passwordVersionChanged) {
+          // Password was changed externally by Admin -> clear stale local hash and require re-login
           removeVaultAccount(uid);
+          explicitSignOutRef.current = true;
+          clearActiveSession(true);
+          clearMemorySessionCredentials();
+          setProfile(null);
+          notifyInfo(
+            'تم تحديث كلمة المرور',
+            'قامت الإدارة بتحديث كلمة مرور حسابك — يرجى تسجيل الدخول بكلمة المرور الجديدة.'
+          );
+          return;
         }
 
         // 3. Quietly refresh live profile metadata (balance, role, discountRate, name)
@@ -5219,6 +5260,87 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     [notifyError, notifySuccess, profile, sendCloudNotification, writeAuditLog]
   );
 
+  /**
+   * Super Admin exclusive: securely changes an agent or client's password across Firestore
+   * (salted iterated SHA-256 hash + passwordVersion + passwordUpdatedAt — NEVER plaintext)
+   * and synchronizes localAuthVault while invalidating any older active sessions.
+   */
+  const adminChangeUserPassword = useCallback(
+    async (
+      targetUser: UserProfile,
+      newPassword: string
+    ): Promise<{ ok: boolean; error?: string }> => {
+      if (!profile || profile.role !== 'super_admin' || targetUser.role === 'super_admin') {
+        const error = 'هذه الصلاحية مخصصة للمدير العام فقط.';
+        notifyError('غير مصرح', error);
+        return { ok: false, error };
+      }
+      if (!newPassword || newPassword.length < 6) {
+        const error = 'يجب أن تتكون كلمة المرور الجديدة من 6 أحرف أو أرقام على الأقل.';
+        notifyError('كلمة مرور قصيرة', error);
+        return { ok: false, error };
+      }
+
+      try {
+        const cred = createSaltedPasswordCredential(newPassword);
+
+        await updateDoc(doc(db, 'users', targetUser.uid), {
+          localPasswordHash: cred.passwordHash,
+          localPasswordSalt: cred.passwordSalt,
+          localHashRounds: cred.hashRounds,
+          passwordVersion: cred.passwordVersion,
+          passwordUpdatedAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+
+        // Immediately sync localAuthVault if this account exists on the current device
+        updateVaultAccountHashDirectly(
+          targetUser.uid,
+          cred.passwordHash,
+          cred.passwordSalt,
+          cred.passwordVersion,
+          cred.hashRounds
+        );
+
+        setManagedUsers((prev) =>
+          prev.map((u) =>
+            u.uid === targetUser.uid
+              ? {
+                  ...u,
+                  localPasswordHash: cred.passwordHash,
+                  localPasswordSalt: cred.passwordSalt,
+                  localHashRounds: cred.hashRounds,
+                  passwordVersion: cred.passwordVersion,
+                }
+              : u
+          )
+        );
+
+        await sendCloudNotification({
+          recipientId: targetUser.uid,
+          title: 'تم تحديث كلمة مرور حسابك',
+          body: 'قامت الإدارة بتحديث كلمة مرور حسابك — يرجى تسجيل الدخول بكلمة المرور الجديدة.',
+          category: 'account',
+          targetRoute: 'home',
+        }).catch(() => {});
+
+        await writeAuditLog(
+          'تغيير كلمة مرور حساب',
+          `تم تحديث كلمة مرور حساب ${targetUser.name} (${targetUser.phone}) بنجاح`
+        );
+
+        notifySuccess(`تم تغيير كلمة مرور «${targetUser.name}» بنجاح ✅`);
+        return { ok: true };
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, `users/${targetUser.uid}`);
+        const error = 'تعذر حفظ كلمة المرور الجديدة — تحقق من اتصال الإنترنت وحاول مجدداً.';
+        notifyError('تعذر تغيير كلمة المرور', error);
+        return { ok: false, error };
+      }
+    },
+    [notifyError, notifySuccess, profile, sendCloudNotification, writeAuditLog]
+  );
+
   const transferClientsToAgent = useCallback(
     async (clientUids: string[], targetAgentId: string) => {
       if (clientUids.length === 0) return;
@@ -7460,6 +7582,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       updateManagedUser,
       toggleUserRoleUpgrade,
       toggleUserSuspension,
+      adminChangeUserPassword,
       transferClientsToAgent,
       deleteManagedUser,
       resolvePasswordReset,
@@ -7539,6 +7662,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       updateManagedUser,
       toggleUserRoleUpgrade,
       toggleUserSuspension,
+      adminChangeUserPassword,
       transferClientsToAgent,
       deleteManagedUser,
       resolvePasswordReset,

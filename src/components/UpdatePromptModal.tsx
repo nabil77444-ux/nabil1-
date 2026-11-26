@@ -12,8 +12,10 @@ import {
 } from 'lucide-react';
 import {
   cancelActiveAppUpdate,
+  cleanChangeItemText,
   downloadAndApplyAppUpdate,
   formatUpdateSizeAr,
+  resolveGitHubRepo,
   resolveManifestSizeText,
   saveUpdateSnooze,
   type AppUpdateManifest,
@@ -22,35 +24,12 @@ import {
 } from '../services/updaterService';
 import { TAIBAH_ASSETS } from '../types/taibah';
 
-const CHANGE_BADGE_META: Record<
-  ReleaseChangeType,
-  { label: string; className: string }
-> = {
-  add: {
-    label: 'إضافة',
-    className:
-      'bg-emerald-100 dark:bg-emerald-950/70 text-emerald-800 dark:text-emerald-300 border-emerald-400/70',
-  },
-  improve: {
-    label: 'تحسين',
-    className:
-      'bg-blue-100 dark:bg-blue-950/70 text-blue-800 dark:text-blue-300 border-blue-400/70',
-  },
-  fix: {
-    label: 'إصلاح',
-    className:
-      'bg-orange-100 dark:bg-orange-950/70 text-orange-800 dark:text-orange-300 border-orange-400/70',
-  },
-  security: {
-    label: 'أمان',
-    className:
-      'bg-amber-100 dark:bg-amber-950/70 text-amber-900 dark:text-[#FDE68A] border-[#D4AF37]',
-  },
-  remove: {
-    label: 'إزالة',
-    className:
-      'bg-slate-200 dark:bg-slate-700/80 text-slate-700 dark:text-slate-200 border-slate-400/70',
-  },
+const CHANGE_DOT_CLASS: Record<ReleaseChangeType, string> = {
+  add: 'bg-emerald-500 ring-emerald-500/25',
+  improve: 'bg-blue-500 ring-blue-500/25',
+  fix: 'bg-orange-500 ring-orange-500/25',
+  security: 'bg-[#D4AF37] ring-[#D4AF37]/30',
+  remove: 'bg-slate-400 ring-slate-400/25',
 };
 
 interface UpdatePromptModalProps {
@@ -92,7 +71,9 @@ export const UpdatePromptModal: React.FC<UpdatePromptModalProps> = ({
         ? 'جاري فك الضغط وتجهيز الملفات...'
         : stageStatus === 'applying' || percent >= 100
           ? 'جاري التطبيق وإعادة التشغيل...'
-          : 'جاري تحميل التحديث الخفيف...';
+          : downloadedBytes <= 0
+            ? 'جاري الاتصال بسيرفر التحديث...'
+            : 'جاري تحميل التحديث الخفيف...';
 
   const speedText =
     speedKbps >= 1024
@@ -102,14 +83,29 @@ export const UpdatePromptModal: React.FC<UpdatePromptModalProps> = ({
         : '';
 
   const structuredChanges = Array.isArray(manifest.changes)
-    ? manifest.changes.filter((c) => c && typeof c.text === 'string' && c.text.trim().length > 0)
+    ? manifest.changes
+        .filter((c) => c && typeof c.text === 'string')
+        .map((c) => ({ type: c.type, text: cleanChangeItemText(c.text) }))
+        .filter((c) => c.text.length > 0)
     : [];
+
   const headerTitle =
     manifest.releaseTitle?.trim() || 'تحديث جديد لتطبيق كروت طيبة نت';
   const releaseSummary = manifest.releaseSummary?.trim() || '';
 
-  const handleSnooze = () => {
-    if (downloading) return;
+  const resolvedApkUrl = (() => {
+    if (manifest.apkUrl && /^https?:\/\//i.test(manifest.apkUrl)) {
+      return manifest.apkUrl;
+    }
+    const repo = resolveGitHubRepo(manifest.apkUrl);
+    return repo ? `https://github.com/${repo}/releases/latest/download/TaibahNet-Cards.apk` : '';
+  })();
+
+  const handleSnooze = async () => {
+    if (downloading) {
+      await cancelActiveAppUpdate();
+      setDownloading(false);
+    }
     saveUpdateSnooze(manifest.version, manifest.buildNumber);
     onDismiss();
   };
@@ -132,11 +128,11 @@ export const UpdatePromptModal: React.FC<UpdatePromptModalProps> = ({
     setProgressInfo({
       downloadedBytes: 0,
       totalBytes: manifestBytes,
-      percent: 1,
+      percent: 0,
       speedKbps: 0,
       mirrorIndex: 1,
       mirrorCount: manifest.bundleMirrors?.length || 3,
-      mirrorLabel: 'jsDelivr CDN السريع',
+      mirrorLabel: 'GitHub Raw المباشر',
       status: 'downloading',
     });
 
@@ -151,7 +147,7 @@ export const UpdatePromptModal: React.FC<UpdatePromptModalProps> = ({
           setErrorText('تم إلغاء التحميل — يمكنك المحاولة مجدداً في أي وقت.');
         } else {
           setErrorText(
-            result.message || 'تعذر تثبيت التحديث الخفيف — يمكنك إعادة المحاولة أو تحميل ملف APK المباشر.'
+            result.message || 'تعذر تثبيت التحديث الخفيف — يمكنك إعادة المحاولة أو تحميل النسخة الكاملة (APK).'
           );
         }
         setDownloading(false);
@@ -159,14 +155,14 @@ export const UpdatePromptModal: React.FC<UpdatePromptModalProps> = ({
         setDownloading(false);
       }
     } catch {
-      setErrorText('حدث خطأ غير متوقع أثناء تحميل التحديث — اضغط «إعادة المحاولة» أو حمّل ملف APK المباشر.');
+      setErrorText('حدث خطأ غير متوقع أثناء تحميل التحديث — اضغط «إعادة المحاولة» أو حمّل النسخة الكاملة (APK).');
       setDownloading(false);
     }
   };
 
   const handleFallbackApk = () => {
-    if (manifest.apkUrl && /^https?:\/\//i.test(manifest.apkUrl)) {
-      window.location.href = manifest.apkUrl;
+    if (resolvedApkUrl && /^https?:\/\//i.test(resolvedApkUrl)) {
+      window.location.href = resolvedApkUrl;
     }
   };
 
@@ -203,7 +199,7 @@ export const UpdatePromptModal: React.FC<UpdatePromptModalProps> = ({
           {!downloading && (
             <button
               type="button"
-              onClick={handleSnooze}
+              onClick={() => void handleSnooze()}
               aria-label="إغلاق"
               className="w-8 h-8 rounded-full bg-white/15 border border-white/25 text-white flex items-center justify-center shrink-0"
             >
@@ -225,11 +221,11 @@ export const UpdatePromptModal: React.FC<UpdatePromptModalProps> = ({
             <p className="text-[11.5px] font-extrabold leading-relaxed">
               {requiresNativeApk
                 ? 'يتطلب هذا الإصدار تحديث التطبيق الأساسي (APK) — جميع بياناتك وحسابك محفوظة ولن تتأثر.'
-                : `حجم التحديث: ${sizeText} فقط — تحميل فائق السرعة بدون فقدان بياناتك`}
+                : `حجم التحديث: ${sizeText} فقط — تحميل مباشر وسريع بدون فقدان بياناتك`}
             </p>
           </div>
 
-          {/* Dynamic Structured Release Notes Card */}
+          {/* Clean Non-Repetitive Release Notes Card */}
           <div className="rounded-2xl bg-slate-50 dark:bg-slate-800/90 border border-[#D4AF37]/60 p-3 space-y-2">
             <div className="flex items-center justify-between gap-2 text-xs font-extrabold text-[#1A365D] dark:text-[#FDE68A]">
               <span>
@@ -249,17 +245,16 @@ export const UpdatePromptModal: React.FC<UpdatePromptModalProps> = ({
             {structuredChanges.length > 0 ? (
               <ul className="max-h-44 overflow-y-auto space-y-1.5 pe-0.5">
                 {structuredChanges.map((item, idx) => {
-                  const badge = CHANGE_BADGE_META[item.type] || CHANGE_BADGE_META.improve;
+                  const dotClass = CHANGE_DOT_CLASS[item.type] || CHANGE_DOT_CLASS.improve;
                   return (
                     <li
                       key={`${item.type}_${idx}`}
                       className="flex items-start gap-2 rounded-xl bg-white/85 dark:bg-slate-900/70 border border-slate-200/80 dark:border-slate-700/80 px-2.5 py-1.5"
                     >
                       <span
-                        className={`shrink-0 mt-0.5 px-1.5 py-0.5 rounded-md border text-[10px] font-black leading-none ${badge.className}`}
-                      >
-                        {badge.label}
-                      </span>
+                        className={`w-2 h-2 rounded-full ring-2 shrink-0 mt-1.5 ${dotClass}`}
+                        aria-hidden="true"
+                      />
                       <span className="text-[11.5px] font-bold text-slate-700 dark:text-slate-200 leading-relaxed">
                         {item.text}
                       </span>
@@ -275,7 +270,7 @@ export const UpdatePromptModal: React.FC<UpdatePromptModalProps> = ({
             )}
           </div>
 
-          {/* Live Native Streaming Progress Bar + Speed (KB/s) + Active Mirror */}
+          {/* Real Live Native Streaming Progress Bar (Starts strictly at 0% / 0 KB) */}
           {downloading && (
             <div className="rounded-2xl bg-slate-50 dark:bg-slate-800/75 border border-[#D4AF37]/70 p-3 space-y-2">
               <div className="flex items-center justify-between gap-2 text-[11px] font-extrabold text-[#1A365D] dark:text-[#FDE68A] tabular-nums">
@@ -289,20 +284,20 @@ export const UpdatePromptModal: React.FC<UpdatePromptModalProps> = ({
               <div className="w-full h-3 rounded-full bg-slate-200 dark:bg-slate-700 border border-[#D4AF37] overflow-hidden">
                 <div
                   className="h-full rounded-full bg-gradient-to-l from-[#D4AF37] via-[#F59E0B] to-[#1A365D] transition-all duration-150"
-                  style={{ width: `${Math.max(3, Math.min(100, percent))}%` }}
+                  style={{ width: `${percent > 0 ? Math.min(100, percent) : 0}%` }}
                 />
               </div>
 
               <div className="flex items-center justify-between gap-2 text-[10.5px] font-bold text-slate-600 dark:text-slate-300 tabular-nums">
                 <span>
-                  {downloadedBytes > 0 && totalBytes > 0
-                    ? `${formatUpdateSizeAr(downloadedBytes)} / ${formatUpdateSizeAr(totalBytes)}`
+                  {totalBytes > 0
+                    ? `${downloadedBytes > 0 ? formatUpdateSizeAr(downloadedBytes) : '0 كيلوبايت'} / ${formatUpdateSizeAr(totalBytes)}`
                     : downloadedBytes > 0
                       ? formatUpdateSizeAr(downloadedBytes)
-                      : `الحجم المتوقع: ${sizeText}`}
+                      : '0 كيلوبايت'}
                 </span>
                 <span dir="ltr" className="text-emerald-700 dark:text-emerald-400 font-extrabold">
-                  {speedText || 'جاري الاتصال...'}
+                  {speedText || (downloadedBytes > 0 ? 'جاري التحميل...' : '0 KB/s')}
                 </span>
               </div>
 
@@ -316,7 +311,7 @@ export const UpdatePromptModal: React.FC<UpdatePromptModalProps> = ({
             </div>
           )}
 
-          {/* Error Box with Retry + Optional APK Fallback */}
+          {/* Error Box with Retry + Direct Full APK Fallback */}
           {errorText && !downloading && (
             <div className="rounded-xl bg-red-50 dark:bg-red-950/40 border-2 border-red-500 p-2.5 space-y-2">
               <p className="text-xs font-extrabold text-red-700 dark:text-red-300 leading-relaxed">
@@ -329,16 +324,16 @@ export const UpdatePromptModal: React.FC<UpdatePromptModalProps> = ({
                   className="w-full min-h-[38px] rounded-lg bg-red-600 hover:bg-red-700 text-white text-[11.5px] font-extrabold flex items-center justify-center gap-1.5"
                 >
                   <RotateCcw className="w-3.5 h-3.5" />
-                  <span>إعادة المحاولة الآن</span>
+                  <span>إعادة المحاولة</span>
                 </button>
-                {manifest.apkUrl && /^https?:\/\//i.test(manifest.apkUrl) && (
+                {resolvedApkUrl && (
                   <button
                     type="button"
                     onClick={handleFallbackApk}
-                    className="w-full min-h-[36px] rounded-lg bg-[#1A365D] text-[#FDE68A] border border-[#D4AF37] text-[11px] font-extrabold flex items-center justify-center gap-1.5"
+                    className="w-full min-h-[38px] rounded-lg bg-[#1A365D] text-[#FDE68A] border border-[#D4AF37] text-[11.5px] font-extrabold flex items-center justify-center gap-1.5"
                   >
                     <ExternalLink className="w-3.5 h-3.5" />
-                    <span>تحميل ملف APK المباشر كبديل</span>
+                    <span>تحميل النسخة الكاملة (APK)</span>
                   </button>
                 )}
               </div>
@@ -348,15 +343,26 @@ export const UpdatePromptModal: React.FC<UpdatePromptModalProps> = ({
           {/* Action Buttons: Download/Retry + Real Cancel / Later */}
           <div className="grid grid-cols-2 gap-2 pt-1">
             {downloading ? (
-              <button
-                type="button"
-                disabled={cancelling || stageStatus === 'extracting' || stageStatus === 'applying'}
-                onClick={() => void handleCancelDownload()}
-                className="col-span-2 min-h-[44px] rounded-xl bg-red-600 hover:bg-red-700 border-2 border-red-800 text-white text-xs font-extrabold flex items-center justify-center gap-1.5 shadow-sm disabled:opacity-55"
-              >
-                <XCircle className="w-4 h-4" />
-                <span>{cancelling ? 'جاري قطع الاتصال...' : 'إلغاء التحميل'}</span>
-              </button>
+              <>
+                <button
+                  type="button"
+                  disabled={cancelling || stageStatus === 'extracting' || stageStatus === 'applying'}
+                  onClick={() => void handleCancelDownload()}
+                  className="min-h-[44px] rounded-xl bg-red-600 hover:bg-red-700 border-2 border-red-800 text-white text-xs font-extrabold flex items-center justify-center gap-1.5 shadow-sm disabled:opacity-55"
+                >
+                  <XCircle className="w-4 h-4 shrink-0" />
+                  <span>{cancelling ? 'جاري الإلغاء...' : 'إلغاء التحميل'}</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={stageStatus === 'extracting' || stageStatus === 'applying'}
+                  onClick={() => void handleSnooze()}
+                  className="min-h-[44px] rounded-xl bg-amber-50 dark:bg-slate-800 border-2 border-[#1A365D]/60 dark:border-[#D4AF37]/70 text-[#1A365D] dark:text-[#FDE68A] text-xs font-extrabold flex items-center justify-center gap-1 disabled:opacity-55"
+                >
+                  <BellRing className="w-3.5 h-3.5 shrink-0" />
+                  <span>لاحقاً</span>
+                </button>
+              </>
             ) : (
               <>
                 <button
@@ -374,7 +380,7 @@ export const UpdatePromptModal: React.FC<UpdatePromptModalProps> = ({
 
                 <button
                   type="button"
-                  onClick={handleSnooze}
+                  onClick={() => void handleSnooze()}
                   className="min-h-[44px] rounded-xl bg-amber-50 dark:bg-slate-800 border-2 border-[#1A365D]/60 dark:border-[#D4AF37]/70 text-[#1A365D] dark:text-[#FDE68A] text-xs font-extrabold flex items-center justify-center gap-1"
                 >
                   <BellRing className="w-3.5 h-3.5 shrink-0" />

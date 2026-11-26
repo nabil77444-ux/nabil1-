@@ -12,6 +12,7 @@ import {
   LogOut,
   Send,
   Settings,
+  Share2,
   ShoppingBag,
   UserCheck,
   Users,
@@ -19,6 +20,8 @@ import {
   Zap,
 } from 'lucide-react';
 import { useFirebase } from '../contexts/FirebaseContext';
+import { useFeedback } from '../lib/feedback';
+import { shareInstalledAppApk } from '../services/appShareService';
 import {
   formatYER,
   getRoleArabicLabel,
@@ -42,7 +45,8 @@ export const SidebarDrawer: React.FC<SidebarDrawerProps> = ({
   onClose,
   onNavigate,
 }) => {
-  const { profile, unreadNotificationsCount, signOutUser } = useFirebase();
+  const { profile, appSettings, unreadNotificationsCount, signOutUser } = useFirebase();
+  const { notifySuccess, notifyInfo } = useFeedback();
 
   if (!open || !profile) return null;
 
@@ -257,8 +261,30 @@ export const SidebarDrawer: React.FC<SidebarDrawerProps> = ({
               );
             })}
 
-          {/* Sign Out Framed Card */}
+          {/* Share Installed APK & Sign Out Framed Cards */}
           <div className="pt-2.5 mt-2.5 border-t-2 border-[#D4AF37]/40 space-y-2">
+            <button
+              type="button"
+              onClick={async () => {
+                onClose();
+                const res = await shareInstalledAppApk({
+                  description: appSettings.appDescription,
+                  apkUrl: appSettings.apkDownloadUrl,
+                });
+                if (res.ok) {
+                  notifySuccess(res.message);
+                } else if (res.mode === 'cancelled') {
+                  notifyInfo(res.message);
+                }
+              }}
+              className="w-full min-h-[46px] rounded-2xl bg-blue-50 dark:bg-blue-950/40 border-2 border-blue-400/80 dark:border-blue-700 text-[#1A365D] dark:text-blue-200 text-xs font-extrabold flex items-center justify-center gap-2 shadow-sm"
+            >
+              <span className="w-7 h-7 rounded-lg bg-[#1A365D] text-[#FDE68A] flex items-center justify-center shrink-0">
+                <Share2 className="w-4 h-4" />
+              </span>
+              <span>مشاركة التطبيق (ملف APK)</span>
+            </button>
+
             <button
               type="button"
               onClick={() => {

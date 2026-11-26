@@ -5,10 +5,14 @@ import {
   Ban,
   Check,
   CheckCircle2,
+  Copy,
   CreditCard,
   Edit3,
+  Eye,
+  EyeOff,
   KeyRound,
   Loader2,
+  MessageCircle,
   RotateCcw,
   ShieldCheck,
   Trash2,
@@ -18,6 +22,7 @@ import {
   X,
 } from 'lucide-react';
 import { useFirebase } from '../contexts/FirebaseContext';
+import { useFeedback } from '../lib/feedback';
 import { normalizeDigits } from '../lib/firebase';
 import { ContactPickerButton } from './ContactPickerButton';
 import { AgentCardAuditModal } from './AgentCardAuditModal';
@@ -49,11 +54,13 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
     updateManagedUser,
     toggleUserRoleUpgrade,
     toggleUserSuspension,
+    adminChangeUserPassword,
     transferClientsToAgent,
     deleteManagedUser,
     resolvePasswordReset,
     restoreDeletedAgentsAndClients,
   } = useFirebase();
+  const { notifySuccess } = useFeedback();
 
   const isAdmin = profile?.role === 'super_admin';
 
@@ -64,6 +71,19 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
   const [managingUser, setManagingUser] = useState<UserProfile | null>(null);
   const [auditTargetUser, setAuditTargetUser] = useState<UserProfile | null>(null);
   const [suspendTargetUser, setSuspendTargetUser] = useState<UserProfile | null>(null);
+  const [passwordTargetUser, setPasswordTargetUser] = useState<UserProfile | null>(null);
+  const [newPwdValue, setNewPwdValue] = useState('');
+  const [confirmPwdValue, setConfirmPwdValue] = useState('');
+  const [showNewPwd, setShowNewPwd] = useState(false);
+  const [showConfirmPwd, setShowConfirmPwd] = useState(false);
+  const [pwdError, setPwdError] = useState('');
+  const [savedPwdSuccess, setSavedPwdSuccess] = useState<{
+    name: string;
+    phone: string;
+    email: string;
+    password: string;
+  } | null>(null);
+  const [copiedPwdCreds, setCopiedPwdCreds] = useState(false);
   const [rejectTarget, setRejectTarget] = useState<RegistrationRequest | null>(null);
   const [rejectReason, setRejectReason] = useState('');
   const [busy, setBusy] = useState(false);
@@ -112,6 +132,101 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
     () => managedUsers.reduce((acc, u) => acc + (Number(u.balance) || 0), 0),
     [managedUsers]
   );
+
+  const openPasswordModal = (target: UserProfile) => {
+    if (!isAdmin || target.role === 'super_admin') return;
+    setPasswordTargetUser(target);
+    setNewPwdValue('');
+    setConfirmPwdValue('');
+    setShowNewPwd(false);
+    setShowConfirmPwd(false);
+    setPwdError('');
+    setSavedPwdSuccess(null);
+    setCopiedPwdCreds(false);
+  };
+
+  const closePasswordModal = () => {
+    setPasswordTargetUser(null);
+    setNewPwdValue('');
+    setConfirmPwdValue('');
+    setPwdError('');
+    setSavedPwdSuccess(null);
+    setCopiedPwdCreds(false);
+  };
+
+  const buildCredentialsShareText = (info: {
+    name: string;
+    phone: string;
+    email: string;
+    password: string;
+  }) => {
+    const loginId = info.phone?.trim() || info.email?.trim() || '';
+    return [
+      '📶 تطبيق كروت طيبة نت — TAIBAH NET',
+      `تم تحديث بيانات الدخول لحساب: ${info.name}`,
+      `👤 اسم المستخدم / رقم الهاتف: ${loginId}`,
+      `🔑 كلمة المرور الجديدة: ${info.password}`,
+      'يرجى الاحتفاظ ببيانات الدخول بشكل آمن.',
+    ].join('\n');
+  };
+
+  const handleSaveNewPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isAdmin || !passwordTargetUser || busy) return;
+    if (newPwdValue.length < 6) {
+      setPwdError('يجب أن تتكون كلمة المرور الجديدة من 6 أحرف أو أرقام على الأقل.');
+      return;
+    }
+    if (newPwdValue !== confirmPwdValue) {
+      setPwdError('كلمتا المرور غير متطابقتين — يرجى التأكد وإعادة المحاولة.');
+      return;
+    }
+    setPwdError('');
+    setBusy(true);
+    try {
+      const res = await adminChangeUserPassword(passwordTargetUser, newPwdValue);
+      if (res.ok) {
+        setSavedPwdSuccess({
+          name: passwordTargetUser.name,
+          phone: passwordTargetUser.phone || '',
+          email: passwordTargetUser.email || '',
+          password: newPwdValue,
+        });
+      } else {
+        setPwdError(res.error || 'تعذر حفظ كلمة المرور الجديدة.');
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleCopySavedCredentials = async () => {
+    if (!savedPwdSuccess) return;
+    const text = buildCredentialsShareText(savedPwdSuccess);
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedPwdCreds(true);
+      notifySuccess('تم نسخ بيانات الدخول الجديدة إلى الحافظة ✅');
+    } catch {
+      setPwdError('تعذر النسخ التلقائي — يمكنك نسخ كلمة المرور يدوياً.');
+    }
+  };
+
+  const handleSendCredentialsWhatsApp = () => {
+    if (!savedPwdSuccess) return;
+    const text = buildCredentialsShareText(savedPwdSuccess);
+    const digits = normalizeDigits(savedPwdSuccess.phone || '').replace(/\D/g, '');
+    let waPhone = digits;
+    if (digits.length === 9 && digits.startsWith('7')) {
+      waPhone = `967${digits}`;
+    } else if (digits.startsWith('00')) {
+      waPhone = digits.slice(2);
+    }
+    const url = waPhone
+      ? `https://wa.me/${waPhone}?text=${encodeURIComponent(text)}`
+      : `https://wa.me/?text=${encodeURIComponent(text)}`;
+    window.location.href = url;
+  };
 
   const openManageModal = (u: UserProfile) => {
     setManagingUser(u);
@@ -540,8 +655,8 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
                     </div>
                   </div>
 
-                  {/* Bottom Section: Independent Equal-Width 3-Button Bar */}
-                  <div className="grid grid-cols-3 gap-2 w-full pt-2.5 border-t border-white/15">
+                  {/* Bottom Section: Independent Action Bar (Includes Admin-Only Change Password) */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 w-full pt-2.5 border-t border-white/15">
                     <button
                       type="button"
                       onClick={() => setAuditTargetUser(agent)}
@@ -550,6 +665,16 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
                       <CreditCard className="w-3.5 h-3.5 shrink-0" />
                       <span>كشف الكروت</span>
                     </button>
+                    {isAdmin && (
+                      <button
+                        type="button"
+                        onClick={() => openPasswordModal(agent)}
+                        className="min-h-[36px] px-1.5 rounded-xl bg-amber-500 hover:bg-amber-600 border border-[#FDE68A] text-xs font-extrabold text-[#0F172A] flex items-center justify-center gap-1 whitespace-nowrap"
+                      >
+                        <KeyRound className="w-3.5 h-3.5 shrink-0" />
+                        <span>كلمة المرور</span>
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() => setSuspendTargetUser(agent)}
@@ -633,8 +758,8 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
                           </div>
                         </div>
 
-                        {/* Bottom Row: Independent Equal-Width 3-Button Bar */}
-                        <div className="grid grid-cols-3 gap-2 w-full pt-2 border-t border-slate-100 dark:border-slate-800">
+                        {/* Bottom Row: Independent Action Bar (Includes Admin-Only Change Password) */}
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 w-full pt-2 border-t border-slate-100 dark:border-slate-800">
                           <button
                             type="button"
                             onClick={() => setAuditTargetUser(sub)}
@@ -643,6 +768,16 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
                             <CreditCard className="w-3.5 h-3.5 shrink-0" />
                             <span>الكروت</span>
                           </button>
+                          {isAdmin && (
+                            <button
+                              type="button"
+                              onClick={() => openPasswordModal(sub)}
+                              className="min-h-[34px] px-1.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-[#0F172A] text-xs font-extrabold flex items-center justify-center gap-1 whitespace-nowrap"
+                            >
+                              <KeyRound className="w-3.5 h-3.5 shrink-0" />
+                              <span>كلمة المرور</span>
+                            </button>
+                          )}
                           <button
                             type="button"
                             onClick={() => setSuspendTargetUser(sub)}
@@ -754,7 +889,7 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
                 {/* Bottom Section: Independent Horizontal Button Row */}
                 <div
                   className={`grid ${
-                    isAdmin ? 'grid-cols-3' : 'grid-cols-2'
+                    isAdmin ? 'grid-cols-2 sm:grid-cols-4' : 'grid-cols-2'
                   } gap-2 w-full pt-2 border-t border-slate-100 dark:border-slate-800`}
                 >
                   <button
@@ -765,6 +900,16 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
                     <CreditCard className="w-3.5 h-3.5 shrink-0" />
                     <span>الكروت</span>
                   </button>
+                  {isAdmin && (
+                    <button
+                      type="button"
+                      onClick={() => openPasswordModal(client)}
+                      className="min-h-[34px] px-1.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-[#0F172A] text-xs font-extrabold flex items-center justify-center gap-1 whitespace-nowrap"
+                    >
+                      <KeyRound className="w-3.5 h-3.5 shrink-0" />
+                      <span>كلمة المرور</span>
+                    </button>
+                  )}
                   {isAdmin && (
                     <button
                       type="button"
@@ -970,6 +1115,18 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
                       ? `ترقية فورية إلى وكيل معتمد (${appSettings.agentDiscountPercent}%)`
                       : `خفض فوري إلى عميل / نقطة بيع (${appSettings.clientDiscountPercent}%)`}
                   </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const target = managingUser;
+                    setManagingUser(null);
+                    openPasswordModal(target);
+                  }}
+                  className="w-full min-h-[40px] rounded-xl bg-amber-500 hover:bg-amber-600 text-[#0F172A] text-xs font-extrabold flex items-center justify-center gap-2 shadow"
+                >
+                  <KeyRound className="w-4 h-4" />
+                  <span>تغيير كلمة مرور الحساب</span>
                 </button>
                 <button
                   type="button"
@@ -1296,6 +1453,209 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
                     : 'نعم، إيقاف مؤقت ⛔'}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 6: SUPER ADMIN EXCLUSIVE CHANGE AGENT/CLIENT PASSWORD */}
+      {isAdmin && passwordTargetUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 safe-top safe-bottom">
+          <div className="w-full max-w-sm rounded-3xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] shadow-2xl overflow-hidden">
+            {/* Header */}
+            <div className="royal-header-3d px-4 py-3 border-b-2 border-[#D4AF37] flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="w-9 h-9 rounded-xl bg-amber-500 text-[#0F172A] flex items-center justify-center shrink-0 shadow">
+                  <KeyRound className="w-4 h-4" />
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-sm font-extrabold text-white truncate">تغيير كلمة المرور</h3>
+                  <p className="text-[11px] font-bold text-[#FDE68A] truncate">
+                    {passwordTargetUser.name} • {passwordTargetUser.phone || passwordTargetUser.email}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={closePasswordModal}
+                aria-label="إغلاق"
+                className="w-8 h-8 rounded-full bg-white/15 border border-white/25 text-white flex items-center justify-center shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {savedPwdSuccess ? (
+              <div className="p-4 space-y-3">
+                <div className="rounded-2xl bg-emerald-50 dark:bg-emerald-950/40 border-2 border-emerald-500 p-3 space-y-2 text-center">
+                  <div className="w-10 h-10 rounded-full bg-emerald-600 text-white mx-auto flex items-center justify-center">
+                    <Check className="w-5 h-5" />
+                  </div>
+                  <p className="text-xs font-extrabold text-emerald-800 dark:text-emerald-200">
+                    تم حفظ كلمة المرور الجديدة بنجاح ✅
+                  </p>
+                  <div className="rounded-xl bg-white dark:bg-slate-900 border border-emerald-300 dark:border-emerald-800 p-2.5 text-right space-y-1 text-xs">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-bold text-slate-500">الحساب:</span>
+                      <span className="font-extrabold text-slate-900 dark:text-white truncate">
+                        {savedPwdSuccess.name}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-bold text-slate-500">رقم الهاتف:</span>
+                      <span dir="ltr" className="font-extrabold text-slate-900 dark:text-white tabular-nums">
+                        {savedPwdSuccess.phone || savedPwdSuccess.email}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-bold text-slate-500">كلمة المرور:</span>
+                      <span dir="ltr" className="font-extrabold text-[#1A365D] dark:text-[#FDE68A] select-all">
+                        {savedPwdSuccess.password}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void handleCopySavedCredentials()}
+                    className="min-h-[42px] rounded-xl bg-[#1A365D] hover:bg-[#0F172A] border border-[#D4AF37] text-white text-xs font-extrabold flex items-center justify-center gap-1.5"
+                  >
+                    {copiedPwdCreds ? (
+                      <Check className="w-4 h-4 text-emerald-400" />
+                    ) : (
+                      <Copy className="w-4 h-4 text-[#FDE68A]" />
+                    )}
+                    <span>{copiedPwdCreds ? 'تم النسخ' : 'نسخ البيانات'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSendCredentialsWhatsApp}
+                    className="min-h-[42px] rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold flex items-center justify-center gap-1.5"
+                  >
+                    <MessageCircle className="w-4 h-4" />
+                    <span>إرسال عبر واتساب</span>
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={closePasswordModal}
+                  className="w-full min-h-[40px] rounded-xl bg-slate-100 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-xs font-extrabold text-slate-700 dark:text-slate-200"
+                >
+                  إغلاق
+                </button>
+              </div>
+            ) : (
+              <form onSubmit={handleSaveNewPassword} className="p-4 space-y-3">
+                <div className="rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-300 dark:border-amber-800 px-3 py-2 text-[11px] font-bold text-amber-900 dark:text-amber-200 leading-relaxed">
+                  سيتم تحديث كلمة مرور <strong>{passwordTargetUser.name}</strong> ({getRoleArabicLabel(passwordTargetUser.role)}) وتأمينها فوراً مع إبطال الجلسات القديمة.
+                </div>
+
+                <div>
+                  <label className="block text-xs font-extrabold mb-1 text-slate-800 dark:text-slate-200">
+                    كلمة المرور الجديدة
+                  </label>
+                  <div className="relative flex items-center">
+                    <input
+                      type={showNewPwd ? 'text' : 'password'}
+                      inputMode="text"
+                      autoComplete="new-password"
+                      autoCorrect="off"
+                      autoCapitalize="none"
+                      spellCheck={false}
+                      dir="auto"
+                      data-lpignore="true"
+                      data-form-type="other"
+                      required
+                      minLength={6}
+                      disabled={busy}
+                      value={newPwdValue}
+                      onChange={(e) => setNewPwdValue(e.target.value)}
+                      placeholder="أدخل كلمة المرور الجديدة (حروف، أرقام، رموز)..."
+                      className="w-full min-h-[42px] rounded-xl border-2 border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 ps-3 pe-10 text-xs font-bold text-slate-900 dark:text-white focus:border-[#D4AF37] focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowNewPwd((v) => !v)}
+                      aria-label={showNewPwd ? 'إخفاء كلمة المرور' : 'إظهار كلمة المرور'}
+                      className="absolute left-2.5 p-1 text-slate-500 hover:text-slate-800 dark:hover:text-white"
+                    >
+                      {showNewPwd ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-extrabold mb-1 text-slate-800 dark:text-slate-200">
+                    تأكيد كلمة المرور الجديدة
+                  </label>
+                  <div className="relative flex items-center">
+                    <input
+                      type={showConfirmPwd ? 'text' : 'password'}
+                      inputMode="text"
+                      autoComplete="new-password"
+                      autoCorrect="off"
+                      autoCapitalize="none"
+                      spellCheck={false}
+                      dir="auto"
+                      data-lpignore="true"
+                      data-form-type="other"
+                      required
+                      minLength={6}
+                      disabled={busy}
+                      value={confirmPwdValue}
+                      onChange={(e) => setConfirmPwdValue(e.target.value)}
+                      placeholder="أعد كتابة كلمة المرور للتأكيد..."
+                      className="w-full min-h-[42px] rounded-xl border-2 border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 ps-3 pe-10 text-xs font-bold text-slate-900 dark:text-white focus:border-[#D4AF37] focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowConfirmPwd((v) => !v)}
+                      aria-label={showConfirmPwd ? 'إخفاء التأكيد' : 'إظهار التأكيد'}
+                      className="absolute left-2.5 p-1 text-slate-500 hover:text-slate-800 dark:hover:text-white"
+                    >
+                      {showConfirmPwd ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </div>
+
+                {pwdError && (
+                  <p className="rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-400 px-3 py-2 text-[11px] font-extrabold text-red-700 dark:text-red-300">
+                    {pwdError}
+                  </p>
+                )}
+
+                <div className="grid grid-cols-2 gap-2 pt-1">
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={closePasswordModal}
+                    className="min-h-[42px] rounded-xl bg-slate-100 dark:bg-slate-800 border-2 border-slate-300 dark:border-slate-600 text-xs font-extrabold"
+                  >
+                    إلغاء
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={busy}
+                    className="min-h-[42px] royal-btn-3d text-white text-xs font-extrabold rounded-xl flex items-center justify-center gap-1.5 disabled:opacity-60"
+                  >
+                    {busy ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin text-[#FDE68A]" />
+                        <span>جاري الحفظ...</span>
+                      </>
+                    ) : (
+                      <>
+                        <KeyRound className="w-4 h-4 text-[#FDE68A]" />
+                        <span>حفظ كلمة المرور</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </form>
+            )}
           </div>
         </div>
       )}

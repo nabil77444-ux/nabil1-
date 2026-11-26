@@ -51,7 +51,7 @@ interface TaibahUpdateNotifierNativePlugin {
     listenerFunc: (data: { openUpdateDialog?: boolean }) => void
   ): Promise<PluginListenerHandle>;
   addListener(
-    eventName: 'otaDownloadProgress',
+    eventName: 'otaProgress',
     listenerFunc: (data: Partial<OtaDownloadProgress>) => void
   ): Promise<PluginListenerHandle>;
 }
@@ -534,6 +534,21 @@ interface GitHubReleasePayload {
   assets?: GitHubReleaseAsset[];
 }
 
+const DUPLICATE_CATEGORY_PREFIX_RE =
+  /^(?:إضافة|اضافة|تحسين|إصلاح|اصلاح|أمان|امان|إزالة|ازالة)\s*[:\-–—]\s*/;
+
+/**
+ * Strips any repetitive Arabic category prefix (e.g. "إضافة: ", "تحسين: ", "إصلاح: ")
+ * from a release note bullet so notes never display redundant duplicated labels.
+ */
+export function cleanChangeItemText(rawText: string): string {
+  let cleaned = String(rawText || '').trim();
+  while (DUPLICATE_CATEGORY_PREFIX_RE.test(cleaned)) {
+    cleaned = cleaned.replace(DUPLICATE_CATEGORY_PREFIX_RE, '').trim();
+  }
+  return cleaned;
+}
+
 function buildOrderedBundleMirrors(
   rawMirrors?: unknown,
   primaryUrl?: string,
@@ -558,8 +573,8 @@ function buildOrderedBundleMirrors(
 
   if (repo && isValidRepoSlug(repo)) {
     const cacheBust = buildNumber && buildNumber > 0 ? `?v=${buildNumber}` : '';
-    pushUnique(`https://cdn.jsdelivr.net/gh/${repo}@ota-dist/update.zip${cacheBust}`);
     pushUnique(`https://raw.githubusercontent.com/${repo}/ota-dist/update.zip${cacheBust}`);
+    pushUnique(`https://cdn.jsdelivr.net/gh/${repo}@ota-dist/update.zip${cacheBust}`);
     pushUnique(`https://github.com/${repo}/releases/latest/download/update.zip`);
   }
 
@@ -629,7 +644,7 @@ function parseManifestObject(
     for (const item of raw.changes) {
       if (!item || typeof item !== 'object') continue;
       const rawType = String((item as { type?: unknown }).type || 'improve').trim().toLowerCase() as ReleaseChangeType;
-      const text = String((item as { text?: unknown }).text || '').trim().slice(0, 260);
+      const text = cleanChangeItemText(String((item as { text?: unknown }).text || '')).slice(0, 260);
       if (!text) continue;
       parsedChanges.push({
         type: validTypes.has(rawType) ? rawType : 'improve',
@@ -1083,38 +1098,110 @@ export async function downloadAndApplyAppUpdate(
     };
   }
 
-  let progressHandle: PluginListenerHandle | null = null;
+  const STALL_WATCHDOG_MS = 15000;
+  const listenerRef: { handle: PluginListenerHandle | null } = { handle: null };
+  let stallTimer: number | null = null;
+  let settled = false;
+
+  const clearWatchdog = () => {
+    if (stallTimer !== null) {
+      window.clearTimeout(stallTimer);
+      stallTimer = null;
+    }
+  };
+
   try {
     onProgress({
       downloadedBytes: 0,
       totalBytes: expectedTotalBytes,
-      percent: 1,
+      percent: 0,
       speedKbps: 0,
       mirrorIndex: 1,
       mirrorCount: mirrors.length,
-      mirrorLabel: 'jsDelivr CDN السريع',
+      mirrorLabel: 'GitHub Raw المباشر',
       status: 'downloading',
     });
 
-    progressHandle = await TaibahUpdateNotifier.addListener('otaDownloadProgress', (evt) => {
-      onProgress({
-        downloadedBytes: Math.max(0, Number(evt?.downloadedBytes) || 0),
-        totalBytes: Math.max(0, Number(evt?.totalBytes) || expectedTotalBytes),
-        percent: Math.max(0, Math.min(100, Math.round(Number(evt?.percent) || 0))),
-        speedKbps: Math.max(0, Number(evt?.speedKbps) || 0),
-        mirrorIndex: Math.max(1, Number(evt?.mirrorIndex) || 1),
-        mirrorCount: Math.max(1, Number(evt?.mirrorCount) || mirrors.length),
-        mirrorLabel: evt?.mirrorLabel || undefined,
-        status: evt?.status || 'downloading',
-      });
-    });
+    let lastObservedBytes = -1;
+    let lastObservedStage = '';
 
-    const nativeRes = await TaibahUpdateNotifier.downloadAndApplyOta({
-      urls: mirrors,
-      url: mirrors[0],
-      version: manifest.version,
-      buildNumber: manifest.buildNumber || 0,
-      expectedBytes: expectedTotalBytes,
+    const nativeRes = await new Promise<{
+      applied?: boolean;
+      cancelled?: boolean;
+      version?: string;
+      buildNumber?: number;
+      mirrorIndex?: number;
+      error?: string;
+      stalledTimeout?: boolean;
+    }>((resolve, reject) => {
+      const armWatchdog = () => {
+        clearWatchdog();
+        stallTimer = window.setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          void TaibahUpdateNotifier.cancelOtaDownload().catch(() => {});
+          resolve({
+            applied: false,
+            cancelled: false,
+            stalledTimeout: true,
+            error:
+              'توقف تحميل التحديث لأكثر من 15 ثانية دون استجابة من السيرفر — اضغط «إعادة المحاولة» أو حمّل النسخة الكاملة (APK).',
+          });
+        }, STALL_WATCHDOG_MS);
+      };
+
+      armWatchdog();
+
+      TaibahUpdateNotifier.addListener('otaProgress', (evt) => {
+        if (settled) return;
+        const dlBytes = Math.max(0, Number(evt?.downloadedBytes) || 0);
+        const totBytes = Math.max(0, Number(evt?.totalBytes) || expectedTotalBytes);
+        const pct = Math.max(0, Math.min(100, Math.round(Number(evt?.percent) || 0)));
+        const stage = evt?.status || 'downloading';
+
+        // Reset 15s watchdog ONLY when real bytes advance or stage progresses
+        if (
+          dlBytes > lastObservedBytes ||
+          (stage !== 'downloading' && stage !== lastObservedStage)
+        ) {
+          lastObservedBytes = dlBytes;
+          lastObservedStage = stage;
+          armWatchdog();
+        }
+
+        onProgress({
+          downloadedBytes: dlBytes,
+          totalBytes: totBytes,
+          percent: pct,
+          speedKbps: Math.max(0, Number(evt?.speedKbps) || 0),
+          mirrorIndex: Math.max(1, Number(evt?.mirrorIndex) || 1),
+          mirrorCount: Math.max(1, Number(evt?.mirrorCount) || mirrors.length),
+          mirrorLabel: evt?.mirrorLabel || undefined,
+          status: stage,
+        });
+      })
+        .then((handle) => {
+          listenerRef.handle = handle;
+          return TaibahUpdateNotifier.downloadAndApplyOta({
+            urls: mirrors,
+            url: mirrors[0],
+            version: manifest.version,
+            buildNumber: manifest.buildNumber || 0,
+            expectedBytes: expectedTotalBytes,
+          });
+        })
+        .then((res) => {
+          if (settled) return;
+          settled = true;
+          clearWatchdog();
+          resolve(res);
+        })
+        .catch((err) => {
+          if (settled) return;
+          settled = true;
+          clearWatchdog();
+          reject(err);
+        });
     });
 
     if (nativeRes?.cancelled) {
@@ -1156,7 +1243,7 @@ export async function downloadAndApplyAppUpdate(
         try {
           let activeMirrorIdx = 1;
           capgoHandle = await updater.addListener('download', (info) => {
-            const pct = Math.max(5, Math.min(99, Math.round(Number(info?.percent) || 0)));
+            const pct = Math.max(0, Math.min(99, Math.round(Number(info?.percent) || 0)));
             onProgress({
               downloadedBytes: expectedTotalBytes > 0 ? Math.round((expectedTotalBytes * pct) / 100) : 0,
               totalBytes: expectedTotalBytes,
@@ -1220,8 +1307,10 @@ export async function downloadAndApplyAppUpdate(
       message: rawMsg || 'تعذر تحميل التحديث الخفيف حالياً — يرجى المحاولة مجدداً.',
     };
   } finally {
-    if (progressHandle) {
-      await progressHandle.remove().catch(() => {});
+    clearWatchdog();
+    if (listenerRef.handle) {
+      await listenerRef.handle.remove().catch(() => {});
+      listenerRef.handle = null;
     }
   }
 }
