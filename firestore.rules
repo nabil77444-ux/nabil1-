@@ -846,8 +846,9 @@ service cloud.firestore {
       return data.keys().hasAll(['version', 'updatedAt']) &&
         data.keys().hasOnly([
           'version', 'buildNumber', 'nativeVersion', 'minNativeVersion',
-          'updateSizeBytes', 'updateSizeText', 'sizeMb', 'notes',
-          'bundleUrl', 'otaUrl', 'apkUrl', 'publishedAt', 'updatedAt'
+          'updateSizeBytes', 'updateSizeText', 'sizeMb',
+          'releaseTitle', 'releaseSummary', 'changes', 'notes',
+          'bundleUrl', 'otaUrl', 'bundleMirrors', 'apkUrl', 'publishedAt', 'updatedAt'
         ]) &&
         isValidString(data.version, 1, 32) &&
         (!('buildNumber' in data) || (data.buildNumber is number && data.buildNumber >= 0 && data.buildNumber <= 1000000)) &&
@@ -856,9 +857,13 @@ service cloud.firestore {
         (!('updateSizeBytes' in data) || (data.updateSizeBytes is number && data.updateSizeBytes >= 0 && data.updateSizeBytes <= 200000000)) &&
         (!('updateSizeText' in data) || isValidString(data.updateSizeText, 0, 64)) &&
         (!('sizeMb' in data) || (data.sizeMb is number && data.sizeMb >= 0 && data.sizeMb <= 200)) &&
+        (!('releaseTitle' in data) || isValidString(data.releaseTitle, 0, 120)) &&
+        (!('releaseSummary' in data) || isValidString(data.releaseSummary, 0, 240)) &&
+        (!('changes' in data) || (data.changes is list && data.changes.size() <= 15 && (data.changes.size() == 0 || data.changes[0] is map))) &&
         (!('notes' in data) || isValidString(data.notes, 0, 600)) &&
         (!('bundleUrl' in data) || isValidString(data.bundleUrl, 0, 400)) &&
         (!('otaUrl' in data) || isValidString(data.otaUrl, 0, 400)) &&
+        (!('bundleMirrors' in data) || (data.bundleMirrors is list && data.bundleMirrors.size() <= 6 && (data.bundleMirrors.size() == 0 || (data.bundleMirrors[0] is string && data.bundleMirrors[0].size() <= 400)))) &&
         (!('apkUrl' in data) || isValidString(data.apkUrl, 0, 400)) &&
         (!('publishedAt' in data) || isValidString(data.publishedAt, 0, 64)) &&
         data.updatedAt is timestamp;

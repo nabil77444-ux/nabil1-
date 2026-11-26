@@ -29,6 +29,7 @@ import {
   X,
 } from 'lucide-react';
 import { useFirebase } from '../contexts/FirebaseContext';
+import { normalizeDigits } from '../lib/firebase';
 import { useFeedback } from '../lib/feedback';
 import {
   clearBiometricEnrollment,
@@ -907,6 +908,14 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                 </p>
                 <input
                   type="password"
+                  inputMode="text"
+                  autoComplete="new-password"
+                  autoCorrect="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  dir="auto"
+                  data-lpignore="true"
+                  data-form-type="other"
                   value={settingsBioPass}
                   onChange={(e) => setSettingsBioPass(e.target.value)}
                   placeholder="كلمة مرور الحساب..."
@@ -1021,15 +1030,15 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                     مدة عرض كل شريحة (ثانية)
                   </label>
                   <input
-                    type="number"
+                    type="tel"
                     inputMode="numeric"
-                    min={2}
-                    max={30}
+                    pattern="[0-9]*"
+                    dir="ltr"
                     value={sliderSpeed === '0' ? '' : sliderSpeed}
                     placeholder="5"
                     onFocus={(e) => e.currentTarget.select()}
-                    onChange={(e) => setSliderSpeed(e.target.value)}
-                    className="w-full sm:w-44 min-h-[42px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-sm font-bold tabular-nums focus:border-[#D4AF37] focus:outline-none"
+                    onChange={(e) => setSliderSpeed(normalizeDigits(e.target.value).replace(/[^\d]/g, ''))}
+                    className="w-full sm:w-44 min-h-[42px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-sm font-bold tabular-nums text-right focus:border-[#D4AF37] focus:outline-none"
                   />
                 </div>
 
@@ -1057,6 +1066,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                         <input
                           type="text"
+                          inputMode="text"
                           value={slide.title}
                           onChange={(e) => handleSlideChange(idx, 'title', e.target.value)}
                           placeholder="عنوان الشريحة"
@@ -1064,6 +1074,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                         />
                         <input
                           type="text"
+                          inputMode="text"
                           value={slide.subtitle}
                           onChange={(e) => handleSlideChange(idx, 'subtitle', e.target.value)}
                           placeholder="النص الفرعي"
@@ -1074,6 +1085,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                       <div className="flex items-center gap-2">
                         <input
                           type="text"
+                          inputMode="text"
                           value={slide.image.startsWith('data:') ? 'صورة مرفوعة من الجهاز ✅' : slide.image}
                           onChange={(e) => handleSlideChange(idx, 'image', e.target.value)}
                           placeholder="رابط الصورة أو ارفع صورة..."
@@ -1152,6 +1164,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                       <label className="block text-[11px] font-extrabold mb-1">العنوان الرئيسي في الترويسة</label>
                       <input
                         type="text"
+                        inputMode="text"
                         value={pdfHeaderTitle}
                         onChange={(e) => setPdfHeaderTitle(e.target.value)}
                         className="w-full min-h-[40px] rounded-xl border-2 border-[#1A365D]/65 dark:border-[#60A5FA]/65 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold shadow-sm focus:border-[#D4AF37] focus:outline-none"
@@ -1161,6 +1174,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                       <label className="block text-[11px] font-extrabold mb-1">العنوان الفرعي في الترويسة</label>
                       <input
                         type="text"
+                        inputMode="text"
                         value={pdfHeaderSubtitle}
                         onChange={(e) => setPdfHeaderSubtitle(e.target.value)}
                         className="w-full min-h-[40px] rounded-xl border-2 border-[#1A365D]/65 dark:border-[#60A5FA]/65 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold shadow-sm focus:border-[#D4AF37] focus:outline-none"
@@ -1171,6 +1185,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                     <label className="block text-[11px] font-extrabold mb-1">نص التذييل أسفل التقرير / الفاتورة</label>
                     <input
                       type="text"
+                      inputMode="text"
                       value={pdfFooterText}
                       onChange={(e) => setPdfFooterText(e.target.value)}
                       className="w-full min-h-[40px] rounded-xl border-2 border-[#1A365D]/65 dark:border-[#60A5FA]/65 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold shadow-sm focus:border-[#D4AF37] focus:outline-none"
@@ -1192,42 +1207,43 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                   <div>
                     <label className="block text-xs font-extrabold mb-1">حد تنبيه المخزون المنخفض</label>
                     <input
-                      type="number"
+                      type="tel"
                       inputMode="numeric"
-                      min={0}
+                      pattern="[0-9]*"
+                      dir="ltr"
                       value={lowStockThreshold === '0' ? '' : lowStockThreshold}
                       placeholder="0"
                       onFocus={(e) => e.currentTarget.select()}
-                      onChange={(e) => setLowStockThreshold(e.target.value)}
-                      className="w-full min-h-[44px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-sm font-bold tabular-nums focus:border-[#D4AF37] focus:outline-none"
+                      onChange={(e) => setLowStockThreshold(normalizeDigits(e.target.value).replace(/[^\d]/g, ''))}
+                      className="w-full min-h-[44px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-sm font-bold tabular-nums text-right focus:border-[#D4AF37] focus:outline-none"
                     />
                   </div>
                   <div>
                     <label className="block text-xs font-extrabold mb-1">نسبة تسعير الوكيل (%)</label>
                     <input
-                      type="number"
+                      type="tel"
                       inputMode="numeric"
-                      min={1}
-                      max={100}
+                      pattern="[0-9]*"
+                      dir="ltr"
                       value={agentDiscount === '0' ? '' : agentDiscount}
                       placeholder="70"
                       onFocus={(e) => e.currentTarget.select()}
-                      onChange={(e) => setAgentDiscount(e.target.value)}
-                      className="w-full min-h-[44px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-sm font-bold tabular-nums focus:border-[#D4AF37] focus:outline-none"
+                      onChange={(e) => setAgentDiscount(normalizeDigits(e.target.value).replace(/[^\d]/g, ''))}
+                      className="w-full min-h-[44px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-sm font-bold tabular-nums text-right focus:border-[#D4AF37] focus:outline-none"
                     />
                   </div>
                   <div>
                     <label className="block text-xs font-extrabold mb-1">نسبة تسعير العميل (%)</label>
                     <input
-                      type="number"
+                      type="tel"
                       inputMode="numeric"
-                      min={1}
-                      max={100}
+                      pattern="[0-9]*"
+                      dir="ltr"
                       value={clientDiscount === '0' ? '' : clientDiscount}
                       placeholder="80"
                       onFocus={(e) => e.currentTarget.select()}
-                      onChange={(e) => setClientDiscount(e.target.value)}
-                      className="w-full min-h-[44px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-sm font-bold tabular-nums focus:border-[#D4AF37] focus:outline-none"
+                      onChange={(e) => setClientDiscount(normalizeDigits(e.target.value).replace(/[^\d]/g, ''))}
+                      className="w-full min-h-[44px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-sm font-bold tabular-nums text-right focus:border-[#D4AF37] focus:outline-none"
                     />
                   </div>
                 </div>
@@ -1474,6 +1490,14 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                   </label>
                   <input
                     type="password"
+                    inputMode="text"
+                    autoComplete="new-password"
+                    autoCorrect="off"
+                    autoCapitalize="none"
+                    spellCheck={false}
+                    dir="auto"
+                    data-lpignore="true"
+                    data-form-type="other"
                     required
                     disabled={resettingData}
                     value={resetPassword}
@@ -1490,6 +1514,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                   </label>
                   <input
                     type="text"
+                    inputMode="text"
                     required
                     disabled={resettingData}
                     value={resetConfirmPhrase}
@@ -1574,6 +1599,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
           <Search className="w-4 h-4 text-[#1A365D] dark:text-[#FDE68A] absolute right-3.5 top-1/2 -translate-y-1/2" />
           <input
             type="text"
+            inputMode="text"
             value={auditSearch}
             onChange={(e) => setAuditSearch(e.target.value)}
             placeholder="بحث في سجل العمليات..."

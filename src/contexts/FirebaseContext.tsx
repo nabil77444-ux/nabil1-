@@ -80,6 +80,7 @@ import {
 } from '../lib/biometric';
 import {
   appendCachedAvailableCards,
+  buildDeterministicSaleTxId,
   canonicalPackageId,
   clearAllLocalOfflineCardCaches,
   clearOfflineSalesQueueOnly,
@@ -89,8 +90,10 @@ import {
   getPendingOfflineSales,
   isCardLocallyLocked,
   lockCardsLocally,
+  markCardIdsPendingSold,
   offlineSaleToSaleDoc,
   releaseCardLocksLocally,
+  releasePendingSoldCardIds,
   removeCardsFromCacheForOwners,
   removeSyncedOfflineSale,
   resolveCardKind,
@@ -98,6 +101,7 @@ import {
   type CachedAvailableCard,
   type OfflineQueuedSale,
 } from '../lib/offlineCards';
+import { autoSyncEngine, type AutoSyncSnapshot } from '../services/autoSyncEngine';
 import {
   enqueueOfflineOp,
   getOfflineSyncQueue,
@@ -173,6 +177,7 @@ interface FirebaseContextValue {
   firestoreConnected: boolean;
   isSyncing: boolean;
   pendingOfflineSyncCount: number;
+  autoSyncStatus: AutoSyncSnapshot;
   prefillTopupPackageId: string | null;
   clearPrefillTopupPackage: () => void;
   openTopupForPackage: (packageId: string) => void;
@@ -657,8 +662,16 @@ function buildOwnerIdentifiers(
 }
 
 export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const isOnline = useOnlineStatus();
+  const browserOnline = useOnlineStatus();
+  const [autoSyncStatus, setAutoSyncStatus] = useState<AutoSyncSnapshot>(() =>
+    autoSyncEngine.getSnapshot()
+  );
+  const isOnline = browserOnline && autoSyncStatus.isOnline;
   const { notifySuccess, notifyError, notifyWarning, notifyInfo } = useFeedback();
+
+  useEffect(() => {
+    return autoSyncEngine.subscribe(setAutoSyncStatus);
+  }, []);
 
   const cachedProfileInitial = useMemo(
     () => readActiveProfileFromSession() || readCachedJson<UserProfile | null>(CACHE_PROFILE_KEY, null),
@@ -2530,13 +2543,15 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     return baseList.map((pkg) => {
       const livePersonal = personalCardCounts[pkg.id];
       const cachedCount = cachedByPkg[pkg.id] || 0;
-      // Never let a stale `0` in `stats/user_{uid}` hide real unsold cards in the local pool!
-      const baseAvail =
-        cachedCount > 0 ? Math.max(cachedCount, livePersonal ?? 0) : livePersonal ?? 0;
       const offlineUsed = offlineSoldByPkg[pkg.id] || 0;
+      // Server Snapshot + Pending Queue Overlay:
+      // `cachedOfflinePool` ALREADY excludes locally locked & pending-sold cards,
+      // while `livePersonal` (from server stats) may still include them until sync finishes.
+      const serverAvail = Math.max(0, (livePersonal ?? 0) - offlineUsed);
+      const baseAvail = cachedCount > 0 ? Math.max(cachedCount, serverAvail) : serverAvail;
       return {
         ...pkg,
-        availableCount: Math.max(0, baseAvail - offlineUsed),
+        availableCount: baseAvail,
         soldCount: (personalSoldCounts[pkg.id] || 0) + offlineUsed,
         uploadedCount: 0,
         injectedCount: 0,
@@ -2703,114 +2718,359 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     return salesCnt + opsCnt;
   }, [pendingOfflineSales, pendingOfflineOps, profile?.uid, firebaseUser?.uid]);
 
-  // Automatic Background Sync for ALL Offline Queued Operations (Sales + Topups + Customers + Ledger)
-  const flushOfflineSalesQueue = useCallback(async () => {
+  // Automatic Background Sync for ALL Queued Operations (Sales + Topups + Customers + Ledger)
+  // Atomic single-flight FIFO upload with deterministic `sales/${clientTxId}` idempotency protection.
+  const flushOfflineSalesQueue = useCallback(async (): Promise<{
+    syncedCount: number;
+    remainingCount: number;
+  }> => {
     const activeUser = auth.currentUser || firebaseUser;
-    if (!activeUser || !profile || !navigator.onLine) return;
+    const effectiveUid = activeUser?.uid || profile?.uid;
+    if (!activeUser || !profile || !navigator.onLine) {
+      const remaining =
+        getPendingOfflineSales(effectiveUid).length + getOfflineSyncQueue(effectiveUid).length;
+      return { syncedCount: 0, remainingCount: remaining };
+    }
 
     const salesQueue = getPendingOfflineSales(activeUser.uid);
     const opsQueue = getOfflineSyncQueue(activeUser.uid);
-    if (salesQueue.length === 0 && opsQueue.length === 0) return;
+    if (salesQueue.length === 0 && opsQueue.length === 0) {
+      return { syncedCount: 0, remainingCount: 0 };
+    }
 
     let syncedSalesCount = 0;
     let syncedOpsCount = 0;
+    let deferredSyncedCount = 0;
+    const nowAtFlushStart = Date.now();
 
-    // 1. Flush offline queued sales in chronological order (oldest first)
+    // 1. Flush queued sales in strict chronological FIFO order (oldest first)
     const chronologicalSales = [...salesQueue].sort((a, b) => a.createdAtMs - b.createdAtMs);
     for (const qSale of chronologicalSales) {
       const syncKey = `sync_offline_${qSale.localId}`;
       if (inFlightOpsRef.current.has(syncKey)) continue;
       inFlightOpsRef.current.add(syncKey);
       try {
-        await runTransaction(db, async (tx) => {
-          const isElectronic =
-            qSale.saleType === 'direct' || qSale.saleType === 'electronic_wholesale';
-
-          // Idempotency guard: if this exact saleId already exists in Firestore, skip duplicate write
-          const existingSaleSnap = await tx.get(doc(db, 'sales', qSale.localId));
-          if (existingSaleSnap.exists()) {
-            return;
+        const isElectronic =
+          qSale.saleType === 'direct' || qSale.saleType === 'electronic_wholesale';
+        const deliveredByPkg: Record<string, number> = {};
+        if (isElectronic) {
+          for (const item of qSale.items) {
+            if (item.delivered > 0) {
+              deliveredByPkg[item.packageId] = (deliveredByPkg[item.packageId] || 0) + item.delivered;
+            }
           }
+        }
+        const touchedPkgIds = Object.keys(deliveredByPkg);
+        const soldToValue = (qSale.buyerPhone || qSale.buyerName).slice(0, 128);
+        const saleDocPayload = {
+          invoiceNumber: qSale.invoiceNumber,
+          sellerId: qSale.sellerId,
+          buyerId: (qSale.buyerId || '').slice(0, 128),
+          buyerName: qSale.buyerName.slice(0, 100),
+          buyerPhone: (qSale.buyerPhone || '').slice(0, 20),
+          buyerRole: qSale.buyerRole || 'consumer',
+          saleType: qSale.saleType,
+          paymentMethod: qSale.paymentMethod,
+          discountRate: qSale.discountRate,
+          totalAmount: qSale.totalAmount,
+          paidAmount: qSale.paidAmount,
+          remainingAmount: qSale.remainingAmount,
+          expectedProfit: qSale.expectedProfit,
+          realizedProfit: qSale.realizedProfit,
+          totalCards: qSale.totalCards,
+          deliveredCards: qSale.deliveredCards,
+          returnedCards: 0,
+          items: qSale.items.slice(0, 20),
+          cardNumbers: qSale.cardNumbers.slice(0, 200),
+          status:
+            qSale.deliveredCards < qSale.totalCards || qSale.remainingAmount > 0
+              ? 'partial'
+              : 'completed',
+          notes: (qSale.notes || '').slice(0, 500),
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        };
 
-          if (isElectronic && qSale.cardDocIds.length > 0) {
-            for (const cardDocId of qSale.cardDocIds) {
-              const cardRef = doc(db, 'cards', cardDocId);
-              const cSnap = await tx.get(cardRef);
-              if (cSnap.exists()) {
-                if (qSale.transferOwnershipToBuyer && qSale.buyerId) {
-                  tx.update(cardRef, {
-                    status: 'available',
-                    ownerId: qSale.buyerId,
-                    soldTo: (qSale.buyerPhone || qSale.buyerName).slice(0, 128),
-                    saleId: qSale.localId,
-                    updatedAt: serverTimestamp(),
-                  });
-                } else {
-                  tx.update(cardRef, {
-                    status: 'sold',
-                    soldTo: (qSale.buyerPhone || qSale.buyerName).slice(0, 128),
-                    saleId: qSale.localId,
-                    updatedAt: serverTimestamp(),
-                  });
+        let alreadySyncedOnServer = false;
+
+        if (qSale.cardDocIds.length <= 40) {
+          // Single atomic Firestore transaction:
+          // 1) Read-before-write idempotency check on `sales/${clientTxId}`
+          // 2) Card docs + Super Admin package counters + Buyer balance + Sale invoice
+          alreadySyncedOnServer = await runTransaction(db, async (tx) => {
+            const saleRef = doc(db, 'sales', qSale.localId);
+            const existingSaleSnap = await tx.get(saleRef);
+            if (existingSaleSnap.exists()) {
+              return true;
+            }
+
+            // Phase 1: ALL reads before ANY writes
+            const existingCardRefs: Array<ReturnType<typeof doc>> = [];
+            if (isElectronic && qSale.cardDocIds.length > 0) {
+              for (const cardDocId of qSale.cardDocIds) {
+                const cRef = doc(db, 'cards', cardDocId);
+                const cSnap = await tx.get(cRef);
+                if (cSnap.exists()) {
+                  existingCardRefs.push(cRef);
                 }
               }
             }
 
-            if (profile.role === 'super_admin') {
-              for (const item of qSale.items) {
-                if (item.delivered <= 0) continue;
-                const pkgRef = doc(db, 'packages', item.packageId);
+            const pkgUpdates: Array<{
+              ref: ReturnType<typeof doc>;
+              availableCount: number;
+              soldCount: number;
+            }> = [];
+            if (isElectronic && profile.role === 'super_admin' && touchedPkgIds.length > 0) {
+              for (const pkgId of touchedPkgIds) {
+                const deliverCount = deliveredByPkg[pkgId] || 0;
+                if (deliverCount <= 0) continue;
+                const pkgRef = doc(db, 'packages', pkgId);
                 const pSnap = await tx.get(pkgRef);
                 if (pSnap.exists()) {
                   const pData = pSnap.data() as PackageDoc;
-                  tx.update(pkgRef, {
-                    availableCount: Math.max(0, (Number(pData.availableCount) || 0) - item.delivered),
-                    soldCount: (Number(pData.soldCount) || 0) + item.delivered,
-                    updatedAt: serverTimestamp(),
+                  pkgUpdates.push({
+                    ref: pkgRef,
+                    availableCount: Math.max(0, (Number(pData.availableCount) || 0) - deliverCount),
+                    soldCount: (Number(pData.soldCount) || 0) + deliverCount,
                   });
                 }
               }
             }
+
+            let buyerUpdate: { ref: ReturnType<typeof doc>; nextBalance: number } | null = null;
+            if (qSale.buyerId && qSale.remainingAmount > 0 && profile.role === 'super_admin') {
+              const buyerRef = doc(db, 'users', qSale.buyerId);
+              const buyerSnap = await tx.get(buyerRef);
+              if (buyerSnap.exists()) {
+                const bData = buyerSnap.data() as UserProfile;
+                buyerUpdate = {
+                  ref: buyerRef,
+                  nextBalance: (Number(bData.balance) || 0) + qSale.remainingAmount,
+                };
+              }
+            }
+
+            // Phase 2: Atomic writes
+            for (const cardRef of existingCardRefs) {
+              if (qSale.transferOwnershipToBuyer && qSale.buyerId) {
+                tx.update(cardRef, {
+                  status: 'available',
+                  ownerId: qSale.buyerId,
+                  soldTo: soldToValue,
+                  soldToName: qSale.buyerName.slice(0, 128),
+                  soldToPhone: (qSale.buyerPhone || '').slice(0, 32),
+                  saleType: qSale.saleType,
+                  saleId: qSale.localId,
+                  updatedAt: serverTimestamp(),
+                });
+              } else {
+                tx.update(cardRef, {
+                  status: 'sold',
+                  soldTo: soldToValue,
+                  soldToName: qSale.buyerName.slice(0, 128),
+                  soldToPhone: (qSale.buyerPhone || '').slice(0, 32),
+                  saleType: qSale.saleType,
+                  saleId: qSale.localId,
+                  updatedAt: serverTimestamp(),
+                });
+              }
+            }
+
+            for (const pu of pkgUpdates) {
+              tx.update(pu.ref, {
+                availableCount: pu.availableCount,
+                soldCount: pu.soldCount,
+                updatedAt: serverTimestamp(),
+              });
+            }
+
+            if (buyerUpdate) {
+              tx.update(buyerUpdate.ref, {
+                balance: buyerUpdate.nextBalance,
+                updatedAt: serverTimestamp(),
+              });
+            }
+
+            tx.set(saleRef, saleDocPayload);
+            return false;
+          });
+        } else {
+          // Large wholesale batch (> 40 cards): strict server idempotency check first, then chunked writeBatch (450 ops/chunk)
+          const existingSaleSnap = await getDoc(doc(db, 'sales', qSale.localId));
+          if (existingSaleSnap.exists()) {
+            alreadySyncedOnServer = true;
+          } else {
+            type BatchOp = (b: ReturnType<typeof writeBatch>) => void;
+            const ops: BatchOp[] = [];
+
+            if (isElectronic && qSale.cardDocIds.length > 0) {
+              for (const cardDocId of qSale.cardDocIds) {
+                const cardRef = doc(db, 'cards', cardDocId);
+                if (qSale.transferOwnershipToBuyer && qSale.buyerId) {
+                  ops.push((b) =>
+                    b.update(cardRef, {
+                      status: 'available',
+                      ownerId: qSale.buyerId,
+                      soldTo: soldToValue,
+                      soldToName: qSale.buyerName.slice(0, 128),
+                      soldToPhone: (qSale.buyerPhone || '').slice(0, 32),
+                      saleType: qSale.saleType,
+                      saleId: qSale.localId,
+                      updatedAt: serverTimestamp(),
+                    })
+                  );
+                } else {
+                  ops.push((b) =>
+                    b.update(cardRef, {
+                      status: 'sold',
+                      soldTo: soldToValue,
+                      soldToName: qSale.buyerName.slice(0, 128),
+                      soldToPhone: (qSale.buyerPhone || '').slice(0, 32),
+                      saleType: qSale.saleType,
+                      saleId: qSale.localId,
+                      updatedAt: serverTimestamp(),
+                    })
+                  );
+                }
+              }
+            }
+
+            if (isElectronic && profile.role === 'super_admin' && touchedPkgIds.length > 0) {
+              const pkgSnaps = await Promise.all(
+                touchedPkgIds.map((pkgId) => getDoc(doc(db, 'packages', pkgId)))
+              );
+              for (const pSnap of pkgSnaps) {
+                if (!pSnap.exists()) continue;
+                const pData = pSnap.data() as PackageDoc;
+                const deliverCount = deliveredByPkg[pSnap.id] || 0;
+                if (deliverCount <= 0) continue;
+                ops.push((b) =>
+                  b.update(doc(db, 'packages', pSnap.id), {
+                    availableCount: Math.max(0, (Number(pData.availableCount) || 0) - deliverCount),
+                    soldCount: (Number(pData.soldCount) || 0) + deliverCount,
+                    updatedAt: serverTimestamp(),
+                  })
+                );
+              }
+            }
+
+            ops.push((b) => b.set(doc(db, 'sales', qSale.localId), saleDocPayload));
+
+            const CHUNK_SIZE = 450;
+            for (let i = 0; i < ops.length; i += CHUNK_SIZE) {
+              const b = writeBatch(db);
+              const slice = ops.slice(i, i + CHUNK_SIZE);
+              for (const applyOp of slice) applyOp(b);
+              await b.commit();
+            }
+
+            if (qSale.buyerId && qSale.remainingAmount > 0 && profile.role === 'super_admin') {
+              await updateDoc(doc(db, 'users', qSale.buyerId), {
+                balance: increment(qSale.remainingAmount),
+                updatedAt: serverTimestamp(),
+              }).catch(() => {});
+            }
+          }
+        }
+
+        // Confirmed on Firestore: cleanly move from pending queue into live local state with zero stock flicker
+        if (!alreadySyncedOnServer) {
+          const syncedSaleDoc: SaleDoc = {
+            ...offlineSaleToSaleDoc(qSale),
+            notes: qSale.notes || '',
+          };
+          setSales((prev) => [syncedSaleDoc, ...prev.filter((s) => s.id !== qSale.localId)]);
+
+          if (isElectronic && touchedPkgIds.length > 0) {
+            if (profile.role === 'super_admin') {
+              setRawPackages((prev) =>
+                prev.map((pkg) => {
+                  const delta = deliveredByPkg[pkg.id] || 0;
+                  if (!delta) return pkg;
+                  return {
+                    ...pkg,
+                    availableCount: Math.max(0, (Number(pkg.availableCount) || 0) - delta),
+                    soldCount: (Number(pkg.soldCount) || 0) + delta,
+                  };
+                })
+              );
+            } else {
+              setPersonalCardCounts((prev) => {
+                const next = { ...prev };
+                for (const [pkgId, delta] of Object.entries(deliveredByPkg)) {
+                  if (next[pkgId] !== undefined) {
+                    next[pkgId] = Math.max(0, (Number(next[pkgId]) || 0) - delta);
+                  }
+                }
+                return next;
+              });
+              setPersonalSoldCounts((prev) => {
+                const next = { ...prev };
+                for (const [pkgId, delta] of Object.entries(deliveredByPkg)) {
+                  next[pkgId] = (Number(next[pkgId]) || 0) + delta;
+                }
+                return next;
+              });
+            }
+
+            const sellerDeltas: Record<string, { available: number; sold: number }> = {};
+            const buyerDeltas: Record<string, { available: number }> = {};
+            for (const pkgId of touchedPkgIds) {
+              const qtyDelivered = deliveredByPkg[pkgId] || 0;
+              if (qtyDelivered <= 0) continue;
+              sellerDeltas[pkgId] = { available: -qtyDelivered, sold: qtyDelivered };
+              buyerDeltas[pkgId] = { available: qtyDelivered };
+            }
+            const sellerStatId = profile.role === 'super_admin' ? 'summary' : `user_${activeUser.uid}`;
+            void applyStatsSummaryDelta(sellerStatId, activeUser.uid, sellerDeltas);
+            if (qSale.transferOwnershipToBuyer && qSale.buyerId && profile.role === 'super_admin') {
+              void applyStatsSummaryDelta(`user_${qSale.buyerId}`, qSale.buyerId, buyerDeltas);
+            }
           }
 
-          tx.set(doc(db, 'sales', qSale.localId), {
-            invoiceNumber: qSale.invoiceNumber,
-            sellerId: qSale.sellerId,
-            buyerId: (qSale.buyerId || '').slice(0, 128),
-            buyerName: qSale.buyerName.slice(0, 100),
-            buyerPhone: (qSale.buyerPhone || '').slice(0, 20),
-            buyerRole: qSale.buyerRole || 'consumer',
-            saleType: qSale.saleType,
-            paymentMethod: qSale.paymentMethod,
-            discountRate: qSale.discountRate,
-            totalAmount: qSale.totalAmount,
-            paidAmount: qSale.paidAmount,
-            remainingAmount: qSale.remainingAmount,
-            expectedProfit: qSale.expectedProfit,
-            realizedProfit: qSale.realizedProfit,
-            totalCards: qSale.totalCards,
-            deliveredCards: qSale.deliveredCards,
-            returnedCards: 0,
-            items: qSale.items.slice(0, 20),
-            cardNumbers: qSale.cardNumbers.slice(0, 200),
-            status: qSale.remainingAmount > 0 ? 'partial' : 'completed',
-            notes: (qSale.notes || '').slice(0, 500),
+          const typeLabel =
+            qSale.saleType === 'direct'
+              ? 'بيع مباشر'
+              : qSale.saleType === 'electronic_wholesale'
+                ? 'جملة إلكترونية'
+                : 'فاتورة كروت ورقية';
+
+          void setDoc(doc(collection(db, 'auditLogs')), {
+            actorId: activeUser.uid,
+            actorName: (profile.name || 'مستخدم طيبة نت').slice(0, 100),
+            action: typeLabel,
+            details: `فاتورة ${qSale.invoiceNumber} للمشتري ${qSale.buyerName} — ${qSale.totalCards} كرت — الإجمالي ${qSale.totalAmount} ر.ي`.slice(0, 500),
             createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          });
-        });
+          }).catch(() => {});
+
+          void setDoc(doc(collection(db, 'notifications')), {
+            recipientId: qSale.buyerId || 'super_admin',
+            title: `تم تسجيل ${typeLabel} (${qSale.invoiceNumber})`.slice(0, 120),
+            body: `${qSale.buyerName} • ${qSale.totalCards} كرت • الإجمالي ${qSale.totalAmount} ر.ي`.slice(0, 400),
+            category: qSale.saleType === 'paper_invoice' ? 'invoice' : 'sale',
+            targetRoute: 'sales_list',
+            isRead: false,
+            createdAt: serverTimestamp(),
+          }).catch(() => {});
+        }
 
         removeSyncedOfflineSale(qSale.localId);
+        releasePendingSoldCardIds(qSale.cardDocIds);
         syncedSalesCount++;
+        if (nowAtFlushStart - qSale.createdAtMs >= 5000) {
+          deferredSyncedCount++;
+        }
       } catch {
-        // Keep in queue for next connectivity retry
+        // Keep in queue & keep pending-sold lock intact for next automatic retry
       } finally {
         inFlightOpsRef.current.delete(syncKey);
       }
     }
 
-    // 2. Flush general offline operations queue (Feeding Requests, Customers, Ledger Payments)
-    for (const op of opsQueue) {
+    // 2. Flush general offline operations queue (Feeding Requests, Customers, Ledger Payments) in FIFO order
+    const chronologicalOps = [...opsQueue].sort((a, b) => a.createdAtMs - b.createdAtMs);
+    for (const op of chronologicalOps) {
       const syncKey = `sync_op_${op.clientOpId}`;
       if (inFlightOpsRef.current.has(syncKey)) continue;
       inFlightOpsRef.current.add(syncKey);
@@ -2848,6 +3108,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           }
           removeOfflineOp(op.clientOpId);
           syncedOpsCount++;
+          if (nowAtFlushStart - op.createdAtMs >= 5000) deferredSyncedCount++;
         } else if (op.kind === 'create_customer' && op.customer) {
           const c = op.customer;
           const existingSnap = await getDoc(doc(db, 'customers', c.customerId)).catch(() => null);
@@ -2867,6 +3128,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           }
           removeOfflineOp(op.clientOpId);
           syncedOpsCount++;
+          if (nowAtFlushStart - op.createdAtMs >= 5000) deferredSyncedCount++;
         } else if (op.kind === 'ledger_entry' && op.ledger) {
           const l = op.ledger;
           const custRef = doc(db, 'customers', l.customerId);
@@ -2906,6 +3168,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           });
           removeOfflineOp(op.clientOpId);
           syncedOpsCount++;
+          if (nowAtFlushStart - op.createdAtMs >= 5000) deferredSyncedCount++;
         }
       } catch {
         // Keep in queue for next connectivity retry
@@ -2915,19 +3178,22 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
 
     const totalSynced = syncedSalesCount + syncedOpsCount;
+    const remainingSales = getPendingOfflineSales(activeUser.uid);
+    const remainingOps = getOfflineSyncQueue(activeUser.uid);
     if (totalSynced > 0) {
       setPendingOfflineSales(getPendingOfflineSales());
       setPendingOfflineOps(getOfflineSyncQueue());
       setOfflinePoolVersion((v) => v + 1);
-      notifySuccess(`تمت مزامنة ${totalSynced} عملية محلية مع السحابة بنجاح ✅`);
+      setFirestoreConnected(true);
+      if (deferredSyncedCount > 0) {
+        notifySuccess(`تم حفظ ومزامنة ${deferredSyncedCount} عملية مؤجلة تلقائياً مع السحابة ✅`);
+      }
     }
+    return {
+      syncedCount: totalSynced,
+      remainingCount: remainingSales.length + remainingOps.length,
+    };
   }, [firebaseUser, notifySuccess, profile]);
-
-  useEffect(() => {
-    if (isOnline && authReady && profile?.status === 'active') {
-      flushOfflineSalesQueue().catch(() => {});
-    }
-  }, [isOnline, authReady, profile?.status, firebaseUser?.uid, flushOfflineSalesQueue]);
 
   const refreshVerificationStatus = useCallback(async (): Promise<boolean> => {
     if (!auth.currentUser) return false;
@@ -3079,7 +3345,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
             for (const d of snap.docs) {
               const data = d.data() as CardDoc & { denomination?: string | number; price?: number };
-              if (!data.cardNumber || isCardLocallyLocked(data.cardNumber)) continue;
+              if (!data.cardNumber || isCardLocallyLocked(data.cardNumber, d.id)) continue;
               const normPkg = canonicalPackageId(data.packageId || data.denomination || data.price);
               if (!normPkg) continue;
               if (!mergedByCard.has(data.cardNumber)) {
@@ -3234,6 +3500,51 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }, 600);
     return () => window.clearTimeout(timer);
   }, [authReady, firebaseUser?.uid, isOnline, profile, refreshMyInventory, syncNonce]);
+
+  // Zero-Touch Continuous Auto-Sync Engine Lifecycle:
+  // Automatically runs on network restore (<1s), app launch/resume, every mutation,
+  // 15s pending FIFO watchdog, and 90s lightweight consistency heartbeat.
+  useEffect(() => {
+    const activeUid = auth.currentUser?.uid || firebaseUser?.uid || profile?.uid;
+    if (!authReady || !profile || profile.status !== 'active' || !hasActiveSessionUnlocked()) {
+      autoSyncEngine.stop();
+      return;
+    }
+
+    autoSyncEngine.start({
+      getPendingCount: () =>
+        getPendingOfflineSales(activeUid).length + getOfflineSyncQueue(activeUid).length,
+      flushPendingQueue: async () => {
+        const res = await flushOfflineSalesQueue();
+        return res;
+      },
+      verifyConsistencyLight: async () => {
+        if (!navigator.onLine || !auth.currentUser) return;
+        const ok = await testFirestoreConnection().catch(() => false);
+        setFirestoreConnected(ok);
+        if (ok && profile.role !== 'super_admin') {
+          await refreshMyInventory(false).catch(() => {});
+        }
+      },
+      onNetworkStateChange: (online) => {
+        if (!online) {
+          setFirestoreConnected(false);
+        } else {
+          setFirestoreConnected(true);
+        }
+      },
+    });
+
+    return () => {
+      // Keep listeners cleanly bound across minor re-renders; stop only on unmount/signout
+    };
+  }, [authReady, firebaseUser?.uid, flushOfflineSalesQueue, profile, refreshMyInventory]);
+
+  useEffect(() => {
+    return () => {
+      autoSyncEngine.stop();
+    };
+  }, []);
 
   const syncNow = useCallback(async () => {
     setIsSyncing(true);
@@ -3586,7 +3897,6 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         !!input.buyerId &&
         (input.buyerRole === 'agent' || input.buyerRole === 'client');
 
-      const saleId = generateSafeDocId('sale');
       const nowMs = Date.now();
       const invoiceNumber = `TN-${String(nowMs).slice(-6)}`;
       const localTimestamp = {
@@ -3599,14 +3909,19 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       const pickedCardsByPkg: Record<string, Array<{ id: string; cardNumber: string }>> = {};
       const consumedFromCacheList: Array<{ pkgId: string; cards: CachedAvailableCard[] }> = [];
       const fetchedAndLockedNumbers: string[] = [];
+      const fetchedAndLockedDocIds: string[] = [];
 
       const rollbackLocalSelection = () => {
         for (const entry of consumedFromCacheList) {
           releaseCardLocksLocally(entry.cards.map((c) => c.cardNumber));
+          releasePendingSoldCardIds(entry.cards.map((c) => c.id));
           appendCachedAvailableCards(activeUser.uid, entry.cards);
         }
         if (fetchedAndLockedNumbers.length > 0) {
           releaseCardLocksLocally(fetchedAndLockedNumbers);
+        }
+        if (fetchedAndLockedDocIds.length > 0) {
+          releasePendingSoldCardIds(fetchedAndLockedDocIds);
         }
       };
 
@@ -3687,7 +4002,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                 const addDocs = (docs: Array<{ id: string; data: () => unknown }>) => {
                   for (const d of docs) {
                     const cData = d.data() as CardDoc;
-                    if (!cData.cardNumber || isCardLocallyLocked(cData.cardNumber)) continue;
+                    if (!cData.cardNumber || isCardLocallyLocked(cData.cardNumber, d.id)) continue;
                     if (!collectedMap.has(cData.cardNumber)) {
                       collectedMap.set(cData.cardNumber, { id: d.id, cardNumber: cData.cardNumber });
                     }
@@ -3754,6 +4069,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               pickedCardsByPkg[item.packageId] = chosen;
               for (const c of chosen) {
                 fetchedAndLockedNumbers.push(c.cardNumber);
+                fetchedAndLockedDocIds.push(c.id);
               }
             }
 
@@ -3763,6 +4079,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                 notifyWarning('أحد الكروت قيد التنفيذ حالياً، يرجى إعادة المحاولة فوراً.');
                 return null;
               }
+              markCardIdsPendingSold(fetchedAndLockedDocIds);
               removeCardsFromCacheForOwners(ownerIds, fetchedAndLockedNumbers);
             }
           }
@@ -3832,6 +4149,13 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         const cleanBuyerId = (input.buyerId || '').slice(0, 128);
         const cleanNotes = (input.notes || '').slice(0, 500);
 
+        // Deterministic Transaction ID bound to sold card ID(s) (`sale_${cardId}` for single card)
+        // Guarantees 100% idempotency on Firestore: impossible to create duplicate invoices or double-deduct balance!
+        const saleId = buildDeterministicSaleTxId(
+          allPulledDocIds,
+          `${activeUser.uid}_${nowMs}_${invoiceNumber}`
+        );
+
         const optimisticSale: SaleDoc = {
           id: saleId,
           invoiceNumber,
@@ -3892,215 +4216,27 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               ? 'جملة إلكترونية'
               : 'فاتورة كروت ورقية';
 
-        // STEP 3: INSTANT OPTIMISTIC UI UPDATES (Stock + Sales list updated immediately at ~5ms)
-        const applyOptimisticStockDelta = (direction: -1 | 1) => {
-          if (!isElectronic || Object.keys(deliveredByPkg).length === 0) return;
-          if (profile.role === 'super_admin') {
-            setRawPackages((prev) =>
-              prev.map((pkg) => {
-                const delta = deliveredByPkg[pkg.id] || 0;
-                if (!delta) return pkg;
-                return {
-                  ...pkg,
-                  availableCount: Math.max(0, (Number(pkg.availableCount) || 0) + direction * delta),
-                  soldCount: Math.max(0, (Number(pkg.soldCount) || 0) - direction * delta),
-                };
-              })
-            );
-          } else {
-            setPersonalCardCounts((prev) => {
-              const next = { ...prev };
-              for (const [pkgId, delta] of Object.entries(deliveredByPkg)) {
-                if (next[pkgId] !== undefined) {
-                  next[pkgId] = Math.max(0, (Number(next[pkgId]) || 0) + direction * delta);
-                }
-              }
-              return next;
-            });
-            setPersonalSoldCounts((prev) => {
-              const next = { ...prev };
-              for (const [pkgId, delta] of Object.entries(deliveredByPkg)) {
-                next[pkgId] = Math.max(0, (Number(next[pkgId]) || 0) - direction * delta);
-              }
-              return next;
-            });
-          }
-        };
+        // STEP 3: DURABLE-FIRST LOCAL COMMIT (<5ms) + AUTOMATIC ZERO-TOUCH BACKGROUND SYNC
+        // 1) Permanently lock card IDs in `pendingSoldCardIds` & persist sale into durable queue BEFORE showing card to buyer.
+        // 2) `pendingOfflineSales` overlay handles instant stock deduction & immediate invoice visibility uniformly (online & offline).
+        // 3) `autoSyncEngine.notifyLocalMutation()` uploads atomically in background immediately if online, or retries automatically on reconnect/15s watchdog.
+        if (allPulledDocIds.length > 0) {
+          markCardIdsPendingSold(allPulledDocIds);
+        }
+        enqueueOfflineSale(queuedFallbackPayload);
+        setPendingOfflineSales(getPendingOfflineSales());
+        setOfflinePoolVersion((v) => v + 1);
+        autoSyncEngine.notifyLocalMutation();
 
         const isOnlineNow = typeof navigator === 'undefined' ? true : navigator.onLine;
         if (!isOnlineNow) {
-          // Offline mode: queue directly (pendingOfflineSales memo handles stock subtraction once)
-          enqueueOfflineSale(queuedFallbackPayload);
-          setPendingOfflineSales(getPendingOfflineSales());
-          setOfflinePoolVersion((v) => v + 1);
           notifySuccess(
-            `تم تنفيذ ${typeLabel} محلياً دون إنترنت (${totalCards} كرت) ✅ — محمي من التكرار وستتم المزامنة تلقائياً`
+            `تم تنفيذ ${typeLabel} وحفظه تلقائياً دون إنترنت (${totalCards} كرت) ✅ — سيُرفع للسحابة فور عودة الاتصال`
           );
-          return offlineSaleToSaleDoc(queuedFallbackPayload);
+        } else {
+          notifySuccess(`تم تنفيذ ${typeLabel} (${totalCards} كرت) بنجاح ✅`);
         }
 
-        // Online Optimistic UI: update UI state immediately and open voucher modal in < 0.5s!
-        applyOptimisticStockDelta(-1);
-        setSales((prev) => [optimisticSale, ...prev.filter((s) => s.id !== saleId)]);
-        setOfflinePoolVersion((v) => v + 1);
-        notifySuccess(`تم تنفيذ ${typeLabel} (${totalCards} كرت) بنجاح ✅`);
-
-        // STEP 4: ASYNCHRONOUS BACKGROUND FIRESTORE writeBatch COMMIT (Zero UI Blocking!)
-        const commitSaleInBackground = async () => {
-          try {
-            // Prepare atomic write operations
-            type BatchOp = (b: ReturnType<typeof writeBatch>) => void;
-            const ops: BatchOp[] = [];
-
-            // 4A. Card document status / ownership updates (with full buyer metadata for zero-loss audit)
-            if (isElectronic && allPulledDocIds.length > 0) {
-              const soldToValue = (cleanBuyerPhone || cleanBuyerName).slice(0, 128);
-              for (const cardDocId of allPulledDocIds) {
-                const cardRef = doc(db, 'cards', cardDocId);
-                if (transferOwnershipToBuyer && cleanBuyerId) {
-                  ops.push((b) =>
-                    b.update(cardRef, {
-                      status: 'available',
-                      ownerId: cleanBuyerId,
-                      soldTo: soldToValue,
-                      soldToName: cleanBuyerName.slice(0, 128),
-                      soldToPhone: cleanBuyerPhone.slice(0, 32),
-                      saleType: input.saleType,
-                      saleId,
-                      updatedAt: serverTimestamp(),
-                    })
-                  );
-                } else {
-                  ops.push((b) =>
-                    b.update(cardRef, {
-                      status: 'sold',
-                      soldTo: soldToValue,
-                      soldToName: cleanBuyerName.slice(0, 128),
-                      soldToPhone: cleanBuyerPhone.slice(0, 32),
-                      saleType: input.saleType,
-                      saleId,
-                      updatedAt: serverTimestamp(),
-                    })
-                  );
-                }
-              }
-            }
-
-            // 4B. Package inventory counter updates (Super Admin central pool — fetch fresh counts in parallel so availableCount >= 0 rule always passes)
-            const touchedPkgIds = Object.keys(deliveredByPkg);
-            if (isElectronic && profile.role === 'super_admin' && touchedPkgIds.length > 0) {
-              const pkgSnapList = await Promise.all(
-                touchedPkgIds.map((pkgId) => getDoc(doc(db, 'packages', pkgId)))
-              );
-              for (const pSnap of pkgSnapList) {
-                if (!pSnap.exists()) continue;
-                const pData = pSnap.data() as PackageDoc;
-                const deliverCount = deliveredByPkg[pSnap.id] || 0;
-                if (deliverCount <= 0) continue;
-                ops.push((b) =>
-                  b.update(doc(db, 'packages', pSnap.id), {
-                    availableCount: Math.max(0, (Number(pData.availableCount) || 0) - deliverCount),
-                    soldCount: (Number(pData.soldCount) || 0) + deliverCount,
-                    updatedAt: serverTimestamp(),
-                  })
-                );
-              }
-            }
-
-            // 4C. Sale document write
-            ops.push((b) =>
-              b.set(doc(db, 'sales', saleId), {
-                invoiceNumber,
-                sellerId: activeUser.uid,
-                buyerId: cleanBuyerId,
-                buyerName: cleanBuyerName,
-                buyerPhone: cleanBuyerPhone,
-                buyerRole: input.buyerRole,
-                saleType: input.saleType,
-                paymentMethod: input.paymentMethod,
-                discountRate: input.discountRate,
-                totalAmount,
-                paidAmount,
-                remainingAmount,
-                expectedProfit,
-                realizedProfit,
-                totalCards,
-                deliveredCards,
-                returnedCards: 0,
-                items: lineItems.slice(0, 20),
-                cardNumbers: allPulledNumbers.slice(0, 200),
-                status,
-                notes: cleanNotes,
-                createdAt: serverTimestamp(),
-                updatedAt: serverTimestamp(),
-              })
-            );
-
-            // Commit in chunks of 450 ops (Firestore hard limit is 500 ops per writeBatch)
-            const CHUNK_SIZE = 450;
-            const batchPromises: Array<Promise<void>> = [];
-            for (let i = 0; i < ops.length; i += CHUNK_SIZE) {
-              const b = writeBatch(db);
-              const slice = ops.slice(i, i + CHUNK_SIZE);
-              for (const applyOp of slice) {
-                applyOp(b);
-              }
-              batchPromises.push(b.commit());
-            }
-            await Promise.all(batchPromises);
-
-            // 4D. Non-blocking buyer balance update, audit log & cloud notification
-            if (cleanBuyerId && remainingAmount > 0 && profile.role === 'super_admin') {
-              const buyerUser = managedUsers.find((u) => u.uid === cleanBuyerId);
-              if (buyerUser) {
-                updateDoc(doc(db, 'users', cleanBuyerId), {
-                  balance: (Number(buyerUser.balance) || 0) + remainingAmount,
-                  updatedAt: serverTimestamp(),
-                }).catch(() => {});
-              }
-            }
-
-            writeAuditLog(
-              typeLabel,
-              `فاتورة ${invoiceNumber} للمشتري ${cleanBuyerName} — ${totalCards} كرت — الإجمالي ${totalAmount} ر.ي`
-            ).catch(() => {});
-
-            sendCloudNotification({
-              recipientId: cleanBuyerId || 'super_admin',
-              title: `تم تسجيل ${typeLabel} (${invoiceNumber})`,
-              body: `${cleanBuyerName} • ${totalCards} كرت • الإجمالي ${totalAmount} ر.ي`,
-              category: input.saleType === 'paper_invoice' ? 'invoice' : 'sale',
-              targetRoute: 'sales_list',
-            }).catch(() => {});
-
-            // 4E. Atomic single-doc `stats/summary` (and buyer `stats/user_{buyerId}`) counter increments (ZERO card scans!)
-            if (isElectronic && touchedPkgIds.length > 0) {
-              const sellerDeltas: Record<string, { available: number; sold: number }> = {};
-              const buyerDeltas: Record<string, { available: number }> = {};
-              for (const pkgId of touchedPkgIds) {
-                const qtyDelivered = deliveredByPkg[pkgId] || 0;
-                if (qtyDelivered <= 0) continue;
-                sellerDeltas[pkgId] = { available: -qtyDelivered, sold: qtyDelivered };
-                buyerDeltas[pkgId] = { available: qtyDelivered };
-              }
-              const sellerStatId = profile.role === 'super_admin' ? 'summary' : `user_${activeUser.uid}`;
-              void applyStatsSummaryDelta(sellerStatId, activeUser.uid, sellerDeltas);
-              if (transferOwnershipToBuyer && cleanBuyerId && profile.role === 'super_admin') {
-                void applyStatsSummaryDelta(`user_${cleanBuyerId}`, cleanBuyerId, buyerDeltas);
-              }
-            }
-          } catch (bgErr) {
-            // Automatic Offline Queue Safety Net: if network dropped during background commit,
-            // keep cards locked against duplication and enqueue for automatic cloud sync!
-            applyOptimisticStockDelta(1);
-            enqueueOfflineSale(queuedFallbackPayload);
-            setPendingOfflineSales(getPendingOfflineSales());
-            setOfflinePoolVersion((v) => v + 1);
-            handleFirestoreError(bgErr, OperationType.WRITE, 'sales/background_batch');
-          }
-        };
-
-        void commitSaleInBackground();
         return optimisticSale;
       } catch (err) {
         rollbackLocalSelection();
@@ -4112,7 +4248,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         inFlightOpsRef.current.delete(opKey);
       }
     },
-    [firebaseUser, managedUsers, notifyError, notifySuccess, notifyWarning, packages, profile, sendCloudNotification, writeAuditLog]
+    [firebaseUser, notifyError, notifySuccess, notifyWarning, packages, profile]
   );
 
   // Deliver remaining cards for a partial electronic wholesale order
@@ -4369,6 +4505,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         };
         enqueueOfflineOp(op);
         setPendingOfflineOps(getOfflineSyncQueue());
+        autoSyncEngine.notifyLocalMutation();
         notifyWarning(
           `تم حفظ حساب ${cleanName} محلياً ⚡`,
           'سيتم إرساله للسحابة تلقائياً فور توفر الإنترنت.'
@@ -4502,6 +4639,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           },
         });
         setPendingOfflineOps(getOfflineSyncQueue());
+        autoSyncEngine.notifyLocalMutation();
         notifyWarning(
           `تم تسجيل ${input.entryType === 'credit' ? 'التسديد' : 'القيد'} (${input.amount} ر.ي) محلياً ⚡`,
           'سيتم مزامنته تلقائياً فور توفر الإنترنت.'
@@ -4667,6 +4805,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           },
         });
         setPendingOfflineOps(getOfflineSyncQueue());
+        autoSyncEngine.notifyLocalMutation();
         notifyWarning(
           `تم حفظ طلب التغذية (${totalCards} كرت) محلياً ⚡`,
           'بانتظار الإرسال عند توفر الإنترنت — سيُرسل تلقائياً فور عودة الاتصال.'
@@ -7261,6 +7400,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       firestoreConnected,
       isSyncing,
       pendingOfflineSyncCount,
+      autoSyncStatus,
       prefillTopupPackageId,
       clearPrefillTopupPackage,
       openTopupForPackage,
@@ -7340,6 +7480,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       firestoreConnected,
       isSyncing,
       pendingOfflineSyncCount,
+      autoSyncStatus,
       prefillTopupPackageId,
       clearPrefillTopupPackage,
       openTopupForPackage,

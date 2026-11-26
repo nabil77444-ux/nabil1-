@@ -1831,6 +1831,7 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
               <Search className="w-3.5 h-3.5 text-slate-400 absolute right-2.5 top-1/2 -translate-y-1/2" />
               <input
                 type="text"
+                inputMode="text"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="بحث باسم الوكيل أو العميل أو الهاتف..."
@@ -2194,6 +2195,7 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
               <Search className="w-3.5 h-3.5 text-slate-400 absolute right-2.5 top-1/2 -translate-y-1/2" />
               <input
                 type="text"
+                inputMode="text"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="بحث باسم المشتري أو الهاتف أو الفاتورة..."
@@ -2676,6 +2678,7 @@ export const ReportsCenterScreen: React.FC<ReportsCenterScreenProps> = ({ hideNu
               <Search className="w-3.5 h-3.5 text-slate-400 absolute right-2.5 top-1/2 -translate-y-1/2" />
               <input
                 type="text"
+                inputMode="text"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="بحث باسم الوكيل أو العميل أو الرقم..."

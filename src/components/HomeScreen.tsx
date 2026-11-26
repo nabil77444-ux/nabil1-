@@ -15,8 +15,6 @@ import {
   Share2,
   ShoppingBag,
   Sun,
-  Wifi,
-  WifiOff,
   X,
   Zap,
 } from 'lucide-react';
@@ -170,6 +168,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
     firestoreConnected,
     isSyncing,
     pendingOfflineSyncCount,
+    autoSyncStatus,
     totalAvailableCards,
     personalStockSplit,
     unreadNotificationsCount,
@@ -177,7 +176,6 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
     pendingTopups,
     pendingPasswordResets,
     appSettings,
-    syncNow,
     signOutUser,
     openTopupForPackage,
   } = useFirebase();
@@ -400,40 +398,51 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
             )}
           </button>
 
-          <button
-            type="button"
-            onClick={syncNow}
-            disabled={isSyncing}
-            className={`h-8 sm:h-9 px-2.5 rounded-xl border text-[11px] font-extrabold flex items-center gap-1 shadow-sm transition-colors whitespace-nowrap ${
-              pendingOfflineSyncCount > 0
-                ? 'bg-blue-50 dark:bg-blue-950/50 border-blue-500/80 text-blue-800 dark:text-blue-200'
-                : !isOnline
-                  ? 'bg-amber-50 dark:bg-amber-950/50 border-amber-500/70 text-amber-800 dark:text-amber-200'
-                  : isConnected
-                    ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-500/60 text-emerald-700 dark:text-emerald-300'
-                    : 'bg-amber-50 dark:bg-amber-950/40 border-amber-500/60 text-amber-800 dark:text-amber-200'
-            }`}
-          >
-            {pendingOfflineSyncCount > 0 ? (
-              <RefreshCw className={`w-3.5 h-3.5 shrink-0 ${isSyncing ? 'animate-spin' : ''}`} />
-            ) : isConnected ? (
-              <Wifi className="w-3.5 h-3.5 shrink-0" />
-            ) : (
-              <WifiOff className="w-3.5 h-3.5 shrink-0" />
-            )}
-            <span className="tabular-nums">
-              {pendingOfflineSyncCount > 0
-                ? `مزامنة (${pendingOfflineSyncCount})`
-                : !isOnline
-                  ? 'أوفلاين • حفظ آمن'
-                  : isConnected
-                    ? 'متصل ✅'
-                    : 'محلي ⚡'}
-            </span>
-            {pendingOfflineSyncCount === 0 && (
-              <RefreshCw className={`w-3 h-3 shrink-0 ${isSyncing ? 'animate-spin' : ''}`} />
-            )}
-          </button>
+          {/* Quiet, calm Zero-Touch Auto-Sync Status Indicator (no manual sync prompts) */}
+          {(() => {
+            const offlineNow = !isOnline || autoSyncStatus.state === 'offline_saved';
+            const savingNow =
+              !offlineNow &&
+              (isSyncing || autoSyncStatus.state === 'syncing' || pendingOfflineSyncCount > 0);
+            const liveSynced = !offlineNow && !savingNow && isConnected;
+            return (
+              <div
+                role="status"
+                aria-live="polite"
+                className={`h-8 sm:h-9 px-2.5 rounded-xl border text-[11px] font-extrabold flex items-center gap-1.5 shadow-sm transition-colors whitespace-nowrap select-none ${
+                  offlineNow
+                    ? 'bg-amber-50 dark:bg-amber-950/50 border-amber-500/70 text-amber-800 dark:text-amber-200'
+                    : savingNow
+                      ? 'bg-blue-50 dark:bg-blue-950/50 border-blue-400/70 text-blue-800 dark:text-blue-200'
+                      : liveSynced
+                        ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-500/60 text-emerald-700 dark:text-emerald-300'
+                        : 'bg-slate-50 dark:bg-slate-800/70 border-slate-300/70 dark:border-slate-700 text-slate-700 dark:text-slate-200'
+                }`}
+              >
+                {savingNow ? (
+                  <RefreshCw className="w-3.5 h-3.5 shrink-0 animate-spin text-blue-600 dark:text-blue-300" />
+                ) : offlineNow ? (
+                  <span className="w-2.5 h-2.5 rounded-full bg-amber-500 shrink-0" />
+                ) : (
+                  <span className="relative flex h-2.5 w-2.5 shrink-0">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-60" />
+                    <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500" />
+                  </span>
+                )}
+                <span className="tabular-nums">
+                  {offlineNow
+                    ? pendingOfflineSyncCount > 0
+                      ? `وضع أوفلاين • محفوظ تلقائياً (${pendingOfflineSyncCount})`
+                      : 'وضع أوفلاين • محفوظ تلقائياً'
+                    : savingNow
+                      ? pendingOfflineSyncCount > 0
+                        ? `جاري الحفظ تلقائياً (${pendingOfflineSyncCount})...`
+                        : 'جاري الحفظ تلقائياً...'
+                      : 'متصل'}
+                </span>
+              </div>
+            );
+          })()}
         </div>
 
         <div className="flex items-center gap-1 shrink-0">

@@ -12,6 +12,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import { useFirebase } from '../contexts/FirebaseContext';
+import { normalizeDigits } from '../lib/firebase';
 import { openWhatsAppShare } from '../lib/exportUtils';
 import { isOfflineQueuedTopupId } from '../lib/offlineSyncQueue';
 import {
@@ -636,13 +637,20 @@ export const TopupRequestsScreen: React.FC<TopupRequestsScreenProps> = ({ hideNu
                             <Plus className="w-3.5 h-3.5" />
                           </button>
                           <input
-                            type="text"
+                            type="tel"
                             inputMode="numeric"
                             pattern="[0-9]*"
+                            dir="ltr"
+                            autoComplete="off"
+                            autoCorrect="off"
+                            autoCapitalize="none"
+                            spellCheck={false}
+                            data-lpignore="true"
+                            data-form-type="other"
                             value={qty === 0 ? '' : String(qty)}
                             placeholder="0"
                             onChange={(e) => {
-                              const digits = e.target.value.replace(/[^\d]/g, '').slice(0, 4);
+                              const digits = normalizeDigits(e.target.value).replace(/[^\d]/g, '').slice(0, 4);
                               setPackageQty(pkg.id, digits ? Number.parseInt(digits, 10) : 0);
                             }}
                             aria-label={`عدد كروت باقة ${pkg.price}`}
@@ -691,6 +699,7 @@ export const TopupRequestsScreen: React.FC<TopupRequestsScreenProps> = ({ hideNu
 
               <input
                 type="text"
+                inputMode="text"
                 value={reqNotes}
                 onChange={(e) => setReqNotes(e.target.value)}
                 placeholder="ملاحظات إضافية لطلب التغذية (اختياري)"

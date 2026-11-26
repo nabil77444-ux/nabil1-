@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { useFirebase } from '../contexts/FirebaseContext';
 import { useFeedback } from '../lib/feedback';
+import { normalizeDigits } from '../lib/firebase';
 import {
   applyMessageTemplate,
   exportAsArabicPDF,
@@ -402,6 +403,7 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
       <div className="royal-card-frame rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] p-2.5 grid grid-cols-1 sm:grid-cols-2 gap-2">
         <input
           type="text"
+          inputMode="text"
           autoComplete="off"
           value={buyerName}
           onChange={(e) => setBuyerName(e.target.value)}
@@ -412,17 +414,25 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
           <input
             type="tel"
             inputMode="numeric"
+            pattern="[0-9]*"
+            dir="ltr"
             autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="none"
+            spellCheck={false}
+            data-lpignore="true"
+            data-form-type="other"
             value={buyerPhone}
             onChange={(e) => setBuyerPhone(e.target.value)}
+            onBlur={(e) => setBuyerPhone(normalizeDigits(e.currentTarget.value).replace(/[^\d+]/g, ''))}
             placeholder="رقم هاتف الزبون لإرسال الكرت..."
-            className="flex-1 min-h-[40px] rounded-xl border-2 border-[#1A365D]/70 dark:border-[#60A5FA]/70 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-extrabold text-slate-900 dark:text-white tabular-nums shadow-xs focus:border-[#D4AF37] focus:outline-none"
+            className="flex-1 min-h-[40px] rounded-xl border-2 border-[#1A365D]/70 dark:border-[#60A5FA]/70 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-extrabold text-slate-900 dark:text-white tabular-nums text-right shadow-xs focus:border-[#D4AF37] focus:outline-none"
           />
           <ContactPickerButton
             title="فتح سجل أسماء الهاتف الرسمي"
             onSelect={(c) => {
               if (c.name) setBuyerName(c.name);
-              if (c.phone) setBuyerPhone(c.phone);
+              if (c.phone) setBuyerPhone(normalizeDigits(c.phone));
             }}
           />
         </div>
@@ -689,6 +699,7 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
               <label className="block text-xs font-extrabold mb-1">السعة (مثال: 400 ميجا)</label>
               <input
                 type="text"
+                inputMode="text"
                 required
                 value={editPkgData}
                 onChange={(e) => setEditPkgData(e.target.value)}
@@ -699,6 +710,7 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
               <label className="block text-xs font-extrabold mb-1">الساعات</label>
               <input
                 type="text"
+                inputMode="text"
                 required
                 value={editPkgHours}
                 onChange={(e) => setEditPkgHours(e.target.value)}
@@ -709,6 +721,7 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
               <label className="block text-xs font-extrabold mb-1">الصلاحية</label>
               <input
                 type="text"
+                inputMode="text"
                 required
                 value={editPkgValidity}
                 onChange={(e) => setEditPkgValidity(e.target.value)}

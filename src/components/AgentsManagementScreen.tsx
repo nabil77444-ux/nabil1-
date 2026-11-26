@@ -18,6 +18,7 @@ import {
   X,
 } from 'lucide-react';
 import { useFirebase } from '../contexts/FirebaseContext';
+import { normalizeDigits } from '../lib/firebase';
 import { ContactPickerButton } from './ContactPickerButton';
 import { AgentCardAuditModal } from './AgentCardAuditModal';
 import {
@@ -850,6 +851,7 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
 
             <input
               type="text"
+              inputMode="text"
               required
               autoComplete="off"
               value={addName}
@@ -862,28 +864,33 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
               <input
                 type="tel"
                 inputMode="numeric"
+                pattern="[0-9]*"
+                dir="ltr"
                 required
                 autoComplete="off"
                 value={addPhone}
-                onChange={(e) => setAddPhone(e.target.value)}
+                onChange={(e) => setAddPhone(normalizeDigits(e.target.value))}
+                onBlur={() => setAddPhone((v) => normalizeDigits(v))}
                 placeholder="رقم الهاتف (77xxxxxxx)"
-                className="flex-1 min-h-[42px] rounded-xl border-2 border-[#1A365D]/70 dark:border-[#60A5FA]/70 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-extrabold tabular-nums shadow-xs focus:border-[#D4AF37] focus:outline-none"
+                className="flex-1 min-h-[42px] rounded-xl border-2 border-[#1A365D]/70 dark:border-[#60A5FA]/70 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-extrabold tabular-nums text-right shadow-xs focus:border-[#D4AF37] focus:outline-none"
               />
               <ContactPickerButton
                 onSelect={(c) => {
                   if (c.name && !addName) setAddName(c.name);
-                  if (c.phone) setAddPhone(c.phone);
+                  if (c.phone) setAddPhone(normalizeDigits(c.phone));
                 }}
               />
             </div>
 
             <input
               type="email"
+              inputMode="email"
+              dir="ltr"
               autoComplete="off"
               value={addEmail}
               onChange={(e) => setAddEmail(e.target.value)}
               placeholder="البريد الإلكتروني (اختياري)"
-              className="w-full min-h-[42px] rounded-xl border-2 border-[#1A365D]/70 dark:border-[#60A5FA]/70 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-extrabold shadow-xs focus:border-[#D4AF37] focus:outline-none"
+              className="w-full min-h-[42px] rounded-xl border-2 border-[#1A365D]/70 dark:border-[#60A5FA]/70 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-extrabold text-right shadow-xs focus:border-[#D4AF37] focus:outline-none"
             />
 
             {isAdmin && addRole === 'client' && agents.length > 0 && (
@@ -997,6 +1004,7 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
                 <label className="block text-[11px] font-extrabold mb-1">الاسم</label>
                 <input
                   type="text"
+                  inputMode="text"
                   value={editName}
                   onChange={(e) => setEditName(e.target.value)}
                   className="w-full min-h-[40px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold"
@@ -1007,15 +1015,19 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
                 <div className="flex items-center gap-1">
                   <input
                     type="tel"
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    dir="ltr"
                     value={editPhone}
-                    onChange={(e) => setEditPhone(e.target.value)}
-                    className="flex-1 min-w-0 min-h-[40px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-2.5 text-xs font-bold tabular-nums"
+                    onChange={(e) => setEditPhone(normalizeDigits(e.target.value))}
+                    onBlur={() => setEditPhone((v) => normalizeDigits(v))}
+                    className="flex-1 min-w-0 min-h-[40px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-2.5 text-xs font-bold tabular-nums text-right"
                   />
                   <ContactPickerButton
                     className="min-h-[40px] min-w-[38px] rounded-xl bg-[#1A365D] text-[#FDE68A] border border-[#D4AF37]/70 flex items-center justify-center shrink-0"
                     onSelect={(c) => {
                       if (c.name) setEditName(c.name);
-                      if (c.phone) setEditPhone(c.phone);
+                      if (c.phone) setEditPhone(normalizeDigits(c.phone));
                     }}
                   />
                 </div>
@@ -1026,27 +1038,28 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
               <div>
                 <label className="block text-[11px] font-extrabold mb-1">النسبة (%)</label>
                 <input
-                  type="number"
+                  type="tel"
                   inputMode="numeric"
-                  min={1}
-                  max={100}
+                  pattern="[0-9]*"
+                  dir="ltr"
                   value={editRate === '0' ? '' : editRate}
                   placeholder="0"
                   onFocus={(e) => e.currentTarget.select()}
-                  onChange={(e) => setEditRate(e.target.value)}
-                  className="w-full min-h-[40px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-2.5 text-xs font-bold tabular-nums focus:border-[#D4AF37] focus:outline-none"
+                  onChange={(e) => setEditRate(normalizeDigits(e.target.value).replace(/[^\d]/g, ''))}
+                  className="w-full min-h-[40px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-2.5 text-xs font-bold tabular-nums text-right focus:border-[#D4AF37] focus:outline-none"
                 />
               </div>
               <div>
                 <label className="block text-[11px] font-extrabold mb-1">الرصيد (ر.ي)</label>
                 <input
-                  type="number"
-                  inputMode="numeric"
+                  type="text"
+                  inputMode="decimal"
+                  dir="ltr"
                   value={editBalance === '0' ? '' : editBalance}
                   placeholder="0"
                   onFocus={(e) => e.currentTarget.select()}
-                  onChange={(e) => setEditBalance(e.target.value)}
-                  className="w-full min-h-[40px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-2.5 text-xs font-bold tabular-nums focus:border-[#D4AF37] focus:outline-none"
+                  onChange={(e) => setEditBalance(normalizeDigits(e.target.value).replace(/[^\d.-]/g, ''))}
+                  className="w-full min-h-[40px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-2.5 text-xs font-bold tabular-nums text-right focus:border-[#D4AF37] focus:outline-none"
                 />
               </div>
               <div>

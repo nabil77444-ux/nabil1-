@@ -6,6 +6,17 @@ declare const __APP_BUILD_NUMBER__: number | undefined;
 declare const __APP_NATIVE_VERSION__: string | undefined;
 declare const __GITHUB_REPO__: string | undefined;
 
+export interface OtaDownloadProgress {
+  downloadedBytes: number;
+  totalBytes: number;
+  percent: number;
+  speedKbps: number;
+  mirrorIndex: number;
+  mirrorCount: number;
+  mirrorLabel?: string;
+  status?: 'downloading' | 'verifying' | 'extracting' | 'applying';
+}
+
 interface TaibahUpdateNotifierNativePlugin {
   getBuildConfig(): Promise<{
     githubRepo?: string;
@@ -20,15 +31,41 @@ interface TaibahUpdateNotifierNativePlugin {
   requestNotificationPermission(): Promise<{ granted?: boolean }>;
   checkPendingUpdateIntent(): Promise<{ openUpdateDialog?: boolean }>;
   clearUpdateNotification(options?: { buildNumber?: number }): Promise<{ cleared?: boolean }>;
+  downloadAndApplyOta(options: {
+    urls: string[];
+    url?: string;
+    version: string;
+    buildNumber?: number;
+    expectedBytes?: number;
+  }): Promise<{
+    applied?: boolean;
+    cancelled?: boolean;
+    version?: string;
+    buildNumber?: number;
+    mirrorIndex?: number;
+    error?: string;
+  }>;
+  cancelOtaDownload(): Promise<{ cancelled?: boolean }>;
   addListener(
     eventName: 'openUpdateDialog',
     listenerFunc: (data: { openUpdateDialog?: boolean }) => void
+  ): Promise<PluginListenerHandle>;
+  addListener(
+    eventName: 'otaDownloadProgress',
+    listenerFunc: (data: Partial<OtaDownloadProgress>) => void
   ): Promise<PluginListenerHandle>;
 }
 
 const TaibahUpdateNotifier = registerPlugin<TaibahUpdateNotifierNativePlugin>(
   'TaibahUpdateNotifier'
 );
+
+export type ReleaseChangeType = 'add' | 'improve' | 'fix' | 'security' | 'remove';
+
+export interface ReleaseChangeItem {
+  type: ReleaseChangeType;
+  text: string;
+}
 
 export interface AppUpdateManifest {
   version: string;
@@ -38,9 +75,13 @@ export interface AppUpdateManifest {
   updateSizeBytes?: number;
   updateSizeText?: string;
   sizeMb?: number;
+  releaseTitle?: string;
+  releaseSummary?: string;
+  changes?: ReleaseChangeItem[];
   notes?: string;
   bundleUrl?: string;
   otaUrl?: string;
+  bundleMirrors?: string[];
   apkUrl?: string;
   publishedAt?: string;
 }
@@ -493,11 +534,45 @@ interface GitHubReleasePayload {
   assets?: GitHubReleaseAsset[];
 }
 
+function buildOrderedBundleMirrors(
+  rawMirrors?: unknown,
+  primaryUrl?: string,
+  fallbackUrl?: string,
+  repo?: string | null,
+  buildNumber?: number
+): string[] {
+  const ordered: string[] = [];
+  const pushUnique = (u?: unknown) => {
+    const clean = typeof u === 'string' ? u.trim() : '';
+    if (clean && /^https?:\/\//i.test(clean) && !ordered.includes(clean)) {
+      ordered.push(clean);
+    }
+  };
+
+  if (Array.isArray(rawMirrors)) {
+    for (const item of rawMirrors) {
+      pushUnique(item);
+    }
+  }
+  pushUnique(primaryUrl);
+
+  if (repo && isValidRepoSlug(repo)) {
+    const cacheBust = buildNumber && buildNumber > 0 ? `?v=${buildNumber}` : '';
+    pushUnique(`https://cdn.jsdelivr.net/gh/${repo}@ota-dist/update.zip${cacheBust}`);
+    pushUnique(`https://raw.githubusercontent.com/${repo}/ota-dist/update.zip${cacheBust}`);
+    pushUnique(`https://github.com/${repo}/releases/latest/download/update.zip`);
+  }
+
+  pushUnique(fallbackUrl);
+  return ordered.slice(0, 6);
+}
+
 function parseManifestObject(
   raw: Partial<AppUpdateManifest>,
   fallbackApkUrl?: string,
   fallbackBundleUrl?: string,
-  fallbackBytes?: number
+  fallbackBytes?: number,
+  repo?: string | null
 ): AppUpdateManifest | null {
   const remoteVersion = String(raw.version || '').trim();
   if (!remoteVersion) return null;
@@ -525,11 +600,20 @@ function parseManifestObject(
     (typeof raw.updateSizeText === 'string' && raw.updateSizeText.trim()) ||
     formatUpdateSizeAr(resolvedBytes, resolvedSizeMb);
 
-  const resolvedBundleUrl =
+  const rawPrimaryBundleUrl =
     (typeof raw.bundleUrl === 'string' && raw.bundleUrl.trim()) ||
     (typeof raw.otaUrl === 'string' && raw.otaUrl.trim()) ||
-    fallbackBundleUrl ||
     undefined;
+
+  const resolvedMirrors = buildOrderedBundleMirrors(
+    raw.bundleMirrors,
+    rawPrimaryBundleUrl,
+    fallbackBundleUrl,
+    repo,
+    parsedBuild > 0 ? parsedBuild : undefined
+  );
+
+  const resolvedBundleUrl = resolvedMirrors[0] || rawPrimaryBundleUrl || fallbackBundleUrl || undefined;
 
   const resolvedApkUrl =
     (typeof raw.apkUrl === 'string' && raw.apkUrl.trim()) || fallbackApkUrl || undefined;
@@ -538,6 +622,31 @@ function parseManifestObject(
     (typeof raw.nativeVersion === 'string' && raw.nativeVersion.trim()) ||
     (typeof raw.minNativeVersion === 'string' && raw.minNativeVersion.trim()) ||
     undefined;
+
+  const parsedChanges: ReleaseChangeItem[] = [];
+  if (Array.isArray(raw.changes)) {
+    const validTypes = new Set<ReleaseChangeType>(['add', 'improve', 'fix', 'security', 'remove']);
+    for (const item of raw.changes) {
+      if (!item || typeof item !== 'object') continue;
+      const rawType = String((item as { type?: unknown }).type || 'improve').trim().toLowerCase() as ReleaseChangeType;
+      const text = String((item as { text?: unknown }).text || '').trim().slice(0, 260);
+      if (!text) continue;
+      parsedChanges.push({
+        type: validTypes.has(rawType) ? rawType : 'improve',
+        text,
+      });
+      if (parsedChanges.length >= 15) break;
+    }
+  }
+
+  const resolvedReleaseTitle =
+    typeof raw.releaseTitle === 'string' && raw.releaseTitle.trim()
+      ? raw.releaseTitle.trim().slice(0, 120)
+      : undefined;
+  const resolvedReleaseSummary =
+    typeof raw.releaseSummary === 'string' && raw.releaseSummary.trim()
+      ? raw.releaseSummary.trim().slice(0, 240)
+      : undefined;
 
   return {
     version: remoteVersion,
@@ -548,9 +657,13 @@ function parseManifestObject(
     updateSizeBytes: resolvedBytes,
     updateSizeText: resolvedSizeText,
     sizeMb: resolvedSizeMb,
+    releaseTitle: resolvedReleaseTitle,
+    releaseSummary: resolvedReleaseSummary,
+    changes: parsedChanges.length > 0 ? parsedChanges : undefined,
     notes: typeof raw.notes === 'string' ? raw.notes : '',
     bundleUrl: resolvedBundleUrl,
     otaUrl: resolvedBundleUrl,
+    bundleMirrors: resolvedMirrors.length > 0 ? resolvedMirrors : undefined,
     apkUrl: resolvedApkUrl,
     publishedAt: typeof raw.publishedAt === 'string' ? raw.publishedAt : undefined,
   };
@@ -567,22 +680,23 @@ function extractVersionFromReleaseBody(body?: string, tagName?: string): string 
  * Fallback Stage 3: Read lightweight OTA manifest mirror from Firestore (`app_meta/latest_update`).
  */
 async function readFirestoreUpdateMirror(
-  fallbackApkUrl?: string
+  fallbackApkUrl?: string,
+  repo?: string | null
 ): Promise<AppUpdateManifest | null> {
   if (!auth.currentUser) return null;
   try {
     const snap = await getDoc(doc(db, 'app_meta', 'latest_update'));
     if (!snap.exists()) return null;
     const data = snap.data() as Partial<AppUpdateManifest>;
-    return parseManifestObject(data, fallbackApkUrl);
+    return parseManifestObject(data, fallbackApkUrl, undefined, undefined, repo);
   } catch {
     return null;
   }
 }
 
 /**
- * Super Admin helper: silently mirror a verified GitHub manifest into Firestore `app_meta/latest_update`
- * so Agents and Clients always have a resilient fallback even if GitHub is rate-limited or unreachable.
+ * Super Admin helper: silently mirror a verified GitHub manifest (including ordered `bundleMirrors`)
+ * into Firestore `app_meta/latest_update` so Agents and Clients always have a resilient fallback.
  */
 async function mirrorManifestToFirestoreSilently(manifest: AppUpdateManifest): Promise<void> {
   if (!auth.currentUser) return;
@@ -603,9 +717,23 @@ async function mirrorManifestToFirestoreSilently(manifest: AppUpdateManifest): P
     if (typeof manifest.sizeMb === 'number' && manifest.sizeMb > 0) {
       payload.sizeMb = manifest.sizeMb;
     }
+    if (manifest.releaseTitle) payload.releaseTitle = manifest.releaseTitle.slice(0, 120);
+    if (manifest.releaseSummary) payload.releaseSummary = manifest.releaseSummary.slice(0, 240);
+    if (Array.isArray(manifest.changes) && manifest.changes.length > 0) {
+      payload.changes = manifest.changes.slice(0, 15).map((ch) => ({
+        type: ch.type,
+        text: ch.text.slice(0, 260),
+      }));
+    }
     if (manifest.notes) payload.notes = manifest.notes.slice(0, 600);
     if (manifest.bundleUrl) payload.bundleUrl = manifest.bundleUrl.slice(0, 400);
     if (manifest.otaUrl) payload.otaUrl = manifest.otaUrl.slice(0, 400);
+    if (Array.isArray(manifest.bundleMirrors) && manifest.bundleMirrors.length > 0) {
+      payload.bundleMirrors = manifest.bundleMirrors
+        .filter((u) => typeof u === 'string' && /^https?:\/\//i.test(u))
+        .slice(0, 6)
+        .map((u) => u.slice(0, 400));
+    }
     if (manifest.apkUrl) payload.apkUrl = manifest.apkUrl.slice(0, 400);
     if (manifest.publishedAt) payload.publishedAt = manifest.publishedAt.slice(0, 64);
 
@@ -669,12 +797,38 @@ export async function checkForAppUpdate(options?: {
       );
       lastHttpStatus = res.status;
       if (res.ok && res.data) {
-        manifest = parseManifestObject(res.data, options?.apkDownloadUrl);
+        manifest = parseManifestObject(res.data, options?.apkDownloadUrl, undefined, undefined, repo);
         if (manifest) fetchedFromGitHub = true;
       }
     }
 
-    // Stage 1 (Fast Primary, Zero Rate Limit): Direct releases/latest/download/version.json
+    // Stage 1A (Fastest Global CDN): jsDelivr ota-dist/version.json
+    if (!manifest && repo) {
+      const cdnRes = await httpGetJson<Partial<AppUpdateManifest>>(
+        `https://cdn.jsdelivr.net/gh/${repo}@ota-dist/version.json?t=${Date.now()}`,
+        8000
+      );
+      if (cdnRes.status > 0) lastHttpStatus = cdnRes.status;
+      if (cdnRes.ok && cdnRes.data) {
+        manifest = parseManifestObject(cdnRes.data, options?.apkDownloadUrl, undefined, undefined, repo);
+        if (manifest) fetchedFromGitHub = true;
+      }
+    }
+
+    // Stage 1B (Fast Direct Mirror): GitHub Raw ota-dist/version.json
+    if (!manifest && repo) {
+      const rawRes = await httpGetJson<Partial<AppUpdateManifest>>(
+        `https://raw.githubusercontent.com/${repo}/ota-dist/version.json?t=${Date.now()}`,
+        8000
+      );
+      if (rawRes.status > 0) lastHttpStatus = rawRes.status;
+      if (rawRes.ok && rawRes.data) {
+        manifest = parseManifestObject(rawRes.data, options?.apkDownloadUrl, undefined, undefined, repo);
+        if (manifest) fetchedFromGitHub = true;
+      }
+    }
+
+    // Stage 1C: Direct releases/latest/download/version.json
     if (!manifest && directVersionUrl) {
       const sep = directVersionUrl.includes('?') ? '&' : '?';
       const directRes = await httpGetJson<Partial<AppUpdateManifest>>(
@@ -682,7 +836,7 @@ export async function checkForAppUpdate(options?: {
       );
       if (directRes.status > 0) lastHttpStatus = directRes.status;
       if (directRes.ok && directRes.data) {
-        manifest = parseManifestObject(directRes.data, options?.apkDownloadUrl);
+        manifest = parseManifestObject(directRes.data, options?.apkDownloadUrl, undefined, undefined, repo);
         if (manifest) fetchedFromGitHub = true;
       }
     }
@@ -720,7 +874,8 @@ export async function checkForAppUpdate(options?: {
               verRes.data,
               fallbackApkUrl,
               fallbackBundleUrl,
-              zipAsset?.size
+              zipAsset?.size,
+              repo
             );
             if (manifest) fetchedFromGitHub = true;
           }
@@ -738,6 +893,13 @@ export async function checkForAppUpdate(options?: {
             const sizeMb = bytes
               ? Math.round((bytes / (1024 * 1024)) * 100) / 100
               : undefined;
+            const mirrors = buildOrderedBundleMirrors(
+              undefined,
+              undefined,
+              fallbackBundleUrl,
+              repo,
+              derivedBuild > 0 ? derivedBuild : undefined
+            );
 
             manifest = {
               version: derivedVersion,
@@ -749,8 +911,9 @@ export async function checkForAppUpdate(options?: {
               sizeMb,
               notes:
                 'تحديث خفيف وسريع لتطبيق كروت طيبة نت — تحسينات الأداء والأمان وتجربة الاستخدام.',
-              bundleUrl: fallbackBundleUrl,
-              otaUrl: fallbackBundleUrl,
+              bundleUrl: mirrors[0] || fallbackBundleUrl,
+              otaUrl: mirrors[0] || fallbackBundleUrl,
+              bundleMirrors: mirrors,
               apkUrl: fallbackApkUrl,
               publishedAt: latestRelease.published_at,
             };
@@ -762,7 +925,7 @@ export async function checkForAppUpdate(options?: {
 
     // Stage 3 (Auto Fallback #2): Lightweight Firestore Mirror (`app_meta/latest_update`)
     if (!manifest) {
-      manifest = await readFirestoreUpdateMirror(options?.apkDownloadUrl);
+      manifest = await readFirestoreUpdateMirror(options?.apkDownloadUrl, repo);
     }
 
     // If Super Admin successfully fetched a live manifest from GitHub, update the Firestore mirror silently
@@ -836,27 +999,67 @@ export async function checkForAppUpdate(options?: {
 }
 
 /**
- * Downloads and applies the lightweight OTA `update.zip` bundle via @capgo/capacitor-updater
- * with live 0%–100% progress reporting, updates local buildNumber, and clears the system notification.
- * Only downloads the full APK if `requiresNativeApk` is true.
+ * Immediately aborts an in-progress native OTA download socket on Android.
+ */
+export async function cancelActiveAppUpdate(): Promise<void> {
+  if (!isNativePlatformSafe()) return;
+  try {
+    await TaibahUpdateNotifier.cancelOtaDownload();
+  } catch {
+    // Non-fatal on web or older APK builds
+  }
+}
+
+/**
+ * Downloads and applies the lightweight OTA `update.zip` bundle EXCLUSIVELY via native Android Java
+ * streaming-to-disk (`TaibahUpdateNotifier.downloadAndApplyOta`) — NEVER JS `fetch` / `CapacitorHttp` / Base64.
+ * Supports automatic multi-mirror failover (jsDelivr CDN -> GitHub Raw -> GitHub Releases),
+ * HTTP 206 resume, 10s stall watchdog, ZIP integrity verification, live speed/progress telemetry, and real cancellation.
  */
 export async function downloadAndApplyAppUpdate(
   manifest: AppUpdateManifest,
   requiresNativeApk: boolean,
-  onProgress: (percent: number) => void
-): Promise<{ ok: boolean; mode: 'ota' | 'apk' | 'web'; message?: string }> {
+  onProgress: (progress: OtaDownloadProgress) => void
+): Promise<{ ok: boolean; cancelled?: boolean; mode: 'ota' | 'apk' | 'web'; message?: string }> {
   const isNative = isNativePlatformSafe();
-  const otaDownloadUrl = manifest.bundleUrl || manifest.otaUrl;
+  const repo = resolveGitHubRepo(manifest.apkUrl);
+  const mirrors = buildOrderedBundleMirrors(
+    manifest.bundleMirrors,
+    manifest.bundleUrl || manifest.otaUrl,
+    undefined,
+    repo,
+    manifest.buildNumber
+  );
+
+  const expectedTotalBytes =
+    manifest.updateSizeBytes ||
+    (manifest.sizeMb ? Math.round(manifest.sizeMb * 1024 * 1024) : 0);
 
   if (requiresNativeApk || !isNative) {
     if (manifest.apkUrl && /^https?:\/\//i.test(manifest.apkUrl)) {
-      onProgress(100);
+      onProgress({
+        downloadedBytes: expectedTotalBytes,
+        totalBytes: expectedTotalBytes,
+        percent: 100,
+        speedKbps: 0,
+        mirrorIndex: 1,
+        mirrorCount: 1,
+        status: 'applying',
+      });
       clearUpdateSnooze();
       window.location.href = manifest.apkUrl;
       return { ok: true, mode: 'apk' };
     }
     if (!isNative) {
-      onProgress(100);
+      onProgress({
+        downloadedBytes: expectedTotalBytes,
+        totalBytes: expectedTotalBytes,
+        percent: 100,
+        speedKbps: 0,
+        mirrorIndex: 1,
+        mirrorCount: 1,
+        status: 'applying',
+      });
       clearUpdateSnooze();
       window.location.reload();
       return { ok: true, mode: 'web' };
@@ -868,9 +1071,8 @@ export async function downloadAndApplyAppUpdate(
     };
   }
 
-  if (!otaDownloadUrl || !/^https?:\/\//i.test(otaDownloadUrl)) {
+  if (mirrors.length === 0) {
     if (manifest.apkUrl && /^https?:\/\//i.test(manifest.apkUrl)) {
-      onProgress(100);
       window.location.href = manifest.apkUrl;
       return { ok: true, mode: 'apk' };
     }
@@ -881,58 +1083,145 @@ export async function downloadAndApplyAppUpdate(
     };
   }
 
-  const updater = await loadNativeCapacitorUpdater();
-  if (!updater) {
-    if (manifest.apkUrl && /^https?:\/\//i.test(manifest.apkUrl)) {
-      onProgress(100);
-      window.location.href = manifest.apkUrl;
-      return { ok: true, mode: 'apk' };
+  let progressHandle: PluginListenerHandle | null = null;
+  try {
+    onProgress({
+      downloadedBytes: 0,
+      totalBytes: expectedTotalBytes,
+      percent: 1,
+      speedKbps: 0,
+      mirrorIndex: 1,
+      mirrorCount: mirrors.length,
+      mirrorLabel: 'jsDelivr CDN السريع',
+      status: 'downloading',
+    });
+
+    progressHandle = await TaibahUpdateNotifier.addListener('otaDownloadProgress', (evt) => {
+      onProgress({
+        downloadedBytes: Math.max(0, Number(evt?.downloadedBytes) || 0),
+        totalBytes: Math.max(0, Number(evt?.totalBytes) || expectedTotalBytes),
+        percent: Math.max(0, Math.min(100, Math.round(Number(evt?.percent) || 0))),
+        speedKbps: Math.max(0, Number(evt?.speedKbps) || 0),
+        mirrorIndex: Math.max(1, Number(evt?.mirrorIndex) || 1),
+        mirrorCount: Math.max(1, Number(evt?.mirrorCount) || mirrors.length),
+        mirrorLabel: evt?.mirrorLabel || undefined,
+        status: evt?.status || 'downloading',
+      });
+    });
+
+    const nativeRes = await TaibahUpdateNotifier.downloadAndApplyOta({
+      urls: mirrors,
+      url: mirrors[0],
+      version: manifest.version,
+      buildNumber: manifest.buildNumber || 0,
+      expectedBytes: expectedTotalBytes,
+    });
+
+    if (nativeRes?.cancelled) {
+      return {
+        ok: false,
+        cancelled: true,
+        mode: 'ota',
+        message: 'تم إلغاء تحميل التحديث.',
+      };
     }
+
+    if (nativeRes?.applied) {
+      try {
+        localStorage.setItem(APPLIED_OTA_VERSION_KEY, manifest.version);
+        if (manifest.buildNumber && manifest.buildNumber > 0) {
+          localStorage.setItem(APPLIED_OTA_BUILD_NUMBER_KEY, String(manifest.buildNumber));
+        }
+      } catch {
+        // ignore storage errors
+      }
+      clearUpdateSnooze();
+      return { ok: true, mode: 'ota' };
+    }
+
     return {
       ok: false,
       mode: 'ota',
-      message: 'مكوّن التحديث الخفيف غير متوفر في هذه البيئة.',
+      message: nativeRes?.error || 'تعذر تحميل التحديث الخفيف من جميع المرايا — حاول مجدداً.',
     };
-  }
+  } catch (err) {
+    const rawMsg = err instanceof Error ? err.message : String(err || '');
+    const isUnimplementedOnOldApk = /not implemented|UNIMPLEMENTED/i.test(rawMsg);
 
-  let listenerHandle: { remove: () => Promise<void> } | null = null;
-  try {
-    onProgress(5);
-    listenerHandle = await updater.addListener('download', (info) => {
-      const pct = Math.max(5, Math.min(99, Math.round(Number(info?.percent) || 0)));
-      onProgress(pct);
-    });
+    // Backward-compatible native fallback ONLY for older APKs built before native streaming downloader
+    if (isUnimplementedOnOldApk) {
+      const updater = await loadNativeCapacitorUpdater();
+      if (updater) {
+        let capgoHandle: { remove: () => Promise<void> } | null = null;
+        try {
+          let activeMirrorIdx = 1;
+          capgoHandle = await updater.addListener('download', (info) => {
+            const pct = Math.max(5, Math.min(99, Math.round(Number(info?.percent) || 0)));
+            onProgress({
+              downloadedBytes: expectedTotalBytes > 0 ? Math.round((expectedTotalBytes * pct) / 100) : 0,
+              totalBytes: expectedTotalBytes,
+              percent: pct,
+              speedKbps: 0,
+              mirrorIndex: activeMirrorIdx,
+              mirrorCount: mirrors.length,
+              status: 'downloading',
+            });
+          });
 
-    const bundle = await updater.download({
-      url: otaDownloadUrl,
-      version: manifest.version,
-    });
-
-    onProgress(100);
-    try {
-      localStorage.setItem(APPLIED_OTA_VERSION_KEY, manifest.version);
-      if (manifest.buildNumber && manifest.buildNumber > 0) {
-        localStorage.setItem(APPLIED_OTA_BUILD_NUMBER_KEY, String(manifest.buildNumber));
+          let lastErr = '';
+          for (let i = 0; i < mirrors.length; i++) {
+            activeMirrorIdx = i + 1;
+            try {
+              const bundle = await updater.download({
+                url: mirrors[i],
+                version: manifest.version,
+              });
+              onProgress({
+                downloadedBytes: expectedTotalBytes,
+                totalBytes: expectedTotalBytes,
+                percent: 100,
+                speedKbps: 0,
+                mirrorIndex: activeMirrorIdx,
+                mirrorCount: mirrors.length,
+                status: 'applying',
+              });
+              try {
+                localStorage.setItem(APPLIED_OTA_VERSION_KEY, manifest.version);
+                if (manifest.buildNumber && manifest.buildNumber > 0) {
+                  localStorage.setItem(APPLIED_OTA_BUILD_NUMBER_KEY, String(manifest.buildNumber));
+                }
+              } catch {
+                // ignore
+              }
+              clearUpdateSnooze();
+              await clearNativeUpdateNotification(manifest.buildNumber);
+              await updater.set(bundle);
+              return { ok: true, mode: 'ota' };
+            } catch (mErr) {
+              lastErr = mErr instanceof Error ? mErr.message : String(mErr || '');
+            }
+          }
+          return {
+            ok: false,
+            mode: 'ota',
+            message: lastErr || 'تعذر تحميل التحديث من جميع المرايا — حاول مجدداً.',
+          };
+        } finally {
+          if (capgoHandle) {
+            await capgoHandle.remove().catch(() => {});
+          }
+        }
       }
-    } catch {
-      // ignore storage errors
     }
 
-    clearUpdateSnooze();
-    await clearNativeUpdateNotification(manifest.buildNumber);
-    await updater.set(bundle);
-    return { ok: true, mode: 'ota' };
-  } catch (err) {
-    const errMsg =
-      err instanceof Error
-        ? err.message
-        : typeof err === 'string'
-          ? err
-          : 'تعذر تحميل التحديث الخفيف حالياً.';
-    return { ok: false, mode: 'ota', message: errMsg };
+    return {
+      ok: false,
+      mode: 'ota',
+      message: rawMsg || 'تعذر تحميل التحديث الخفيف حالياً — يرجى المحاولة مجدداً.',
+    };
   } finally {
-    if (listenerHandle) {
-      await listenerHandle.remove().catch(() => {});
+    if (progressHandle) {
+      await progressHandle.remove().catch(() => {});
     }
   }
 }

@@ -88,11 +88,117 @@ export interface OfflineQueuedSale {
 }
 
 const LOCKED_CARDS_KEY = 'taibah_locked_cards_v1';
+const PENDING_SOLD_CARD_IDS_KEY = 'taibah_pending_sold_card_ids_v1';
 const OFFLINE_QUEUE_KEY = 'taibah_offline_sales_queue_v1';
 const CACHED_CARDS_PREFIX = 'taibah_cached_cards_v1_';
 
-// Synchronous in-memory lock set to block rapid double-taps or concurrent sales instantly
+// Synchronous in-memory lock sets to block rapid double-taps or concurrent sales instantly
 const memoryLockedCards = new Set<string>();
+const memoryPendingSoldCardIds = new Set<string>();
+
+function sanitizeTxSegment(raw: string): string {
+  return String(raw || '')
+    .trim()
+    .replace(/[^a-zA-Z0-9_-]/g, '_')
+    .slice(0, 96);
+}
+
+function fnv1aHex(input: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+/**
+ * Generates a 100% deterministic `clientTxId` bound to the exact card document IDs:
+ * - Single card sale -> `sale_${cardId}` (guaranteed unique & idempotent in Firestore `sales/${clientTxId}`)
+ * - Multi-card sale -> `sale_${firstCardId}_n${count}_${hash}` (idempotent across retries/reconnects)
+ * - Paper invoice (no card IDs) -> safe unique ID `sale_paper_${ts}_${rand}`
+ */
+export function buildDeterministicSaleTxId(cardDocIds: string[], fallbackSeed?: string): string {
+  const cleanIds = Array.from(
+    new Set(cardDocIds.map((id) => sanitizeTxSegment(id)).filter(Boolean))
+  ).sort();
+
+  if (cleanIds.length === 1) {
+    return `sale_${cleanIds[0]}`.slice(0, 120);
+  }
+  if (cleanIds.length > 1) {
+    const first = cleanIds[0].slice(0, 48);
+    const digest = fnv1aHex(cleanIds.join(','));
+    return `sale_${first}_n${cleanIds.length}_${digest}`.slice(0, 120);
+  }
+  const seed = sanitizeTxSegment(fallbackSeed || '') || `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  return `sale_paper_${seed}`.slice(0, 120);
+}
+
+function loadPersistedPendingSoldIds(): Set<string> {
+  try {
+    const raw = localStorage.getItem(PENDING_SOLD_CARD_IDS_KEY);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return new Set(parsed.filter((v): v is string => typeof v === 'string' && v.length > 0));
+    }
+  } catch {
+    // Ignore storage read errors
+  }
+  return new Set();
+}
+
+function savePersistedPendingSoldIds(ids: Set<string>): void {
+  try {
+    const arr = Array.from(ids);
+    const trimmed = arr.length > 15000 ? arr.slice(arr.length - 15000) : arr;
+    localStorage.setItem(PENDING_SOLD_CARD_IDS_KEY, JSON.stringify(trimmed));
+  } catch {
+    // Ignore quota errors
+  }
+}
+
+export function getPendingSoldCardIds(): Set<string> {
+  const combined = loadPersistedPendingSoldIds();
+  for (const id of memoryPendingSoldCardIds) {
+    combined.add(id);
+  }
+  // Always union with cardDocIds currently sitting in offline sales queue (Overlay Rule)
+  for (const q of getPendingOfflineSales()) {
+    for (const cid of q.cardDocIds || []) {
+      if (cid) combined.add(cid);
+    }
+  }
+  return combined;
+}
+
+export function isCardDocIdPendingSold(cardId: string): boolean {
+  if (!cardId) return false;
+  if (memoryPendingSoldCardIds.has(cardId)) return true;
+  return getPendingSoldCardIds().has(cardId);
+}
+
+export function markCardIdsPendingSold(cardIds: string[]): void {
+  const unique = Array.from(new Set(cardIds.filter(Boolean)));
+  if (unique.length === 0) return;
+  const current = loadPersistedPendingSoldIds();
+  for (const id of unique) {
+    memoryPendingSoldCardIds.add(id);
+    current.add(id);
+  }
+  savePersistedPendingSoldIds(current);
+}
+
+export function releasePendingSoldCardIds(cardIds: string[]): void {
+  if (cardIds.length === 0) return;
+  const current = loadPersistedPendingSoldIds();
+  for (const id of cardIds) {
+    memoryPendingSoldCardIds.delete(id);
+    current.delete(id);
+  }
+  savePersistedPendingSoldIds(current);
+}
 
 function loadPersistedLocks(): Set<string> {
   try {
@@ -124,13 +230,20 @@ export function getLocallyLockedCards(): Set<string> {
   for (const num of memoryLockedCards) {
     persisted.add(num);
   }
+  // Pending Queue Overlay: every card number in pending offline sales stays locked
+  for (const q of getPendingOfflineSales()) {
+    for (const num of q.cardNumbers || []) {
+      if (num) persisted.add(num);
+    }
+  }
   return persisted;
 }
 
-export function isCardLocallyLocked(cardNumber: string): boolean {
+export function isCardLocallyLocked(cardNumber: string, cardDocId?: string): boolean {
+  if (cardDocId && isCardDocIdPendingSold(cardDocId)) return true;
   if (!cardNumber) return false;
   if (memoryLockedCards.has(cardNumber)) return true;
-  return loadPersistedLocks().has(cardNumber);
+  return getLocallyLockedCards().has(cardNumber);
 }
 
 /**
@@ -177,10 +290,13 @@ export function saveCachedAvailableCards(
 ): void {
   if (!ownerId) return;
   const locked = getLocallyLockedCards();
+  const pendingIds = getPendingSoldCardIds();
   const seen = new Set<string>();
   const clean: CachedAvailableCard[] = [];
   for (const c of cards) {
-    if (!c?.cardNumber || locked.has(c.cardNumber) || seen.has(c.cardNumber)) continue;
+    if (!c?.cardNumber || locked.has(c.cardNumber) || pendingIds.has(c.id) || seen.has(c.cardNumber)) {
+      continue;
+    }
     const normPkg = canonicalPackageId(c.packageId);
     if (!normPkg) continue;
     seen.add(c.cardNumber);
@@ -225,6 +341,7 @@ export function appendCachedAvailableCards(ownerId: string, newCards: CachedAvai
 export function getCachedAvailableCards(ownerId: string, packageId?: string): CachedAvailableCard[] {
   if (!ownerId) return [];
   const locked = getLocallyLockedCards();
+  const pendingIds = getPendingSoldCardIds();
   let pool = memoryCardPoolByOwner.get(ownerId);
 
   if (!pool) {
@@ -259,6 +376,7 @@ export function getCachedAvailableCards(ownerId: string, packageId?: string): Ca
   return pool.filter(
     (c) =>
       !locked.has(c.cardNumber) &&
+      !pendingIds.has(c.id) &&
       (!targetPkg || canonicalPackageId(c.packageId) === targetPkg)
   );
 }
@@ -315,9 +433,11 @@ export function consumeCachedAvailableCards(
   if (pool.length < quantity) return null;
   const picked = pool.slice(0, quantity);
   const pickedNums = picked.map((c) => c.cardNumber);
+  const pickedIds = picked.map((c) => c.id);
   if (!lockCardsLocally(pickedNums)) {
     return null;
   }
+  markCardIdsPendingSold(pickedIds);
   removeCardsFromCache(ownerId, pickedNums);
   return picked;
 }
@@ -331,9 +451,11 @@ export function consumeCachedAvailableCardsForOwners(
   if (pool.length < quantity) return null;
   const picked = pool.slice(0, quantity);
   const pickedNums = picked.map((c) => c.cardNumber);
+  const pickedIds = picked.map((c) => c.id);
   if (!lockCardsLocally(pickedNums)) {
     return null;
   }
+  markCardIdsPendingSold(pickedIds);
   removeCardsFromCacheForOwners(ownerIds, pickedNums);
   return picked;
 }
@@ -429,9 +551,11 @@ export function clearOfflineSalesQueueOnly(): void {
  */
 export function clearAllLocalOfflineCardCaches(): void {
   memoryLockedCards.clear();
+  memoryPendingSoldCardIds.clear();
   memoryCardPoolByOwner.clear();
   try {
     localStorage.removeItem(LOCKED_CARDS_KEY);
+    localStorage.removeItem(PENDING_SOLD_CARD_IDS_KEY);
     localStorage.removeItem(OFFLINE_QUEUE_KEY);
     const keysToRemove: string[] = [];
     for (let i = 0; i < localStorage.length; i++) {

@@ -17,6 +17,7 @@ import {
   X,
 } from 'lucide-react';
 import { useFirebase } from '../contexts/FirebaseContext';
+import { normalizeDigits } from '../lib/firebase';
 import { useFeedback } from '../lib/feedback';
 import { useDebounce } from '../hooks/useDebounce';
 import { openSmsShare, openWhatsAppShare } from '../lib/exportUtils';
@@ -249,6 +250,7 @@ export const RecallCardsPanel: React.FC = React.memo(() => {
               <Search className="w-3.5 h-3.5 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2" />
               <input
                 type="text"
+                inputMode="text"
                 value={userSearch}
                 onChange={(e) => setUserSearch(e.target.value)}
                 placeholder="ابحث باسم أو رقم الوكيل / العميل..."
@@ -387,12 +389,13 @@ export const RecallCardsPanel: React.FC = React.memo(() => {
                           الكمية المطلوب سحبها (الحد الأقصى: {formatCount(remainingForSelectedPkg)})
                         </label>
                         <input
-                          type="number"
-                          min={1}
-                          max={remainingForSelectedPkg}
+                          type="tel"
+                          inputMode="numeric"
+                          pattern="[0-9]*"
+                          dir="ltr"
                           value={qtyInput}
-                          onChange={(e) => setQtyInput(e.target.value)}
-                          className="w-full min-h-[38px] rounded-xl border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 px-3 text-xs font-extrabold tabular-nums"
+                          onChange={(e) => setQtyInput(normalizeDigits(e.target.value).replace(/[^\d]/g, ''))}
+                          className="w-full min-h-[38px] rounded-xl border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 px-3 text-xs font-extrabold tabular-nums text-right"
                         />
                       </div>
                     </div>
@@ -405,11 +408,14 @@ export const RecallCardsPanel: React.FC = React.memo(() => {
                         <div className="relative flex-1 min-w-[180px]">
                           <Search className="w-3.5 h-3.5 text-slate-400 absolute right-2.5 top-1/2 -translate-y-1/2" />
                           <input
-                            type="text"
+                            type="tel"
+                            inputMode="numeric"
+                            pattern="[0-9]*"
+                            dir="ltr"
                             value={cardSearch}
-                            onChange={(e) => setCardSearch(e.target.value)}
+                            onChange={(e) => setCardSearch(normalizeDigits(e.target.value))}
                             placeholder="بحث برقم الكرت أو الفئة..."
-                            className="w-full min-h-[34px] rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 pr-8 pl-2 text-xs font-bold"
+                            className="w-full min-h-[34px] rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 pr-8 pl-2 text-xs font-bold text-right"
                           />
                         </div>
                         <button
@@ -477,6 +483,7 @@ export const RecallCardsPanel: React.FC = React.memo(() => {
                   {/* Optional Reason */}
                   <input
                     type="text"
+                    inputMode="text"
                     value={reason}
                     onChange={(e) => setReason(e.target.value)}
                     placeholder="سبب السحب / ملاحظة (اختياري — يُحفظ في كشف الحساب وسجل العمليات)..."

@@ -285,6 +285,7 @@ export const ContactPickerButton: React.FC<ContactPickerButtonProps> = ({
                 <Search className="w-4 h-4 text-slate-500 absolute right-3 top-1/2 -translate-y-1/2" />
                 <input
                   type="text"
+                  inputMode="text"
                   autoFocus
                   value={nativeSearch}
                   onChange={(e) => setNativeSearch(e.target.value)}

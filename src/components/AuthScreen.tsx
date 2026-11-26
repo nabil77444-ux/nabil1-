@@ -166,6 +166,9 @@ const IsolatedLoginForm = React.memo(function IsolatedLoginForm({
   onContactPicked,
 }: IsolatedLoginFormProps) {
   const [saveUsernameChecked, setSaveUsernameChecked] = useState(() => Boolean(initialSavedId));
+  // Default to numbers-only keyboard (type="tel" + inputMode="numeric") since primary login is phone number;
+  // 1-tap toggle switches cleanly to full text keyboard for email/letters
+  const [idKeyboardMode, setIdKeyboardMode] = useState<'numeric' | 'text'>('numeric');
 
   // Populate saved username ONCE on mount via ref (never bound to React state!)
   useEffect(() => {
@@ -174,6 +177,23 @@ const IsolatedLoginForm = React.memo(function IsolatedLoginForm({
     }
   }, [initialSavedId, identifierRef]);
 
+  const toggleIdKeyboardMode = useCallback(() => {
+    setIdKeyboardMode((prev) => {
+      const next = prev === 'numeric' ? 'text' : 'numeric';
+      const el = identifierRef.current;
+      if (el && document.activeElement === el) {
+        // Brief blur + refocus on next frame so Android IME switches keypad immediately
+        el.blur();
+        window.requestAnimationFrame(() => {
+          el.focus();
+        });
+      }
+      return next;
+    });
+  }, [identifierRef]);
+
+  const isNumericIdMode = idKeyboardMode === 'numeric';
+
   return (
     <form onSubmit={onSubmitForm} className="space-y-2.5" autoComplete="off" noValidate>
       <div>
@@ -181,7 +201,7 @@ const IsolatedLoginForm = React.memo(function IsolatedLoginForm({
           htmlFor="taibah-login-id"
           className="block text-[11.5px] font-extrabold text-slate-800 dark:text-slate-200 mb-1"
         >
-          البريد الإلكتروني أو رقم الهاتف
+          رقم الهاتف أو البريد الإلكتروني
         </label>
         <div className="relative flex items-center gap-1.5">
           <div className="relative flex-1">
@@ -190,32 +210,54 @@ const IsolatedLoginForm = React.memo(function IsolatedLoginForm({
               id="taibah-login-id"
               name="taibah_user_id"
               ref={identifierRef}
-              type="text"
+              type={isNumericIdMode ? 'tel' : 'text'}
+              inputMode={isNumericIdMode ? 'numeric' : 'text'}
+              pattern={isNumericIdMode ? '[0-9]*' : undefined}
+              dir={isNumericIdMode ? 'ltr' : 'auto'}
               defaultValue={initialSavedId}
-              placeholder="772466998 أو nabil77444@gmail.com"
+              placeholder={isNumericIdMode ? '772466998' : 'البريد الإلكتروني أو رقم الهاتف'}
               autoComplete="off"
               autoCorrect="off"
               autoCapitalize="none"
               spellCheck={false}
-              dir="auto"
               enterKeyHint="next"
               data-lpignore="true"
               data-form-type="other"
+              onBlur={() => {
+                const el = identifierRef.current;
+                if (el && el.value) {
+                  const converted = normalizeDigits(el.value);
+                  if (converted !== el.value) {
+                    el.value = converted;
+                  }
+                }
+              }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
                   e.preventDefault();
                   passwordRef.current?.focus();
                 }
               }}
-              className="w-full min-h-[44px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 pr-9 pl-3 text-base font-bold text-slate-900 dark:text-white placeholder:text-slate-400 focus:border-[#D4AF37] focus:outline-none"
+              className="w-full min-h-[44px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 pr-9 pl-12 text-base font-bold text-slate-900 dark:text-white placeholder:text-slate-400 focus:border-[#D4AF37] focus:outline-none text-right"
             />
+            <button
+              type="button"
+              tabIndex={-1}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={toggleIdKeyboardMode}
+              title={isNumericIdMode ? 'التبديل إلى لوحة الحروف والبريد' : 'التبديل إلى لوحة الأرقام فقط'}
+              aria-label={isNumericIdMode ? 'التبديل إلى لوحة الحروف' : 'التبديل إلى لوحة الأرقام'}
+              className="absolute left-1.5 top-1/2 -translate-y-1/2 h-7 min-w-[34px] px-1.5 rounded-lg border border-[#D4AF37]/80 bg-white dark:bg-slate-900 text-[#1A365D] dark:text-[#FDE68A] text-[10.5px] font-extrabold flex items-center justify-center shadow-xs"
+            >
+              {isNumericIdMode ? 'أب' : '123'}
+            </button>
           </div>
           <ContactPickerButton
             unauthenticated
             className="min-h-[44px] min-w-[44px] rounded-xl border-2 border-[#D4AF37] bg-[#1A365D] text-[#FDE68A] flex items-center justify-center shrink-0"
             onSelect={(picked) => {
               if (picked.phone && identifierRef.current) {
-                identifierRef.current.value = picked.phone;
+                identifierRef.current.value = normalizeDigits(picked.phone);
                 onContactPicked(picked.phone);
               }
             }}
@@ -236,6 +278,7 @@ const IsolatedLoginForm = React.memo(function IsolatedLoginForm({
             name="taibah_user_secret"
             ref={passwordRef}
             type="password"
+            inputMode="text"
             defaultValue=""
             placeholder="أدخل كلمة المرور"
             autoComplete="new-password"
@@ -1596,6 +1639,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = React.memo(function AuthScr
               <input
                 ref={regNameRef}
                 type="text"
+                inputMode="text"
                 required
                 defaultValue=""
                 placeholder="الاسم الكامل / اسم المحل"
@@ -1614,6 +1658,9 @@ export const AuthScreen: React.FC<AuthScreenProps> = React.memo(function AuthScr
                 <input
                   ref={regPhoneRef}
                   type="tel"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  dir="ltr"
                   required
                   defaultValue=""
                   placeholder="رقم الهاتف (77xxxxxxx)"
@@ -1621,11 +1668,15 @@ export const AuthScreen: React.FC<AuthScreenProps> = React.memo(function AuthScr
                   autoCorrect="off"
                   autoCapitalize="none"
                   spellCheck={false}
-                  dir="auto"
                   enterKeyHint="next"
                   data-lpignore="true"
                   data-form-type="other"
-                  className="flex-1 min-h-[42px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-base font-bold text-slate-900 dark:text-white focus:border-[#D4AF37] focus:outline-none tabular-nums"
+                  onBlur={() => {
+                    if (regPhoneRef.current && regPhoneRef.current.value) {
+                      regPhoneRef.current.value = normalizeDigits(regPhoneRef.current.value);
+                    }
+                  }}
+                  className="flex-1 min-h-[42px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-base font-bold text-slate-900 dark:text-white focus:border-[#D4AF37] focus:outline-none tabular-nums text-right"
                 />
                 <ContactPickerButton
                   unauthenticated
@@ -1635,7 +1686,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = React.memo(function AuthScr
                       regNameRef.current.value = picked.name;
                     }
                     if (picked.phone && regPhoneRef.current) {
-                      regPhoneRef.current.value = picked.phone;
+                      regPhoneRef.current.value = normalizeDigits(picked.phone);
                     }
                   }}
                 />
@@ -1644,22 +1695,24 @@ export const AuthScreen: React.FC<AuthScreenProps> = React.memo(function AuthScr
               <input
                 ref={regEmailRef}
                 type="email"
+                inputMode="email"
                 defaultValue=""
                 placeholder="البريد الإلكتروني (اختياري)"
                 autoComplete="off"
                 autoCorrect="off"
                 autoCapitalize="none"
                 spellCheck={false}
-                dir="auto"
+                dir="ltr"
                 enterKeyHint="next"
                 data-lpignore="true"
                 data-form-type="other"
-                className="w-full min-h-[42px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-base font-bold text-slate-900 dark:text-white focus:border-[#D4AF37] focus:outline-none"
+                className="w-full min-h-[42px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-base font-bold text-slate-900 dark:text-white focus:border-[#D4AF37] focus:outline-none text-right"
               />
 
               <input
                 ref={regPasswordRef}
                 type="password"
+                inputMode="text"
                 required
                 defaultValue=""
                 placeholder="كلمة المرور (6 أحرف أو أرقام على الأقل)"
@@ -1693,7 +1746,10 @@ export const AuthScreen: React.FC<AuthScreenProps> = React.memo(function AuthScr
               </p>
               <input
                 ref={resetIdentifierRef}
-                type="text"
+                type="tel"
+                inputMode="numeric"
+                pattern="[0-9]*"
+                dir="ltr"
                 required
                 defaultValue=""
                 placeholder="77xxxxxxx أو البريد الإلكتروني"
@@ -1701,15 +1757,20 @@ export const AuthScreen: React.FC<AuthScreenProps> = React.memo(function AuthScr
                 autoCorrect="off"
                 autoCapitalize="none"
                 spellCheck={false}
-                dir="auto"
                 enterKeyHint="next"
                 data-lpignore="true"
                 data-form-type="other"
-                className="w-full min-h-[44px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-base font-bold text-slate-900 dark:text-white focus:border-[#D4AF37] focus:outline-none"
+                onBlur={() => {
+                  if (resetIdentifierRef.current && resetIdentifierRef.current.value) {
+                    resetIdentifierRef.current.value = normalizeDigits(resetIdentifierRef.current.value);
+                  }
+                }}
+                className="w-full min-h-[44px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-base font-bold text-slate-900 dark:text-white focus:border-[#D4AF37] focus:outline-none text-right"
               />
               <input
                 ref={resetNameRef}
                 type="text"
+                inputMode="text"
                 defaultValue=""
                 placeholder="الاسم الكامل (اختياري)"
                 autoComplete="off"
@@ -1765,7 +1826,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = React.memo(function AuthScr
             <input
               ref={pinInputRef}
               type="password"
-              inputMode="numeric"
+              inputMode="text"
               defaultValue=""
               autoComplete="new-password"
               autoCorrect="off"

@@ -138,14 +138,45 @@ public class UpdateCheckWorker extends Worker {
 
         try {
             JSONObject manifestJson = null;
+            long ts = System.currentTimeMillis();
 
-            // Stage 1: Direct version.json (zero GitHub API rate limits, follows cross-domain redirects)
-            if (versionUrl != null && !versionUrl.trim().isEmpty()) {
-                String sep = versionUrl.contains("?") ? "&" : "?";
-                String fetchUrl = versionUrl.trim() + sep + "t=" + System.currentTimeMillis();
-                String jsonRaw = fetchTextFollowingRedirects(fetchUrl, 6);
+            // Stage 1A (Fastest Global CDN): jsDelivr ota-dist/version.json
+            if (!repo.isEmpty()) {
+                String cdnUrl = "https://cdn.jsdelivr.net/gh/" + repo + "@ota-dist/version.json?t=" + ts;
+                String jsonRaw = fetchTextFollowingRedirects(cdnUrl, 5);
                 if (jsonRaw != null && !jsonRaw.trim().isEmpty()) {
-                    manifestJson = new JSONObject(jsonRaw);
+                    try {
+                        manifestJson = new JSONObject(jsonRaw);
+                    } catch (Throwable ignored) {
+                        manifestJson = null;
+                    }
+                }
+            }
+
+            // Stage 1B (Fast Direct Mirror): GitHub Raw ota-dist/version.json
+            if (manifestJson == null && !repo.isEmpty()) {
+                String rawUrl = "https://raw.githubusercontent.com/" + repo + "/ota-dist/version.json?t=" + ts;
+                String jsonRaw = fetchTextFollowingRedirects(rawUrl, 5);
+                if (jsonRaw != null && !jsonRaw.trim().isEmpty()) {
+                    try {
+                        manifestJson = new JSONObject(jsonRaw);
+                    } catch (Throwable ignored) {
+                        manifestJson = null;
+                    }
+                }
+            }
+
+            // Stage 1C: Direct releases/latest/download/version.json
+            if (manifestJson == null && versionUrl != null && !versionUrl.trim().isEmpty()) {
+                String sep = versionUrl.contains("?") ? "&" : "?";
+                String fetchUrl = versionUrl.trim() + sep + "t=" + ts;
+                String jsonRaw = fetchTextFollowingRedirects(fetchUrl, 5);
+                if (jsonRaw != null && !jsonRaw.trim().isEmpty()) {
+                    try {
+                        manifestJson = new JSONObject(jsonRaw);
+                    } catch (Throwable ignored) {
+                        manifestJson = null;
+                    }
                 }
             }
 
@@ -179,7 +210,17 @@ public class UpdateCheckWorker extends Worker {
             }
 
             if (remoteBuild > 0 && remoteBuild > currentBuild && remoteBuild > lastNotifiedBuild) {
-                showUpdateNotification(context, remoteVersion, updateSizeText);
+                String releaseTitle = manifestJson.optString("releaseTitle", "").trim();
+                String releaseSummary = manifestJson.optString("releaseSummary", "").trim();
+                JSONArray changesArr = manifestJson.optJSONArray("changes");
+                showUpdateNotification(
+                        context,
+                        remoteVersion,
+                        updateSizeText,
+                        releaseTitle,
+                        releaseSummary,
+                        changesArr
+                );
                 prefs.edit().putInt(KEY_LAST_NOTIFIED_BUILD, remoteBuild).apply();
             }
 
@@ -320,7 +361,31 @@ public class UpdateCheckWorker extends Worker {
         return null;
     }
 
-    private void showUpdateNotification(Context context, String version, String sizeText) {
+    private String mapChangeTypeArabic(String type) {
+        if (type == null) return "تحسين";
+        switch (type.trim().toLowerCase(java.util.Locale.US)) {
+            case "add":
+                return "إضافة";
+            case "fix":
+                return "إصلاح";
+            case "security":
+                return "أمان";
+            case "remove":
+                return "إزالة";
+            case "improve":
+            default:
+                return "تحسين";
+        }
+    }
+
+    private void showUpdateNotification(
+            Context context,
+            String version,
+            String sizeText,
+            String releaseTitle,
+            String releaseSummary,
+            JSONArray changesArr
+    ) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             int perm = ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS);
             if (perm != PackageManager.PERMISSION_GRANTED) {
@@ -358,9 +423,31 @@ public class UpdateCheckWorker extends Worker {
         );
 
         String verLabel = version.startsWith("v") || version.startsWith("V") ? version : ("v" + version);
-        String title = "تحديث جديد لتطبيق كروت طيبة نت";
-        String body = "الإصدار " + verLabel + " جاهز — حجم التحديث: " + sizeText
-                + " فقط (بدون تحميل التطبيق بالكامل). اضغط للتحميل.";
+        String title = (releaseTitle != null && !releaseTitle.isEmpty())
+                ? ("تحديث جديد: " + releaseTitle)
+                : "تحديث جديد لتطبيق كروت طيبة نت";
+
+        String collapsedBody = (releaseSummary != null && !releaseSummary.isEmpty())
+                ? (releaseSummary + " (" + sizeText + ")")
+                : ("الإصدار " + verLabel + " جاهز — حجم التحديث: " + sizeText + " فقط. اضغط للتحميل.");
+
+        StringBuilder expanded = new StringBuilder();
+        expanded.append("الإصدار ").append(verLabel).append(" • الحجم: ").append(sizeText);
+        if (releaseSummary != null && !releaseSummary.isEmpty()) {
+            expanded.append("\n").append(releaseSummary);
+        }
+        if (changesArr != null && changesArr.length() > 0) {
+            int maxItems = Math.min(changesArr.length(), 4);
+            for (int i = 0; i < maxItems; i++) {
+                JSONObject item = changesArr.optJSONObject(i);
+                if (item == null) continue;
+                String itemText = item.optString("text", "").trim();
+                if (itemText.isEmpty()) continue;
+                String label = mapChangeTypeArabic(item.optString("type", "improve"));
+                expanded.append("\n• ").append(label).append(": ").append(itemText);
+            }
+        }
+        expanded.append("\nاضغط للتحديث الفوري دون فقدان بياناتك.");
 
         int smallIcon = context.getApplicationInfo().icon;
         if (smallIcon == 0) {
@@ -370,8 +457,8 @@ public class UpdateCheckWorker extends Worker {
         NotificationCompat.Builder builder = new NotificationCompat.Builder(context, CHANNEL_ID)
                 .setSmallIcon(smallIcon)
                 .setContentTitle(title)
-                .setContentText(body)
-                .setStyle(new NotificationCompat.BigTextStyle().bigText(body))
+                .setContentText(collapsedBody)
+                .setStyle(new NotificationCompat.BigTextStyle().bigText(expanded.toString()))
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setCategory(NotificationCompat.CATEGORY_RECOMMENDATION)
                 .setAutoCancel(true)

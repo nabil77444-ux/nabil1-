@@ -79,6 +79,58 @@ jobs:
           version = f"2.1.{run_num}"
           native_version = os.environ.get("APP_NATIVE_VERSION", "2.1.0")
 
+          # Read structured Arabic release notes from release-notes.json (root)
+          type_labels = {
+              "add": "إضافة",
+              "improve": "تحسين",
+              "fix": "إصلاح",
+              "security": "أمان",
+              "remove": "إزالة",
+          }
+          release_title = "تحديث جديد لتطبيق كروت طيبة نت"
+          release_summary = "تحسينات شاملة للأداء والمزامنة والأمان وتجربة الاستخدام."
+          changes_list = []
+
+          if os.path.exists("release-notes.json"):
+              try:
+                  with open("release-notes.json", "r", encoding="utf-8") as rf:
+                      rn = json.load(rf)
+                  if isinstance(rn, dict):
+                      if isinstance(rn.get("title"), str) and rn["title"].strip():
+                          release_title = rn["title"].strip()[:120]
+                      if isinstance(rn.get("summary"), str) and rn["summary"].strip():
+                          release_summary = rn["summary"].strip()[:240]
+                      if isinstance(rn.get("changes"), list):
+                          for item in rn["changes"][:15]:
+                              if not isinstance(item, dict):
+                                  continue
+                              ctype = str(item.get("type", "improve")).strip().lower()
+                              if ctype not in type_labels:
+                                  ctype = "improve"
+                              ctext = str(item.get("text", "")).strip()[:260]
+                              if ctext:
+                                  changes_list.append({"type": ctype, "text": ctext})
+              except Exception as ex:
+                  print(f"::warning::Failed to parse release-notes.json: {ex}")
+
+          notes_lines = [release_summary]
+          for ch in changes_list:
+              notes_lines.append(f"• {type_labels.get(ch['type'], 'تحسين')}: {ch['text']}")
+          combined_notes = "\n".join(notes_lines)[:600]
+
+          # Write markdown changelog file for GitHub Release body
+          md_lines = [f"### {release_title}", f"> {release_summary}", ""]
+          for ch in changes_list:
+              md_lines.append(f"- **{type_labels.get(ch['type'], 'تحسين')}:** {ch['text']}")
+          with open(".release-notes-body.md", "w", encoding="utf-8") as mf:
+              mf.write("\n".join(md_lines))
+
+          # Ordered fastest-to-slowest OTA mirrors (CDN -> GitHub Raw -> GitHub Releases)
+          jsdelivr_url = f"https://cdn.jsdelivr.net/gh/{repo}@ota-dist/update.zip?v={run_num}"
+          raw_url = f"https://raw.githubusercontent.com/{repo}/ota-dist/update.zip?v={run_num}"
+          release_url = f"https://github.com/{repo}/releases/latest/download/update.zip"
+          bundle_mirrors = [jsdelivr_url, raw_url, release_url]
+
           manifest = {
               "version": version,
               "buildNumber": run_num,
@@ -87,9 +139,13 @@ jobs:
               "updateSizeBytes": size_bytes,
               "updateSizeText": size_text,
               "sizeMb": size_mb,
-              "notes": "تحديث خفيف وسريع لتطبيق كروت طيبة نت — إشعارات التحديث الفورية، تحسين طلبات التغذية والعمل أوفلاين والأداء العام.",
-              "bundleUrl": f"https://github.com/{repo}/releases/latest/download/update.zip",
-              "otaUrl": f"https://github.com/{repo}/releases/latest/download/update.zip",
+              "releaseTitle": release_title,
+              "releaseSummary": release_summary,
+              "changes": changes_list,
+              "notes": combined_notes,
+              "bundleUrl": jsdelivr_url,
+              "otaUrl": jsdelivr_url,
+              "bundleMirrors": bundle_mirrors,
               "apkUrl": f"https://github.com/{repo}/releases/latest/download/TaibahNet-Cards.apk",
               "publishedAt": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
           }
@@ -99,6 +155,25 @@ jobs:
           print(json.dumps(manifest, ensure_ascii=False, indent=2))
           PYEOF
           ls -lh update.zip
+
+      - name: Publish Lightweight OTA CDN Mirror (ota-dist branch — version.json & update.zip only)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/ota-dist
+          mkdir -p /tmp/ota-dist
+          cp -f version.json /tmp/ota-dist/version.json
+          cp -f update.zip /tmp/ota-dist/update.zip
+          touch /tmp/ota-dist/.nojekyll
+          git -C /tmp/ota-dist init -b ota-dist
+          git -C /tmp/ota-dist config user.name "github-actions[bot]"
+          git -C /tmp/ota-dist config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C /tmp/ota-dist add version.json update.zip .nojekyll
+          git -C /tmp/ota-dist commit -m "OTA CDN bundle v2.1.${{ github.run_number }} (build #${{ github.run_number }})"
+          git -C /tmp/ota-dist push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" HEAD:refs/heads/ota-dist
+          rm -rf /tmp/ota-dist
+          echo "Published version.json & update.zip to ota-dist CDN mirror branch cleanly (main untouched)."
 
       - name: Initialize & Sync Capacitor Android Project with Native Plugins
         run: |
@@ -601,6 +676,20 @@ jobs:
           path: TaibahNet-Cards.apk
           retention-days: 90
 
+      - name: Compose Final Release Body from release-notes.json
+        run: |
+          cat <<'EOF' > .github-release-final.md
+          الإصدار النهائي الجاهز للتثبيت والتحديث المباشر أو التحديث الخفيف (OTA) لتطبيق **كروت طيبة نت – TAIBAH NET**.
+          - **applicationId:** `net.taibah.wireless`
+          - **الإصدار:** `${{ env.APK_VERSION_NAME }}` (`versionCode: ${{ env.APK_VERSION_CODE }}`)
+          - **التوافق:** Android 6.0+ (`minSdkVersion = 23`)
+          - **حالة التوقيع:** `${{ env.SIGNING_STATUS }}`
+
+          EOF
+          if [ -f ".release-notes-body.md" ]; then
+            cat .release-notes-body.md >> .github-release-final.md
+          fi
+
       - name: Publish Direct APK & Lightweight OTA Bundle to GitHub Releases (latest)
         uses: softprops/action-gh-release@v2
         with:
@@ -609,16 +698,7 @@ jobs:
           draft: false
           prerelease: false
           make_latest: true
-          body: |
-            الإصدار النهائي الجاهز للتثبيت والتحديث المباشر أو التحديث الخفيف (OTA) لتطبيق **كروت طيبة نت – TAIBAH NET**.
-            - **applicationId:** `net.taibah.wireless`
-            - **الإصدار:** `${{ env.APK_VERSION_NAME }}` (`versionCode: ${{ env.APK_VERSION_CODE }}`)
-            - **التوافق:** Android 6.0+ (`minSdkVersion = 23`) مع أيقونة Adaptive Icon دائرية متوازنة بدون قص
-            - **حالة التوقيع:** `${{ env.SIGNING_STATUS }}`
-            - يدعم التحديث التلقائي الخفيف (`update.zip` + `version.json`) مباشرة من داخل التطبيق دون إعادة تحميل APK
-            - يدعم الدخول بالبصمة والوجه عبر **Android BiometricPrompt** والعمل أوفلاين بالكامل (Offline-First) دون تكرار بيع أي كرت
-            - يدعم مشاركة الفواتير والكشوفات (PDF عربي + صور HD) وجلب جهات الاتصال مباشرة من سجل الهاتف الرسمي
-            - مزامنة لحظية مع Firebase Firestore
+          body_path: .github-release-final.md
           files: |
             version.json
             update.zip

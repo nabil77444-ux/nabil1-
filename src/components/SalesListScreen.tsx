@@ -17,6 +17,7 @@ import {
   X,
 } from 'lucide-react';
 import { useFirebase } from '../contexts/FirebaseContext';
+import { normalizeDigits } from '../lib/firebase';
 import { useDebounce } from '../hooks/useDebounce';
 import { useFeedback } from '../lib/feedback';
 import {
@@ -408,6 +409,7 @@ export const SalesListScreen: React.FC<SalesListScreenProps> = ({ hideNumbers, o
           <Search className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2" />
           <input
             type="text"
+            inputMode="text"
             autoComplete="off"
             autoCorrect="off"
             autoCapitalize="none"
@@ -930,6 +932,7 @@ export const SalesListScreen: React.FC<SalesListScreenProps> = ({ hideNumbers, o
               <label className="block text-xs font-extrabold mb-1">اسم المشتري / المستلم</label>
               <input
                 type="text"
+                inputMode="text"
                 required
                 value={editBuyerName}
                 onChange={(e) => setEditBuyerName(e.target.value)}
@@ -941,14 +944,18 @@ export const SalesListScreen: React.FC<SalesListScreenProps> = ({ hideNumbers, o
               <div className="flex items-center gap-1.5">
                 <input
                   type="tel"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  dir="ltr"
                   value={editBuyerPhone}
-                  onChange={(e) => setEditBuyerPhone(e.target.value)}
-                  className="flex-1 min-h-[42px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold tabular-nums"
+                  onChange={(e) => setEditBuyerPhone(normalizeDigits(e.target.value))}
+                  onBlur={() => setEditBuyerPhone((v) => normalizeDigits(v))}
+                  className="flex-1 min-h-[42px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold tabular-nums text-right"
                 />
                 <ContactPickerButton
                   onSelect={(c) => {
                     if (c.name) setEditBuyerName(c.name);
-                    if (c.phone) setEditBuyerPhone(c.phone);
+                    if (c.phone) setEditBuyerPhone(normalizeDigits(c.phone));
                   }}
                 />
               </div>
@@ -958,15 +965,15 @@ export const SalesListScreen: React.FC<SalesListScreenProps> = ({ hideNumbers, o
                 المبلغ المدفوع (من أصل {editingSale.totalAmount} ر.ي)
               </label>
               <input
-                type="number"
+                type="tel"
                 inputMode="numeric"
-                min={0}
-                max={editingSale.totalAmount}
+                pattern="[0-9]*"
+                dir="ltr"
                 value={editPaidAmount === '0' ? '' : editPaidAmount}
                 placeholder="0"
                 onFocus={(e) => e.currentTarget.select()}
-                onChange={(e) => setEditPaidAmount(e.target.value)}
-                className="w-full min-h-[42px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold tabular-nums focus:border-[#D4AF37] focus:outline-none"
+                onChange={(e) => setEditPaidAmount(normalizeDigits(e.target.value).replace(/[^\d]/g, ''))}
+                className="w-full min-h-[42px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold tabular-nums text-right focus:border-[#D4AF37] focus:outline-none"
               />
             </div>
             <div>

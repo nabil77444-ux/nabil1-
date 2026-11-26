@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Coins, Edit3, Gift, Minus, Plus, ShoppingCart, Trash2 } from 'lucide-react';
 import { formatCount, getPackageThemeStyle, type PackageDoc } from '../types/taibah';
+import { normalizeDigits } from '../lib/firebase';
 
 interface PackageCardTileProps {
   pkg: PackageDoc;
@@ -225,15 +226,21 @@ export const PackageCardTile: React.FC<PackageCardTileProps> = React.memo(
 
           {onSetQty ? (
             <input
-              type="text"
+              type="tel"
               inputMode="numeric"
               pattern="[0-9]*"
+              dir="ltr"
               enterKeyHint="done"
               autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="none"
+              spellCheck={false}
+              data-lpignore="true"
+              data-form-type="other"
               value={draftQty}
               placeholder="0"
               onChange={(e) => {
-                const digitsOnly = e.target.value.replace(/[^\d]/g, '').slice(0, 5);
+                const digitsOnly = normalizeDigits(e.target.value).replace(/[^\d]/g, '').slice(0, 5);
                 setDraftQty(digitsOnly);
                 const parsed = digitsOnly ? Number.parseInt(digitsOnly, 10) : 0;
                 onSetQty(pkg.id, Number.isNaN(parsed) ? 0 : Math.max(0, parsed));

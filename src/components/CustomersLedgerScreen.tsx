@@ -18,6 +18,7 @@ import {
   X,
 } from 'lucide-react';
 import { useFirebase } from '../contexts/FirebaseContext';
+import { normalizeDigits } from '../lib/firebase';
 import { useDebounce } from '../hooks/useDebounce';
 import { useFeedback } from '../lib/feedback';
 import {
@@ -420,6 +421,7 @@ export const CustomersLedgerScreen: React.FC<CustomersLedgerScreenProps> = ({ hi
           <Search className="w-4 h-4 text-[#1A365D] dark:text-[#FDE68A] absolute right-3 top-1/2 -translate-y-1/2" />
           <input
             type="text"
+            inputMode="text"
             autoComplete="off"
             autoCorrect="off"
             autoCapitalize="none"
@@ -661,18 +663,20 @@ export const CustomersLedgerScreen: React.FC<CustomersLedgerScreenProps> = ({ hi
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   <input
-                    type="number"
+                    type="tel"
                     inputMode="numeric"
+                    pattern="[0-9]*"
+                    dir="ltr"
                     required
-                    min={1}
                     value={entryAmount === '0' ? '' : entryAmount}
                     onFocus={(e) => e.currentTarget.select()}
-                    onChange={(e) => setEntryAmount(e.target.value)}
+                    onChange={(e) => setEntryAmount(normalizeDigits(e.target.value).replace(/[^\d]/g, ''))}
                     placeholder="المبلغ بالريال اليمني"
-                    className="min-h-[40px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-white dark:bg-slate-900 px-3 text-xs font-extrabold tabular-nums focus:border-[#D4AF37] focus:outline-none"
+                    className="min-h-[40px] rounded-xl border-2 border-slate-400 dark:border-slate-600 bg-white dark:bg-slate-900 px-3 text-xs font-extrabold tabular-nums text-right focus:border-[#D4AF37] focus:outline-none"
                   />
                   <input
                     type="text"
+                    inputMode="text"
                     value={entryDesc}
                     onChange={(e) => setEntryDesc(e.target.value)}
                     placeholder="البيان / سبب القيد (مثال: تسليم نقدي أو رصيد)"
@@ -864,6 +868,7 @@ export const CustomersLedgerScreen: React.FC<CustomersLedgerScreenProps> = ({ hi
               <label className="block text-xs font-extrabold mb-1">الاسم الكامل / اسم المحل</label>
               <input
                 type="text"
+                inputMode="text"
                 required
                 autoComplete="off"
                 value={formName}
@@ -879,16 +884,19 @@ export const CustomersLedgerScreen: React.FC<CustomersLedgerScreenProps> = ({ hi
                 <input
                   type="tel"
                   inputMode="numeric"
+                  pattern="[0-9]*"
+                  dir="ltr"
                   autoComplete="off"
                   value={formPhone}
-                  onChange={(e) => setFormPhone(e.target.value)}
+                  onChange={(e) => setFormPhone(normalizeDigits(e.target.value))}
+                  onBlur={() => setFormPhone((v) => normalizeDigits(v))}
                   placeholder="77xxxxxxx"
-                  className="flex-1 min-h-[42px] rounded-xl border-2 border-[#1A365D]/65 dark:border-[#60A5FA]/65 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold tabular-nums shadow-sm focus:border-[#D4AF37] focus:outline-none"
+                  className="flex-1 min-h-[42px] rounded-xl border-2 border-[#1A365D]/65 dark:border-[#60A5FA]/65 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold tabular-nums text-right shadow-sm focus:border-[#D4AF37] focus:outline-none"
                 />
                 <ContactPickerButton
                   onSelect={(c) => {
                     if (c.name && !formName) setFormName(c.name);
-                    if (c.phone) setFormPhone(c.phone);
+                    if (c.phone) setFormPhone(normalizeDigits(c.phone));
                   }}
                 />
               </div>
@@ -914,29 +922,31 @@ export const CustomersLedgerScreen: React.FC<CustomersLedgerScreenProps> = ({ hi
                 <div>
                   <label className="block text-[11px] font-extrabold mb-1 text-red-600">رصيد افتتاحي عليه</label>
                   <input
-                    type="number"
+                    type="tel"
                     inputMode="numeric"
+                    pattern="[0-9]*"
+                    dir="ltr"
                     autoComplete="off"
-                    min={0}
                     value={formInitialDebit === '0' ? '' : formInitialDebit}
                     onFocus={(e) => e.currentTarget.select()}
-                    onChange={(e) => setFormInitialDebit(e.target.value)}
+                    onChange={(e) => setFormInitialDebit(normalizeDigits(e.target.value).replace(/[^\d]/g, ''))}
                     placeholder="0"
-                    className="w-full min-h-[40px] rounded-xl border-2 border-red-500/70 dark:border-red-400/70 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold tabular-nums shadow-sm focus:border-[#D4AF37] focus:outline-none"
+                    className="w-full min-h-[40px] rounded-xl border-2 border-red-500/70 dark:border-red-400/70 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold tabular-nums text-right shadow-sm focus:border-[#D4AF37] focus:outline-none"
                   />
                 </div>
                 <div>
                   <label className="block text-[11px] font-extrabold mb-1 text-emerald-600">رصيد افتتاحي له</label>
                   <input
-                    type="number"
+                    type="tel"
                     inputMode="numeric"
+                    pattern="[0-9]*"
+                    dir="ltr"
                     autoComplete="off"
-                    min={0}
                     value={formInitialCredit === '0' ? '' : formInitialCredit}
                     onFocus={(e) => e.currentTarget.select()}
-                    onChange={(e) => setFormInitialCredit(e.target.value)}
+                    onChange={(e) => setFormInitialCredit(normalizeDigits(e.target.value).replace(/[^\d]/g, ''))}
                     placeholder="0"
-                    className="w-full min-h-[40px] rounded-xl border-2 border-emerald-600/70 dark:border-emerald-400/70 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold tabular-nums shadow-sm focus:border-[#D4AF37] focus:outline-none"
+                    className="w-full min-h-[40px] rounded-xl border-2 border-emerald-600/70 dark:border-emerald-400/70 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-bold tabular-nums text-right shadow-sm focus:border-[#D4AF37] focus:outline-none"
                   />
                 </div>
               </div>
@@ -946,6 +956,7 @@ export const CustomersLedgerScreen: React.FC<CustomersLedgerScreenProps> = ({ hi
               <label className="block text-xs font-extrabold mb-1">ملاحظات</label>
               <input
                 type="text"
+                inputMode="text"
                 autoComplete="off"
                 value={formNotes}
                 onChange={(e) => setFormNotes(e.target.value)}

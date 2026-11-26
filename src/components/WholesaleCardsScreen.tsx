@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { useFirebase } from '../contexts/FirebaseContext';
 import { useFeedback } from '../lib/feedback';
+import { normalizeDigits } from '../lib/firebase';
 import {
   exportAsArabicPDF,
   exportAsHDImage,
@@ -438,6 +439,7 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
           <input
             type="text"
+            inputMode="text"
             autoComplete="off"
             value={customName}
             onChange={(e) => setCustomName(e.target.value)}
@@ -448,16 +450,24 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
             <input
               type="tel"
               inputMode="numeric"
+              pattern="[0-9]*"
+              dir="ltr"
               autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="none"
+              spellCheck={false}
+              data-lpignore="true"
+              data-form-type="other"
               value={customPhone}
               onChange={(e) => setCustomPhone(e.target.value)}
+              onBlur={(e) => setCustomPhone(normalizeDigits(e.currentTarget.value).replace(/[^\d+]/g, ''))}
               placeholder="رقم الهاتف"
-              className="flex-1 min-h-[42px] rounded-xl border-2 border-[#1A365D]/70 dark:border-[#60A5FA]/70 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-extrabold text-slate-900 dark:text-white tabular-nums shadow-xs focus:border-[#D4AF37] focus:outline-none"
+              className="flex-1 min-h-[42px] rounded-xl border-2 border-[#1A365D]/70 dark:border-[#60A5FA]/70 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-extrabold text-slate-900 dark:text-white tabular-nums text-right shadow-xs focus:border-[#D4AF37] focus:outline-none"
             />
             <ContactPickerButton
               onSelect={(c) => {
                 if (c.name) setCustomName(c.name);
-                if (c.phone) setCustomPhone(c.phone);
+                if (c.phone) setCustomPhone(normalizeDigits(c.phone));
                 applyAutoPricingFromContact(c.name, c.phone);
               }}
             />
@@ -515,14 +525,20 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
 
         {paymentMethod === 'partial' && (
           <input
-            type="text"
+            type="tel"
             inputMode="numeric"
             pattern="[0-9]*"
+            dir="ltr"
             autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="none"
+            spellCheck={false}
+            data-lpignore="true"
+            data-form-type="other"
             value={paidAmountInput === '0' ? '' : paidAmountInput}
-            onChange={(e) => setPaidAmountInput(e.target.value.replace(/[^\d.]/g, ''))}
+            onChange={(e) => setPaidAmountInput(normalizeDigits(e.target.value).replace(/[^\d]/g, ''))}
             placeholder={`المبلغ المدفوع مقدماً (من أصل ${totalAmount} ر.ي)`}
-            className="w-full min-h-[40px] rounded-xl border-2 border-[#D4AF37] bg-amber-50/60 dark:bg-slate-800 px-3 text-xs font-extrabold text-slate-900 dark:text-white tabular-nums shadow-xs focus:outline-none"
+            className="w-full min-h-[40px] rounded-xl border-2 border-[#D4AF37] bg-amber-50/60 dark:bg-slate-800 px-3 text-xs font-extrabold text-slate-900 dark:text-white tabular-nums text-right shadow-xs focus:outline-none"
           />
         )}
 
@@ -745,6 +761,7 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
             </div>
             <input
               type="text"
+              inputMode="text"
               required
               autoComplete="off"
               value={newRecName}
@@ -756,16 +773,24 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
               <input
                 type="tel"
                 inputMode="numeric"
+                pattern="[0-9]*"
+                dir="ltr"
                 autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="none"
+                spellCheck={false}
+                data-lpignore="true"
+                data-form-type="other"
                 value={newRecPhone}
                 onChange={(e) => setNewRecPhone(e.target.value)}
+                onBlur={(e) => setNewRecPhone(normalizeDigits(e.currentTarget.value).replace(/[^\d+]/g, ''))}
                 placeholder="رقم الهاتف"
-                className="flex-1 min-h-[42px] rounded-xl border-2 border-[#1A365D]/70 dark:border-[#60A5FA]/70 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-extrabold tabular-nums focus:border-[#D4AF37] focus:outline-none"
+                className="flex-1 min-h-[42px] rounded-xl border-2 border-[#1A365D]/70 dark:border-[#60A5FA]/70 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-extrabold tabular-nums text-right focus:border-[#D4AF37] focus:outline-none"
               />
               <ContactPickerButton
                 onSelect={(c) => {
                   if (c.name) setNewRecName(c.name);
-                  if (c.phone) setNewRecPhone(c.phone);
+                  if (c.phone) setNewRecPhone(normalizeDigits(c.phone));
                 }}
               />
             </div>
