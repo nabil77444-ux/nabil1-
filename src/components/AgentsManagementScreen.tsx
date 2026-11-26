@@ -510,8 +510,19 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
                             موقوف مؤقتاً
                           </span>
                         )}
+                        {Number(agent.balance || 0) >= 20000 && (
+                          <span className="px-2 py-0.5 rounded-full bg-amber-500/95 text-[#0F172A] text-[10px] font-extrabold border border-[#FDE68A] shrink-0 whitespace-nowrap">
+                            مديونية مرتفعة
+                          </span>
+                        )}
                       </div>
-                      <div className="text-left shrink-0 text-xs font-extrabold text-[#FDE68A] tabular-nums whitespace-nowrap bg-white/10 px-2.5 py-1 rounded-xl border border-[#D4AF37]/40">
+                      <div
+                        className={`text-left shrink-0 text-xs font-extrabold tabular-nums whitespace-nowrap px-2.5 py-1 rounded-xl border ${
+                          Number(agent.balance || 0) >= 20000
+                            ? 'bg-red-600/85 text-white border-red-300'
+                            : 'bg-white/10 text-[#FDE68A] border-[#D4AF37]/40'
+                        }`}
+                      >
                         {formatYER(agent.balance || 0, hideNumbers)}
                       </div>
                     </div>
@@ -575,8 +586,10 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
                     {subClients.map((sub, sIdx) => (
                       <div
                         key={sub.uid}
-                        className={`rounded-xl bg-white dark:bg-slate-900 border-2 p-3 shadow-sm flex flex-col gap-2.5 ${
-                          sub.status === 'suspended' ? 'border-red-500/80' : 'border-[#D4AF37]/70'
+                        className={`rounded-xl border-2 p-3 shadow-sm flex flex-col gap-2.5 ${
+                          sub.status === 'suspended'
+                            ? 'bg-red-50/60 dark:bg-red-950/25 border-red-500/80'
+                            : 'bg-white dark:bg-slate-900 border-[#D4AF37]/70'
                         }`}
                       >
                         {/* Top Row: Number + Full Name + Phone/Rate (Right) | Balance (Left) */}
@@ -595,6 +608,11 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
                                     موقوف
                                   </span>
                                 )}
+                                {Number(sub.balance || 0) >= 20000 && (
+                                  <span className="px-1.5 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 border border-amber-400 text-[10px] font-extrabold shrink-0 whitespace-nowrap">
+                                    مديونية مرتفعة
+                                  </span>
+                                )}
                               </div>
                               <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs font-bold text-slate-500 dark:text-slate-400 mt-0.5 tabular-nums">
                                 <span className="whitespace-nowrap">{sub.phone || '—'}</span>
@@ -603,7 +621,13 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
                               </div>
                             </div>
                           </div>
-                          <div className="text-left shrink-0 text-xs font-extrabold text-[#1A365D] dark:text-[#FDE68A] tabular-nums whitespace-nowrap bg-slate-100 dark:bg-slate-800 px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700">
+                          <div
+                            className={`text-left shrink-0 text-xs font-extrabold tabular-nums whitespace-nowrap px-2.5 py-1 rounded-lg border ${
+                              Number(sub.balance || 0) >= 20000
+                                ? 'bg-red-50 dark:bg-red-950/50 text-red-700 dark:text-red-300 border-red-400'
+                                : 'bg-slate-100 dark:bg-slate-800 text-[#1A365D] dark:text-[#FDE68A] border-slate-200 dark:border-slate-700'
+                            }`}
+                          >
                             {formatYER(sub.balance || 0, hideNumbers)}
                           </div>
                         </div>
@@ -678,8 +702,10 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
             {(isAdmin ? directAdminClients : clients).map((client, idx) => (
               <div
                 key={client.uid}
-                className={`royal-tile-3d rounded-2xl bg-white dark:bg-slate-900 border-2 p-3 shadow-sm flex flex-col gap-2.5 ${
-                  client.status === 'suspended' ? 'border-red-500/80' : 'border-[#D4AF37]/70'
+                className={`royal-tile-3d rounded-2xl border-2 p-3 shadow-sm flex flex-col gap-2.5 ${
+                  client.status === 'suspended'
+                    ? 'bg-red-50/60 dark:bg-red-950/25 border-red-500/80'
+                    : 'bg-white dark:bg-slate-900 border-[#D4AF37]/70'
                 }`}
               >
                 {/* Top Section: Number + Full Client Name + Phone/Rate (Right) | Balance (Left) */}
@@ -698,6 +724,11 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
                             موقوف مؤقتاً
                           </span>
                         )}
+                        {Number(client.balance || 0) >= 20000 && (
+                          <span className="px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 border border-amber-400 text-[10px] font-extrabold shrink-0 whitespace-nowrap">
+                            مديونية مرتفعة
+                          </span>
+                        )}
                       </div>
                       <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs font-bold text-slate-500 dark:text-slate-400 mt-0.5 tabular-nums">
                         <span className="whitespace-nowrap">{client.phone || '—'}</span>
@@ -708,7 +739,13 @@ export const AgentsManagementScreen: React.FC<AgentsManagementScreenProps> = ({ 
                       </div>
                     </div>
                   </div>
-                  <div className="text-left shrink-0 text-xs font-extrabold text-[#1A365D] dark:text-[#FDE68A] tabular-nums whitespace-nowrap bg-slate-100 dark:bg-slate-800 px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700">
+                  <div
+                    className={`text-left shrink-0 text-xs font-extrabold tabular-nums whitespace-nowrap px-2.5 py-1 rounded-lg border ${
+                      Number(client.balance || 0) >= 20000
+                        ? 'bg-red-50 dark:bg-red-950/50 text-red-700 dark:text-red-300 border-red-400'
+                        : 'bg-slate-100 dark:bg-slate-800 text-[#1A365D] dark:text-[#FDE68A] border-slate-200 dark:border-slate-700'
+                    }`}
+                  >
                     {formatYER(client.balance || 0, hideNumbers)}
                   </div>
                 </div>

@@ -1,14 +1,39 @@
-import { Capacitor, CapacitorHttp } from '@capacitor/core';
+import { Capacitor, CapacitorHttp, registerPlugin, type PluginListenerHandle } from '@capacitor/core';
+
+declare const __APP_BUILD_NUMBER__: number | undefined;
+declare const __APP_NATIVE_VERSION__: string | undefined;
+
+interface TaibahUpdateNotifierNativePlugin {
+  configure(options: {
+    currentBuildNumber: number;
+    versionJsonUrl: string;
+    checkNow?: boolean;
+  }): Promise<{ scheduled?: boolean }>;
+  requestNotificationPermission(): Promise<{ granted?: boolean }>;
+  checkPendingUpdateIntent(): Promise<{ openUpdateDialog?: boolean }>;
+  clearUpdateNotification(options?: { buildNumber?: number }): Promise<{ cleared?: boolean }>;
+  addListener(
+    eventName: 'openUpdateDialog',
+    listenerFunc: (data: { openUpdateDialog?: boolean }) => void
+  ): Promise<PluginListenerHandle>;
+}
+
+const TaibahUpdateNotifier = registerPlugin<TaibahUpdateNotifierNativePlugin>(
+  'TaibahUpdateNotifier'
+);
 
 export interface AppUpdateManifest {
   version: string;
   buildNumber?: number;
+  nativeVersion?: string;
+  minNativeVersion?: string;
+  updateSizeBytes?: number;
+  updateSizeText?: string;
   sizeMb?: number;
   notes?: string;
   bundleUrl?: string;
   otaUrl?: string;
   apkUrl?: string;
-  minNativeVersion?: string;
   publishedAt?: string;
 }
 
@@ -22,13 +47,19 @@ export interface UpdateCheckResult {
 }
 
 export const APP_CURRENT_VERSION =
-  (import.meta.env.VITE_APP_VERSION as string | undefined)?.trim() || '2.0.0';
+  (import.meta.env.VITE_APP_VERSION as string | undefined)?.trim() || '2.1.0';
 
 export const NATIVE_APP_VERSION =
-  (import.meta.env.VITE_NATIVE_VERSION as string | undefined)?.trim() || APP_CURRENT_VERSION;
+  (typeof __APP_NATIVE_VERSION__ !== 'undefined' && __APP_NATIVE_VERSION__) ||
+  (import.meta.env.VITE_NATIVE_VERSION as string | undefined)?.trim() ||
+  '2.1.0';
 
 export const APP_BUILD_NUMBER =
-  Number.parseInt(String(import.meta.env.VITE_APP_BUILD_NUMBER || '0').trim(), 10) || 0;
+  (typeof __APP_BUILD_NUMBER__ === 'number' && __APP_BUILD_NUMBER__ > 0
+    ? __APP_BUILD_NUMBER__
+    : 0) ||
+  Number.parseInt(String(import.meta.env.VITE_APP_BUILD_NUMBER || '0').trim(), 10) ||
+  0;
 
 const DEFAULT_GITHUB_REPO =
   (import.meta.env.VITE_GITHUB_REPO as string | undefined)?.trim() || '';
@@ -37,13 +68,38 @@ const APPLIED_OTA_VERSION_KEY = 'taibah_applied_ota_version_v1';
 const APPLIED_OTA_BUILD_NUMBER_KEY = 'taibah_applied_ota_build_number_v1';
 const UPDATE_SNOOZE_LOCAL_KEY = 'taibah_update_snooze_v1';
 const UPDATE_SNOOZE_SESSION_KEY = 'taibah_update_snooze_session_v1';
+const NOTIF_PERMISSION_ASKED_KEY = 'taibah_notif_perm_asked_v1';
+const DEFERRED_UPDATE_EVENT = 'taibah:deferred-update-changed';
+
+export function formatUpdateSizeAr(bytes?: number, fallbackMb?: number): string {
+  if (typeof bytes === 'number' && Number.isFinite(bytes) && bytes > 0) {
+    if (bytes < 1024 * 1024) {
+      return `${Math.max(1, Math.round(bytes / 1024))} كيلوبايت`;
+    }
+    return `${(bytes / (1024 * 1024)).toFixed(1)} ميجابايت`;
+  }
+  if (typeof fallbackMb === 'number' && Number.isFinite(fallbackMb) && fallbackMb > 0) {
+    if (fallbackMb < 1) {
+      return `${Math.max(1, Math.round(fallbackMb * 1024))} كيلوبايت`;
+    }
+    return `${fallbackMb.toFixed(1)} ميجابايت`;
+  }
+  return 'خفيف جداً';
+}
+
+export function resolveManifestSizeText(manifest: AppUpdateManifest): string {
+  if (manifest.updateSizeText && manifest.updateSizeText.trim()) {
+    return manifest.updateSizeText.trim();
+  }
+  return formatUpdateSizeAr(manifest.updateSizeBytes, manifest.sizeMb);
+}
 
 /**
  * Remember that the user clicked "لاحقاً" so the modal does not reappear
- * repeatedly during the current running session, while still reminding them
- * next time they close and reopen the app (or tap manual check in Settings).
+ * repeatedly during the current running session, while still showing a small
+ * indicator dot on the Settings icon and reminding them on next cold start.
  */
-export function saveUpdateSnooze(version: string): void {
+export function saveUpdateSnooze(version: string, buildNumber?: number): void {
   const clean = String(version || '').trim();
   if (!clean) return;
   try {
@@ -54,11 +110,47 @@ export function saveUpdateSnooze(version: string): void {
   try {
     window.localStorage.setItem(
       UPDATE_SNOOZE_LOCAL_KEY,
-      JSON.stringify({ version: clean, snoozedAt: Date.now() })
+      JSON.stringify({ version: clean, buildNumber: buildNumber || 0, snoozedAt: Date.now() })
     );
+    window.dispatchEvent(new CustomEvent(DEFERRED_UPDATE_EVENT));
   } catch {
     // ignore
   }
+}
+
+export function clearUpdateSnooze(): void {
+  try {
+    window.sessionStorage.removeItem(UPDATE_SNOOZE_SESSION_KEY);
+    window.localStorage.removeItem(UPDATE_SNOOZE_LOCAL_KEY);
+    window.dispatchEvent(new CustomEvent(DEFERRED_UPDATE_EVENT));
+  } catch {
+    // ignore
+  }
+}
+
+export function hasDeferredUpdate(): boolean {
+  try {
+    const raw = window.localStorage.getItem(UPDATE_SNOOZE_LOCAL_KEY);
+    if (!raw) return false;
+    const parsed = JSON.parse(raw) as { version?: string; buildNumber?: number };
+    const currentBuild = getInstalledBuildNumber();
+    const currentVer = getInstalledAppVersion();
+    if (parsed.buildNumber && currentBuild > 0 && parsed.buildNumber > currentBuild) {
+      return true;
+    }
+    if (parsed.version && compareVersions(parsed.version, currentVer) > 0) {
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+export function subscribeDeferredUpdateChanges(callback: () => void): () => void {
+  if (typeof window === 'undefined') return () => {};
+  window.addEventListener(DEFERRED_UPDATE_EVENT, callback);
+  return () => window.removeEventListener(DEFERRED_UPDATE_EVENT, callback);
 }
 
 export function isUpdateSnoozedForCurrentSession(version: string): boolean {
@@ -94,7 +186,6 @@ let updaterReadyCalled = false;
 /**
  * Must be called immediately on native app startup so @capgo/capacitor-updater
  * confirms the active bundle loaded cleanly and never rolls it back.
- * Strictly skipped on Web / Preview to prevent browser-side plugin errors.
  */
 export function notifyUpdaterReady(): void {
   if (updaterReadyCalled || !isNativePlatformSafe()) return;
@@ -109,6 +200,88 @@ export function notifyUpdaterReady(): void {
     .catch(() => {
       // Non-fatal in non-native or preview environments
     });
+}
+
+/**
+ * Configure native Android WorkManager background update checker (every 2 hours + immediate)
+ * so users receive a real system status bar notification even when the app is closed.
+ */
+export async function configureNativeUpdateNotifier(
+  apkDownloadUrl?: string,
+  checkNow = false
+): Promise<void> {
+  if (!isNativePlatformSafe()) return;
+  const versionJsonUrl = resolveVersionJsonUrl(apkDownloadUrl);
+  if (!versionJsonUrl) return;
+  try {
+    await TaibahUpdateNotifier.configure({
+      currentBuildNumber: getInstalledBuildNumber(),
+      versionJsonUrl,
+      checkNow,
+    });
+  } catch {
+    // Non-fatal on older builds without native plugin
+  }
+}
+
+/**
+ * Gently request Android 13+ POST_NOTIFICATIONS permission once after first login.
+ */
+export async function requestNativeNotificationPermissionOnce(): Promise<boolean> {
+  if (!isNativePlatformSafe()) return false;
+  try {
+    if (localStorage.getItem(NOTIF_PERMISSION_ASKED_KEY) === '1') {
+      return true;
+    }
+    localStorage.setItem(NOTIF_PERMISSION_ASKED_KEY, '1');
+    const res = await TaibahUpdateNotifier.requestNotificationPermission();
+    return Boolean(res?.granted);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Check if MainActivity was launched from the native update notification (`OPEN_UPDATE_DIALOG=true`).
+ */
+export async function consumePendingUpdateDialogIntent(): Promise<boolean> {
+  if (!isNativePlatformSafe()) return false;
+  try {
+    const res = await TaibahUpdateNotifier.checkPendingUpdateIntent();
+    return Boolean(res?.openUpdateDialog);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Listen for taps on the native status bar update notification while the app is already running.
+ */
+export async function listenForUpdateDialogIntent(
+  onTrigger: () => void
+): Promise<(() => void) | null> {
+  if (!isNativePlatformSafe()) return null;
+  try {
+    const handle = await TaibahUpdateNotifier.addListener('openUpdateDialog', (data) => {
+      if (data?.openUpdateDialog) {
+        onTrigger();
+      }
+    });
+    return () => {
+      void handle.remove().catch(() => {});
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function clearNativeUpdateNotification(buildNumber?: number): Promise<void> {
+  if (!isNativePlatformSafe()) return;
+  try {
+    await TaibahUpdateNotifier.clearUpdateNotification({ buildNumber: buildNumber || 0 });
+  } catch {
+    // Non-fatal
+  }
 }
 
 export function getInstalledAppVersion(): string {
@@ -146,7 +319,7 @@ export function getInstalledBuildNumber(): number {
 }
 
 /**
- * Compare semantic version strings (e.g. "2.0.15" vs "2.0.4").
+ * Compare semantic version strings (e.g. "2.1.15" vs "2.1.4").
  * Returns > 0 if a > b, < 0 if a < b, 0 if equal.
  */
 export function compareVersions(a: string, b: string): number {
@@ -204,11 +377,6 @@ interface HttpJsonResponse<T> {
   data: T | null;
 }
 
-/**
- * Cross-platform JSON GET helper:
- * - On Native Android: uses `CapacitorHttp.get` (bypasses WebView CORS and follows GitHub redirects natively!).
- * - On Web: uses standard `fetch` with abort timeout.
- */
 async function httpGetJson<T>(url: string, timeoutMs = 9500): Promise<HttpJsonResponse<T>> {
   const isNative = isNativePlatformSafe();
 
@@ -237,7 +405,7 @@ async function httpGetJson<T>(url: string, timeoutMs = 9500): Promise<HttpJsonRe
       }
       return { ok: Boolean(parsed), status, data: parsed };
     } catch {
-      // Fall through to fetch below just in case
+      // Fall through to fetch below
     }
   }
 
@@ -281,7 +449,8 @@ interface GitHubReleasePayload {
 function parseManifestObject(
   raw: Partial<AppUpdateManifest>,
   fallbackApkUrl?: string,
-  fallbackBundleUrl?: string
+  fallbackBundleUrl?: string,
+  fallbackBytes?: number
 ): AppUpdateManifest | null {
   const remoteVersion = String(raw.version || '').trim();
   if (!remoteVersion) return null;
@@ -290,6 +459,24 @@ function parseManifestObject(
     typeof raw.buildNumber === 'number'
       ? raw.buildNumber
       : Number.parseInt(String(raw.buildNumber || '0'), 10) || 0;
+
+  const resolvedBytes =
+    typeof raw.updateSizeBytes === 'number' && raw.updateSizeBytes > 0
+      ? raw.updateSizeBytes
+      : typeof fallbackBytes === 'number' && fallbackBytes > 0
+        ? fallbackBytes
+        : undefined;
+
+  const resolvedSizeMb =
+    typeof raw.sizeMb === 'number' && raw.sizeMb > 0
+      ? raw.sizeMb
+      : resolvedBytes
+        ? Math.round((resolvedBytes / (1024 * 1024)) * 100) / 100
+        : Number(raw.sizeMb) || undefined;
+
+  const resolvedSizeText =
+    (typeof raw.updateSizeText === 'string' && raw.updateSizeText.trim()) ||
+    formatUpdateSizeAr(resolvedBytes, resolvedSizeMb);
 
   const resolvedBundleUrl =
     (typeof raw.bundleUrl === 'string' && raw.bundleUrl.trim()) ||
@@ -300,16 +487,24 @@ function parseManifestObject(
   const resolvedApkUrl =
     (typeof raw.apkUrl === 'string' && raw.apkUrl.trim()) || fallbackApkUrl || undefined;
 
+  const resolvedNativeVersion =
+    (typeof raw.nativeVersion === 'string' && raw.nativeVersion.trim()) ||
+    (typeof raw.minNativeVersion === 'string' && raw.minNativeVersion.trim()) ||
+    undefined;
+
   return {
     version: remoteVersion,
     buildNumber: parsedBuild > 0 ? parsedBuild : undefined,
-    sizeMb: typeof raw.sizeMb === 'number' ? raw.sizeMb : Number(raw.sizeMb) || undefined,
+    nativeVersion: resolvedNativeVersion,
+    minNativeVersion:
+      typeof raw.minNativeVersion === 'string' ? raw.minNativeVersion : resolvedNativeVersion,
+    updateSizeBytes: resolvedBytes,
+    updateSizeText: resolvedSizeText,
+    sizeMb: resolvedSizeMb,
     notes: typeof raw.notes === 'string' ? raw.notes : '',
     bundleUrl: resolvedBundleUrl,
     otaUrl: resolvedBundleUrl,
     apkUrl: resolvedApkUrl,
-    minNativeVersion:
-      typeof raw.minNativeVersion === 'string' ? raw.minNativeVersion : undefined,
     publishedAt: typeof raw.publishedAt === 'string' ? raw.publishedAt : undefined,
   };
 }
@@ -322,7 +517,7 @@ function extractVersionFromReleaseBody(body?: string, tagName?: string): string 
 }
 
 /**
- * Checks GitHub Releases Latest API + `version.json` using `CapacitorHttp.get` on Android
+ * Checks `version.json` & GitHub Releases Latest API via `CapacitorHttp.get` on Android
  * (zero CORS issues) and `fetch` on Web. Works for ALL users (Admin, Agent, Client).
  */
 export async function checkForAppUpdate(options?: {
@@ -367,7 +562,7 @@ export async function checkForAppUpdate(options?: {
   let lastHttpStatus = 0;
 
   try {
-    // Strategy 1: Explicit custom manifest URL (if set via env)
+    // Strategy 1: Explicit custom manifest URL
     if (explicitManifestUrl && /^https?:\/\//i.test(explicitManifestUrl)) {
       const sep = explicitManifestUrl.includes('?') ? '&' : '?';
       const res = await httpGetJson<Partial<AppUpdateManifest>>(
@@ -379,11 +574,23 @@ export async function checkForAppUpdate(options?: {
       }
     }
 
-    // Strategy 2: GitHub Releases Latest API (works on Native Android via CapacitorHttp AND on Web with full CORS!)
+    // Strategy 2: Direct version.json via CapacitorHttp on Native Android (fastest, ~300 bytes, zero API rate limits)
+    if (!manifest && isNative && fallbackVersionUrl) {
+      const sep = fallbackVersionUrl.includes('?') ? '&' : '?';
+      const directRes = await httpGetJson<Partial<AppUpdateManifest>>(
+        `${fallbackVersionUrl}${sep}t=${Date.now()}`
+      );
+      lastHttpStatus = directRes.status || lastHttpStatus;
+      if (directRes.ok && directRes.data) {
+        manifest = parseManifestObject(directRes.data, options?.apkDownloadUrl);
+      }
+    }
+
+    // Strategy 3: GitHub Releases Latest API (Web CORS-friendly + Native fallback)
     if (!manifest && repo) {
       const releaseApiUrl = `https://api.github.com/repos/${repo}/releases/latest?t=${Date.now()}`;
       const releaseRes = await httpGetJson<GitHubReleasePayload>(releaseApiUrl);
-      lastHttpStatus = releaseRes.status;
+      lastHttpStatus = releaseRes.status || lastHttpStatus;
 
       if (releaseRes.ok && releaseRes.data) {
         const assets = Array.isArray(releaseRes.data.assets) ? releaseRes.data.assets : [];
@@ -399,18 +606,21 @@ export async function checkForAppUpdate(options?: {
           options?.apkDownloadUrl ||
           `https://github.com/${repo}/releases/latest/download/TaibahNet-Cards.apk`;
 
-        // On Native Android, CapacitorHttp follows GitHub redirects to objects.githubusercontent.com with zero CORS blocks
         if (isNative && versionAsset?.browser_download_url) {
           const sep = versionAsset.browser_download_url.includes('?') ? '&' : '?';
           const verRes = await httpGetJson<Partial<AppUpdateManifest>>(
             `${versionAsset.browser_download_url}${sep}t=${Date.now()}`
           );
           if (verRes.ok && verRes.data) {
-            manifest = parseManifestObject(verRes.data, fallbackApkUrl, fallbackBundleUrl);
+            manifest = parseManifestObject(
+              verRes.data,
+              fallbackApkUrl,
+              fallbackBundleUrl,
+              zipAsset?.size
+            );
           }
         }
 
-        // Fallback to release metadata if version.json couldn't be fetched (e.g. Web CORS on release download asset)
         if (!manifest) {
           const derivedVersion = extractVersionFromReleaseBody(
             releaseRes.data.body,
@@ -419,38 +629,28 @@ export async function checkForAppUpdate(options?: {
           if (derivedVersion && /\d+\.\d+/.test(derivedVersion)) {
             const parts = derivedVersion.split('.');
             const derivedBuild = Number.parseInt(parts[2] || '0', 10) || 0;
-            const sizeMb = zipAsset?.size
-              ? Math.round((zipAsset.size / (1024 * 1024)) * 100) / 100
-              : apkAsset?.size
-                ? Math.round((apkAsset.size / (1024 * 1024)) * 100) / 100
-                : undefined;
+            const bytes = zipAsset?.size || undefined;
+            const sizeMb = bytes
+              ? Math.round((bytes / (1024 * 1024)) * 100) / 100
+              : undefined;
 
             manifest = {
               version: derivedVersion,
               buildNumber: derivedBuild > 0 ? derivedBuild : undefined,
+              nativeVersion: NATIVE_APP_VERSION,
+              minNativeVersion: NATIVE_APP_VERSION,
+              updateSizeBytes: bytes,
+              updateSizeText: formatUpdateSizeAr(bytes, sizeMb),
               sizeMb,
               notes:
-                'تحديث جديد لتطبيق كروت طيبة نت — تحسينات الأداء والأمان وتجربة الاستخدام.',
+                'تحديث خفيف وسريع لتطبيق كروت طيبة نت — تحسينات الأداء والأمان وتجربة الاستخدام.',
               bundleUrl: fallbackBundleUrl,
               otaUrl: fallbackBundleUrl,
               apkUrl: fallbackApkUrl,
-              minNativeVersion: '2.0.0',
               publishedAt: releaseRes.data.published_at,
             };
           }
         }
-      }
-    }
-
-    // Strategy 3: Direct version.json via CapacitorHttp on Native Android (if GitHub API rate-limited)
-    if (!manifest && isNative && fallbackVersionUrl) {
-      const sep = fallbackVersionUrl.includes('?') ? '&' : '?';
-      const directRes = await httpGetJson<Partial<AppUpdateManifest>>(
-        `${fallbackVersionUrl}${sep}t=${Date.now()}`
-      );
-      lastHttpStatus = directRes.status || lastHttpStatus;
-      if (directRes.ok && directRes.data) {
-        manifest = parseManifestObject(directRes.data, options?.apkDownloadUrl);
       }
     }
 
@@ -475,10 +675,15 @@ export async function checkForAppUpdate(options?: {
     const isNewerBySemver = compareVersions(manifest.version, currentVersion) > 0;
     const hasUpdate = isNewerByBuild || isNewerBySemver;
 
+    // Only request full APK download in the rare case that native Android code version actually increased
+    const targetNativeVer = manifest.nativeVersion || manifest.minNativeVersion;
     const requiresNativeApk = Boolean(
-      manifest.minNativeVersion &&
-        compareVersions(manifest.minNativeVersion, NATIVE_APP_VERSION) > 0
+      targetNativeVer && compareVersions(targetNativeVer, NATIVE_APP_VERSION) > 0
     );
+
+    if (!hasUpdate) {
+      clearUpdateSnooze();
+    }
 
     return {
       hasUpdate,
@@ -502,9 +707,9 @@ export async function checkForAppUpdate(options?: {
 }
 
 /**
- * Downloads and applies a lightweight OTA bundle via @capgo/capacitor-updater
- * with live 0%–100% progress reporting, OR opens the direct APK URL if a native update is required
- * or if OTA fails and an APK download link is available.
+ * Downloads and applies the lightweight OTA `update.zip` bundle via @capgo/capacitor-updater
+ * with live 0%–100% progress reporting, updates local buildNumber, and clears the system notification.
+ * Only downloads the full APK if `requiresNativeApk` is true.
  */
 export async function downloadAndApplyAppUpdate(
   manifest: AppUpdateManifest,
@@ -514,15 +719,16 @@ export async function downloadAndApplyAppUpdate(
   const isNative = isNativePlatformSafe();
   const otaDownloadUrl = manifest.bundleUrl || manifest.otaUrl;
 
-  // 1. If a newer native Android APK is required (or running outside native Android)
   if (requiresNativeApk || !isNative) {
     if (manifest.apkUrl && /^https?:\/\//i.test(manifest.apkUrl)) {
       onProgress(100);
+      clearUpdateSnooze();
       window.location.href = manifest.apkUrl;
       return { ok: true, mode: 'apk' };
     }
     if (!isNative) {
       onProgress(100);
+      clearUpdateSnooze();
       window.location.reload();
       return { ok: true, mode: 'web' };
     }
@@ -533,7 +739,6 @@ export async function downloadAndApplyAppUpdate(
     };
   }
 
-  // 2. Native Android Lightweight OTA Download & Apply via lazy-loaded @capgo/capacitor-updater
   if (!otaDownloadUrl || !/^https?:\/\//i.test(otaDownloadUrl)) {
     if (manifest.apkUrl && /^https?:\/\//i.test(manifest.apkUrl)) {
       onProgress(100);
@@ -584,6 +789,8 @@ export async function downloadAndApplyAppUpdate(
       // ignore storage errors
     }
 
+    clearUpdateSnooze();
+    await clearNativeUpdateNotification(manifest.buildNumber);
     await updater.set(bundle);
     return { ok: true, mode: 'ota' };
   } catch (err) {

@@ -63,6 +63,7 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
     executeSaleTransaction,
     updateAppSettings,
     updatePackageInfo,
+    openTopupForPackage,
   } = useFirebase();
   const { notifySuccess, notifyWarning, notifyError } = useFeedback();
 
@@ -448,6 +449,7 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
               onConfirm={handleQuickSingleSale}
               onEdit={handleOpenEdit}
               onClearOrDelete={handleClearPkg}
+              onRequestTopup={!isAdmin ? openTopupForPackage : undefined}
             />
           );
         })}

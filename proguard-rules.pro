@@ -35,7 +35,11 @@
 -keep class androidx.security.crypto.** { *; }
 -keep class com.epicshaggy.biometric.** { *; }
 
-# 4. Official Capacitor Plugins (Contacts, App, Filesystem, Share, StatusBar, Push, Haptics)
+# 3B. AndroidX WorkManager & Background OTA Update Worker
+-keep class * extends androidx.work.ListenableWorker { *; }
+-keep class androidx.work.** { *; }
+
+# 4. Official Capacitor Plugins (Contacts, App, Filesystem, Share, StatusBar, Network, Push, Haptics)
 -keep class com.getcapacitor.community.contacts.** { *; }
 -keep class com.capacitorjs.plugins.** { *; }
 -keep class io.ionic.libs.ionfilesystemlib.** { *; }
@@ -60,4 +64,5 @@
 -dontwarn com.getcapacitor.**
 -dontwarn ee.forgr.**
 -dontwarn androidx.biometric.**
+-dontwarn androidx.work.**
 -dontwarn com.google.firebase.**

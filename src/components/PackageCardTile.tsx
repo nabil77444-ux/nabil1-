@@ -25,6 +25,8 @@ interface PackageCardTileProps {
   onEdit?: (pkg: PackageDoc) => void;
   onClearOrDelete: (pkgId: string) => void;
   clearLabel?: string;
+  /** Optional quick feeding shortcut shown to Agents & Clients when package stock is low (<10) */
+  onRequestTopup?: (pkgId: string) => void;
 }
 
 /**
@@ -53,6 +55,7 @@ export const PackageCardTile: React.FC<PackageCardTileProps> = React.memo(
     onEdit,
     onClearOrDelete,
     clearLabel = 'حذف',
+    onRequestTopup,
   }) => {
     const safePrice = Number(pkg?.price ?? 0);
     const safeAvail = Number(pkg?.availableCount ?? 0);
@@ -60,6 +63,7 @@ export const PackageCardTile: React.FC<PackageCardTileProps> = React.memo(
     const theme = getPackageThemeStyle(safePrice);
     const displayPrice = Number(effectiveUnitPrice ?? safePrice);
     const stockZero = safeAvail <= 0;
+    const stockLow = safeAvail > 0 && safeAvail < 10;
 
     // Lightweight local draft state keeps typing & keyboard focus instant with zero lag
     const [draftQty, setDraftQty] = useState<string>(safeQty === 0 ? '' : String(safeQty));
@@ -96,7 +100,7 @@ export const PackageCardTile: React.FC<PackageCardTileProps> = React.memo(
           <Gift className={`${compact ? 'w-3 h-3' : 'w-3.5 h-3.5'} shrink-0 ${theme.giftColor}`} />
         </div>
 
-        {/* Title Row: باقة X ريال + Available Badge */}
+        {/* Title Row: باقة X ريال + Smart Low-Stock Badge */}
         <div className="flex flex-wrap items-center justify-between gap-x-1 gap-y-0.5 px-0.5">
           <span
             className={`${
@@ -112,13 +116,34 @@ export const PackageCardTile: React.FC<PackageCardTileProps> = React.memo(
               } font-extrabold border-[1.5px] tabular-nums whitespace-nowrap leading-none ${
                 stockZero
                   ? 'bg-red-50 dark:bg-red-950/80 border-red-500 text-red-700 dark:text-red-300'
-                  : 'bg-emerald-50 dark:bg-emerald-950/80 border-emerald-600 text-emerald-800 dark:text-emerald-300'
+                  : stockLow
+                    ? 'bg-amber-50 dark:bg-amber-950/80 border-amber-500 text-amber-800 dark:text-amber-300'
+                    : 'bg-emerald-50 dark:bg-emerald-950/80 border-emerald-600 text-emerald-800 dark:text-emerald-300'
               }`}
             >
-              المتاح: {formatCount(safeAvail, hideNumbers)}
+              {stockZero
+                ? 'نفد: 0'
+                : stockLow
+                  ? `منخفض: ${formatCount(safeAvail, hideNumbers)}`
+                  : `المتاح: ${formatCount(safeAvail, hideNumbers)}`}
             </span>
           )}
         </div>
+
+        {/* Quick Feeding Shortcut for Agents & Clients when package stock < 10 */}
+        {showStock && (stockZero || stockLow) && onRequestTopup && (
+          <button
+            type="button"
+            onClick={() => onRequestTopup(pkg.id)}
+            className={`w-full py-0.5 px-2 rounded-lg text-[9.5px] font-extrabold border flex items-center justify-center gap-1 transition-colors ${
+              stockZero
+                ? 'bg-red-600 hover:bg-red-700 border-red-700 text-white'
+                : 'bg-amber-100 hover:bg-amber-200 dark:bg-amber-950/60 border-amber-500 text-amber-900 dark:text-amber-200'
+            }`}
+          >
+            <span>+ اطلب تغذية لهذه الباقة</span>
+          </button>
+        )}
 
         {/* Clean White Inner Box: 2×2 Grid with crisp colored borders */}
         <div

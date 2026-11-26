@@ -216,6 +216,7 @@ interface ActiveSubScreenProps {
   isDark: boolean;
   onToggleTheme: () => void;
   hideNumbers: boolean;
+  hasDeferredUpdate?: boolean;
   onManualCheckUpdate?: () => void | Promise<void>;
 }
 
@@ -226,6 +227,7 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
   isDark,
   onToggleTheme,
   hideNumbers,
+  hasDeferredUpdate = false,
   onManualCheckUpdate,
 }) => {
   const {
@@ -763,12 +765,17 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
 
           {/* App Updates Section (Visible to ALL users: Admin, Agent, Client) */}
           <div className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-[#D4AF37] p-3.5 shadow-md space-y-2.5">
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
               <h2 className="text-sm font-extrabold text-[#1A365D] dark:text-[#FDE68A] flex items-center gap-2">
                 <span className="w-7 h-7 rounded-lg bg-[#1A365D] text-[#FDE68A] border border-[#D4AF37] flex items-center justify-center shrink-0">
                   <DownloadCloud className="w-4 h-4" />
                 </span>
                 تحديثات التطبيق
+                {hasDeferredUpdate && (
+                  <span className="px-2 py-0.5 rounded-full bg-red-600 text-white text-[10px] font-extrabold animate-pulse">
+                    تحديث جديد جاهز
+                  </span>
+                )}
               </h2>
               <span className="px-2.5 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 border border-[#D4AF37] text-[11px] font-extrabold text-[#1A365D] dark:text-[#FDE68A] tabular-nums">
                 الإصدار الحالي: v{getInstalledAppVersion()}

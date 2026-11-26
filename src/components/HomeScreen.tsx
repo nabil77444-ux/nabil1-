@@ -39,6 +39,7 @@ interface HomeScreenProps {
   onToggleTheme: () => void;
   hideNumbers: boolean;
   onToggleHideNumbers: () => void;
+  hasDeferredUpdate?: boolean;
 }
 
 /**
@@ -148,12 +149,15 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
   onToggleTheme,
   hideNumbers,
   onToggleHideNumbers,
+  hasDeferredUpdate = false,
 }) => {
   const {
     profile,
+    packages,
     isOnline,
     firestoreConnected,
     isSyncing,
+    pendingOfflineSyncCount,
     totalAvailableCards,
     unreadNotificationsCount,
     pendingRegistrations,
@@ -162,6 +166,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
     appSettings,
     syncNow,
     signOutUser,
+    openTopupForPackage,
   } = useFirebase();
   const { notifySuccess, notifyInfo } = useFeedback();
 
@@ -190,6 +195,14 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
   const role = profile?.role || 'client';
   const isConnected = isOnline && firestoreConnected;
   const isLowStock = totalAvailableCards <= (appSettings.lowStockThreshold ?? 20);
+  const lowestPackage = useMemo(() => {
+    if (!packages || packages.length === 0) return null;
+    const lowList = packages.filter((p) => Number(p.availableCount ?? 0) < 10);
+    if (lowList.length === 0) return null;
+    return [...lowList].sort(
+      (a, b) => Number(a.availableCount ?? 0) - Number(b.availableCount ?? 0)
+    )[0];
+  }, [packages]);
   const agentsBadgeTotal =
     pendingRegistrations.length + (role === 'super_admin' ? pendingPasswordResets.length : 0);
 
@@ -309,15 +322,21 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
             </p>
           </div>
 
-          {/* Left: Circular Settings Button */}
+          {/* Left: Circular Settings Button with Optional Deferred Update Dot */}
           <div className="flex items-center gap-1.5 shrink-0">
             <button
               type="button"
               onClick={() => onNavigate('settings')}
               aria-label="الإعدادات"
-              className="w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-gradient-to-b from-white/20 to-white/10 hover:from-white/30 hover:to-white/15 border-2 border-[#D4AF37] text-[#FDE68A] flex items-center justify-center active:scale-95 transition-transform shrink-0 shadow-md"
+              className="relative w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-gradient-to-b from-white/20 to-white/10 hover:from-white/30 hover:to-white/15 border-2 border-[#D4AF37] text-[#FDE68A] flex items-center justify-center active:scale-95 transition-transform shrink-0 shadow-md"
             >
               <Settings className="w-4 h-4 sm:w-5 sm:h-5" />
+              {hasDeferredUpdate && (
+                <span
+                  aria-label="تحديث متوفر"
+                  className="absolute -top-0.5 -right-0.5 w-3 h-3 rounded-full bg-red-500 border-2 border-[#0F172A] animate-pulse shadow"
+                />
+              )}
             </button>
           </div>
         </div>
@@ -354,18 +373,34 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
             onClick={syncNow}
             disabled={isSyncing}
             className={`h-8 sm:h-9 px-2.5 rounded-xl border text-[11px] font-extrabold flex items-center gap-1 shadow-sm transition-colors whitespace-nowrap ${
-              isConnected
-                ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-500/60 text-emerald-700 dark:text-emerald-300'
-                : 'bg-red-50 dark:bg-red-950/40 border-red-500/60 text-red-700 dark:text-red-300'
+              pendingOfflineSyncCount > 0
+                ? 'bg-blue-50 dark:bg-blue-950/50 border-blue-500/80 text-blue-800 dark:text-blue-200'
+                : !isOnline
+                  ? 'bg-amber-50 dark:bg-amber-950/50 border-amber-500/70 text-amber-800 dark:text-amber-200'
+                  : isConnected
+                    ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-500/60 text-emerald-700 dark:text-emerald-300'
+                    : 'bg-amber-50 dark:bg-amber-950/40 border-amber-500/60 text-amber-800 dark:text-amber-200'
             }`}
           >
-            {isConnected ? (
+            {pendingOfflineSyncCount > 0 ? (
+              <RefreshCw className={`w-3.5 h-3.5 shrink-0 ${isSyncing ? 'animate-spin' : ''}`} />
+            ) : isConnected ? (
               <Wifi className="w-3.5 h-3.5 shrink-0" />
             ) : (
               <WifiOff className="w-3.5 h-3.5 shrink-0" />
             )}
-            <span>{isConnected ? 'متصل ✅' : 'محلي ⚡'}</span>
-            <RefreshCw className={`w-3.5 h-3.5 shrink-0 ${isSyncing ? 'animate-spin' : ''}`} />
+            <span className="tabular-nums">
+              {pendingOfflineSyncCount > 0
+                ? `مزامنة (${pendingOfflineSyncCount})`
+                : !isOnline
+                  ? 'أوفلاين • حفظ آمن'
+                  : isConnected
+                    ? 'متصل ✅'
+                    : 'محلي ⚡'}
+            </span>
+            {pendingOfflineSyncCount === 0 && (
+              <RefreshCw className={`w-3 h-3 shrink-0 ${isSyncing ? 'animate-spin' : ''}`} />
+            )}
           </button>
         </div>
 
@@ -484,32 +519,61 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
 
           {!warningDismissed && (
             <div
-              className={`h-7 rounded-xl pr-2.5 pl-1 border flex items-center justify-between text-[11px] font-extrabold transition-colors ${
-                isLowStock
-                  ? 'bg-red-50 dark:bg-red-950/50 border-red-400/80 text-red-700 dark:text-red-300'
-                  : 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-500/60 text-emerald-700 dark:text-emerald-300'
+              className={`h-7 rounded-xl pr-2.5 pl-1 border flex items-center justify-between gap-1 text-[11px] font-extrabold transition-colors ${
+                role === 'super_admin' && pendingTopups.length > 0
+                  ? 'bg-amber-50 dark:bg-amber-950/50 border-amber-500 text-amber-900 dark:text-amber-200'
+                  : isLowStock || Boolean(lowestPackage)
+                    ? 'bg-red-50 dark:bg-red-950/50 border-red-400/80 text-red-700 dark:text-red-300'
+                    : 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-500/60 text-emerald-700 dark:text-emerald-300'
               }`}
             >
               <button
                 type="button"
-                onClick={() => onNavigate(role === 'super_admin' ? 'packages' : 'electronic_cards')}
+                onClick={() => {
+                  if (role === 'super_admin' && pendingTopups.length > 0) {
+                    onNavigate('topup_requests');
+                  } else if (role !== 'super_admin' && lowestPackage) {
+                    openTopupForPackage(lowestPackage.id);
+                  } else {
+                    onNavigate(role === 'super_admin' ? 'packages' : 'electronic_cards');
+                  }
+                }}
                 className="flex-1 min-w-0 flex items-center gap-1.5 text-right truncate"
               >
-                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                {role === 'super_admin' && pendingTopups.length > 0 ? (
+                  <Bell className="w-3.5 h-3.5 shrink-0 text-red-600 dark:text-amber-300" />
+                ) : (
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                )}
                 <span className="truncate tabular-nums">
                   {role === 'super_admin'
-                    ? isLowStock
-                      ? `تحذير المخزن: المتبقي (${formatCount(totalAvailableCards, hideNumbers)} كرت)`
-                      : `حالة المخزن: المتبقي (${formatCount(totalAvailableCards, hideNumbers)} كرت)`
-                    : isLowStock
-                      ? `مخزون حسابك منخفض: المتبقي (${formatCount(totalAvailableCards, hideNumbers)} كرت)`
-                      : `رصيد الكروت المتاحة بحسابك: (${formatCount(totalAvailableCards, hideNumbers)} كرت)`}
+                    ? pendingTopups.length > 0
+                      ? `طلبات تغذية جديدة بانتظار التنفيذ (${pendingTopups.length}) — اضغط للعرض`
+                      : isLowStock
+                        ? `تحذير المخزن: المتبقي (${formatCount(totalAvailableCards, hideNumbers)} كرت)`
+                        : `حالة المخزن: المتبقي (${formatCount(totalAvailableCards, hideNumbers)} كرت)`
+                    : lowestPackage
+                      ? `تنبيه نقص باقة ${lowestPackage.price} (${formatCount(lowestPackage.availableCount, hideNumbers)} كرت) — اضغط لطلب تغذية`
+                      : isLowStock
+                        ? `مخزون حسابك منخفض: المتبقي (${formatCount(totalAvailableCards, hideNumbers)} كرت)`
+                        : pendingTopups.length > 0
+                          ? `رصيدك (${formatCount(totalAvailableCards, hideNumbers)} كرت) • لديك ${pendingTopups.length} طلب تغذية معلق`
+                          : `رصيد الكروت المتاحة بحسابك: (${formatCount(totalAvailableCards, hideNumbers)} كرت)`}
                 </span>
               </button>
+              {role !== 'super_admin' && lowestPackage && (
+                <button
+                  type="button"
+                  onClick={() => openTopupForPackage(lowestPackage.id)}
+                  className="shrink-0 px-2 py-0.5 rounded-lg bg-[#1A365D] text-[#FDE68A] border border-[#D4AF37]/80 text-[10px] font-extrabold whitespace-nowrap"
+                >
+                  اطلب تغذية
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => setWarningDismissed(true)}
-                aria-label="إغلاق شريط تحذير المخزون"
+                aria-label="إغلاق شريط التنبيه"
                 className="w-6 h-6 rounded-lg hover:bg-black/10 dark:hover:bg-white/10 flex items-center justify-center shrink-0"
               >
                 <X className="w-3.5 h-3.5" />

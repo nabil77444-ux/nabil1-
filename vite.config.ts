@@ -10,7 +10,18 @@ const rootDir = path.dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig(({ mode }) => {
   const isProd = mode === 'production';
+  const buildNumber = Number.parseInt(
+    String(process.env.APP_BUILD_NUMBER || process.env.VITE_APP_BUILD_NUMBER || '0').trim(),
+    10
+  ) || 0;
+  const nativeVersion = String(
+    process.env.APP_NATIVE_VERSION || process.env.VITE_NATIVE_VERSION || '2.1.0'
+  ).trim();
   return {
+    define: {
+      __APP_BUILD_NUMBER__: JSON.stringify(buildNumber),
+      __APP_NATIVE_VERSION__: JSON.stringify(nativeVersion),
+    },
     plugins: [
       react(),
       tailwindcss(),

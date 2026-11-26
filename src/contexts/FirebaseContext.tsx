@@ -97,6 +97,17 @@ import {
   type CachedAvailableCard,
   type OfflineQueuedSale,
 } from '../lib/offlineCards';
+import {
+  enqueueOfflineOp,
+  getOfflineSyncQueue,
+  loadCachedTopupRequests,
+  offlineCustomerOpToDoc,
+  offlineLedgerOpToDoc,
+  offlineTopupOpToDoc,
+  removeOfflineOp,
+  saveCachedTopupRequests,
+  type OfflineQueuedOp,
+} from '../lib/offlineSyncQueue';
 import { setGlobalShareTemplates } from '../utils/shareExport';
 import {
   clearActiveSession,
@@ -153,6 +164,10 @@ interface FirebaseContextValue {
   isOnline: boolean;
   firestoreConnected: boolean;
   isSyncing: boolean;
+  pendingOfflineSyncCount: number;
+  prefillTopupPackageId: string | null;
+  clearPrefillTopupPackage: () => void;
+  openTopupForPackage: (packageId: string) => void;
   packages: PackageDoc[];
   totalAvailableCards: number;
   sales: SaleDoc[];
@@ -681,6 +696,11 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [pendingOfflineSales, setPendingOfflineSales] = useState<OfflineQueuedSale[]>(() =>
     getPendingOfflineSales()
   );
+  const [pendingOfflineOps, setPendingOfflineOps] = useState<OfflineQueuedOp[]>(() =>
+    getOfflineSyncQueue()
+  );
+  const [prefillTopupPackageId, setPrefillTopupPackageId] = useState<string | null>(null);
+  const prevTopupStatusMapRef = useRef<Map<string, TopupRequest['status']>>(new Map());
   const [sales, setSales] = useState<SaleDoc[]>(() =>
     cachedProfileInitial?.uid
       ? readCachedJson<SaleDoc[]>(`${CACHE_SALES_PREFIX}${cachedProfileInitial.uid}`, [])
@@ -695,13 +715,24 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [notifications, setNotifications] = useState<NotificationDoc[]>([]);
   const [pendingRegistrations, setPendingRegistrations] = useState<RegistrationRequest[]>([]);
   const [pendingPasswordResets, setPendingPasswordResets] = useState<PasswordResetRequest[]>([]);
-  const [topupRequests, setTopupRequests] = useState<TopupRequest[]>([]);
+  const [topupRequests, setTopupRequests] = useState<TopupRequest[]>(() =>
+    cachedProfileInitial?.uid ? loadCachedTopupRequests(cachedProfileInitial.uid) : []
+  );
   const [appSettings, setAppSettings] = useState<AppSettingsDoc>(() => ({
     ...DEFAULT_APP_SETTINGS,
     ...readCachedJson<Partial<AppSettingsDoc>>(CACHE_SETTINGS_KEY, {}),
   }));
   const [auditLogs, setAuditLogs] = useState<AuditLogDoc[]>([]);
   const [managedUsers, setManagedUsers] = useState<UserProfile[]>([]);
+
+  const clearPrefillTopupPackage = useCallback(() => setPrefillTopupPackageId(null), []);
+  const openTopupForPackage = useCallback(
+    (packageId: string) => {
+      setPrefillTopupPackageId(packageId);
+      setActiveRoute('topup_requests');
+    },
+    [setActiveRoute]
+  );
 
   const loadMoreSales = useCallback(() => setSalesLimit((prev) => prev + 40), []);
   const loadMoreCustomers = useCallback(() => setCustomersLimit((prev) => prev + 50), []);
@@ -2017,11 +2048,32 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     if (isAgent) {
       let incomingList: TopupRequest[] = [];
       let outgoingList: TopupRequest[] = [];
+      const handleTopupListUpdate = (nextList: TopupRequest[]) => {
+        if (!isAdmin && prevTopupStatusMapRef.current.size > 0) {
+          for (const item of nextList) {
+            if (
+              item.requesterId === activeUser.uid &&
+              item.status === 'approved' &&
+              prevTopupStatusMapRef.current.get(item.id) === 'pending'
+            ) {
+              notifySuccess(
+                `تمت الموافقة على طلب التغذية (${item.totalCards} كرت) وإضافة الكروت إلى مخزونك ✅`
+              );
+            }
+          }
+        }
+        const nextMap = new Map<string, TopupRequest['status']>();
+        for (const item of nextList) nextMap.set(item.id, item.status);
+        prevTopupStatusMapRef.current = nextMap;
+        setTopupRequests(nextList);
+        saveCachedTopupRequests(activeUser.uid, nextList);
+      };
+
       const publishMergedTopups = () => {
         const merged = new Map<string, TopupRequest>();
         for (const item of incomingList) merged.set(item.id, item);
         for (const item of outgoingList) merged.set(item.id, item);
-        setTopupRequests(
+        handleTopupListUpdate(
           Array.from(merged.values()).sort(
             (a, b) => (b.createdAt?.toMillis?.() ?? 0) - (a.createdAt?.toMillis?.() ?? 0)
           )
@@ -2030,7 +2082,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
       unsubscribers.push(
         onSnapshot(
-          query(collection(db, 'topupRequests'), where('targetId', '==', activeUser.uid), limit(15)),
+          query(collection(db, 'topupRequests'), where('targetId', '==', activeUser.uid), limit(40)),
           (snap) => {
             incomingList = snap.docs.map((d) => ({
               id: d.id,
@@ -2044,7 +2096,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
       unsubscribers.push(
         onSnapshot(
-          query(collection(db, 'topupRequests'), where('requesterId', '==', activeUser.uid), limit(15)),
+          query(collection(db, 'topupRequests'), where('requesterId', '==', activeUser.uid), limit(40)),
           (snap) => {
             outgoingList = snap.docs.map((d) => ({
               id: d.id,
@@ -2057,8 +2109,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       );
     } else {
       const topupQuery = isAdmin
-        ? query(collection(db, 'topupRequests'), limit(15))
-        : query(collection(db, 'topupRequests'), where('requesterId', '==', activeUser.uid), limit(15));
+        ? query(collection(db, 'topupRequests'), limit(40))
+        : query(collection(db, 'topupRequests'), where('requesterId', '==', activeUser.uid), limit(40));
       unsubscribers.push(
         onSnapshot(
           topupQuery,
@@ -2066,7 +2118,24 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             const list = snap.docs
               .map((d) => ({ id: d.id, ...(d.data() as Omit<TopupRequest, 'id'>) }))
               .sort((a, b) => (b.createdAt?.toMillis?.() ?? 0) - (a.createdAt?.toMillis?.() ?? 0));
+            if (!isAdmin && prevTopupStatusMapRef.current.size > 0) {
+              for (const item of list) {
+                if (
+                  item.requesterId === activeUser.uid &&
+                  item.status === 'approved' &&
+                  prevTopupStatusMapRef.current.get(item.id) === 'pending'
+                ) {
+                  notifySuccess(
+                    `تمت الموافقة على طلب التغذية (${item.totalCards} كرت) وإضافة الكروت إلى مخزونك ✅`
+                  );
+                }
+              }
+            }
+            const nextMap = new Map<string, TopupRequest['status']>();
+            for (const item of list) nextMap.set(item.id, item.status);
+            prevTopupStatusMapRef.current = nextMap;
             setTopupRequests(list);
+            saveCachedTopupRequests(activeUser.uid, list);
           },
           (err) => handleFirestoreError(err, OperationType.LIST, 'topupRequests')
         )
@@ -2483,20 +2552,92 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     [notifications]
   );
 
+  const mergedTopupRequests = useMemo(() => {
+    const uid = profile?.uid || firebaseUser?.uid;
+    const queuedTopups = pendingOfflineOps
+      .filter((op) => op.kind === 'topup_request' && (!uid || op.ownerUid === uid))
+      .map(offlineTopupOpToDoc)
+      .filter((x): x is TopupRequest => Boolean(x));
+    if (queuedTopups.length === 0) return topupRequests;
+    const liveIds = new Set(topupRequests.map((t) => t.id));
+    return [...queuedTopups.filter((t) => !liveIds.has(t.id)), ...topupRequests];
+  }, [pendingOfflineOps, topupRequests, profile?.uid, firebaseUser?.uid]);
+
+  const mergedCustomers = useMemo(() => {
+    const uid = profile?.uid || firebaseUser?.uid;
+    const queuedCustomers = pendingOfflineOps
+      .filter((op) => op.kind === 'create_customer' && (!uid || op.ownerUid === uid))
+      .map(offlineCustomerOpToDoc)
+      .filter((x): x is CustomerAccount => Boolean(x));
+    const queuedLedgers = pendingOfflineOps.filter(
+      (op) => op.kind === 'ledger_entry' && (!uid || op.ownerUid === uid) && op.ledger
+    );
+    const liveIds = new Set(customers.map((c) => c.id));
+    const combined = [
+      ...queuedCustomers.filter((c) => !liveIds.has(c.id)),
+      ...customers,
+    ];
+    if (queuedLedgers.length === 0) return combined;
+    return combined.map((c) => {
+      const entries = queuedLedgers.filter((op) => op.ledger?.customerId === c.id);
+      if (entries.length === 0) return c;
+      let totalDebit = Number(c.totalDebit) || 0;
+      let totalCredit = Number(c.totalCredit) || 0;
+      let balance = Number(c.balance) || 0;
+      for (const op of entries) {
+        const l = op.ledger!;
+        if (l.entryType === 'debit') {
+          totalDebit += l.amount;
+          balance = totalDebit - totalCredit;
+        } else if (l.entryType === 'credit') {
+          totalCredit += l.amount;
+          balance = totalDebit - totalCredit;
+        } else {
+          balance -= l.amount;
+        }
+      }
+      return { ...c, totalDebit, totalCredit, balance };
+    });
+  }, [customers, pendingOfflineOps, profile?.uid, firebaseUser?.uid]);
+
+  const mergedLedgerEntries = useMemo(() => {
+    const uid = profile?.uid || firebaseUser?.uid;
+    const queued = pendingOfflineOps
+      .filter((op) => op.kind === 'ledger_entry' && (!uid || op.ownerUid === uid))
+      .map(offlineLedgerOpToDoc)
+      .filter((x): x is LedgerEntry => Boolean(x));
+    if (queued.length === 0) return ledgerEntries;
+    const liveIds = new Set(ledgerEntries.map((e) => e.id));
+    return [...queued.filter((e) => !liveIds.has(e.id)), ...ledgerEntries];
+  }, [ledgerEntries, pendingOfflineOps, profile?.uid, firebaseUser?.uid]);
+
   const pendingTopups = useMemo(
-    () => topupRequests.filter((t) => t.status === 'pending'),
-    [topupRequests]
+    () => mergedTopupRequests.filter((t) => t.status === 'pending'),
+    [mergedTopupRequests]
   );
 
-  // Automatic Background Sync for Offline Queued Sales whenever internet reconnects
+  const pendingOfflineSyncCount = useMemo(() => {
+    const uid = profile?.uid || firebaseUser?.uid;
+    const salesCnt = pendingOfflineSales.filter((s) => !uid || s.sellerId === uid).length;
+    const opsCnt = pendingOfflineOps.filter((op) => !uid || op.ownerUid === uid).length;
+    return salesCnt + opsCnt;
+  }, [pendingOfflineSales, pendingOfflineOps, profile?.uid, firebaseUser?.uid]);
+
+  // Automatic Background Sync for ALL Offline Queued Operations (Sales + Topups + Customers + Ledger)
   const flushOfflineSalesQueue = useCallback(async () => {
     const activeUser = auth.currentUser || firebaseUser;
     if (!activeUser || !profile || !navigator.onLine) return;
-    const queue = getPendingOfflineSales(activeUser.uid);
-    if (queue.length === 0) return;
 
-    let syncedCount = 0;
-    for (const qSale of queue) {
+    const salesQueue = getPendingOfflineSales(activeUser.uid);
+    const opsQueue = getOfflineSyncQueue(activeUser.uid);
+    if (salesQueue.length === 0 && opsQueue.length === 0) return;
+
+    let syncedSalesCount = 0;
+    let syncedOpsCount = 0;
+
+    // 1. Flush offline queued sales in chronological order (oldest first)
+    const chronologicalSales = [...salesQueue].sort((a, b) => a.createdAtMs - b.createdAtMs);
+    for (const qSale of chronologicalSales) {
       const syncKey = `sync_offline_${qSale.localId}`;
       if (inFlightOpsRef.current.has(syncKey)) continue;
       inFlightOpsRef.current.add(syncKey);
@@ -2505,7 +2646,12 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           const isElectronic =
             qSale.saleType === 'direct' || qSale.saleType === 'electronic_wholesale';
 
-          // Update card documents
+          // Idempotency guard: if this exact saleId already exists in Firestore, skip duplicate write
+          const existingSaleSnap = await tx.get(doc(db, 'sales', qSale.localId));
+          if (existingSaleSnap.exists()) {
+            return;
+          }
+
           if (isElectronic && qSale.cardDocIds.length > 0) {
             for (const cardDocId of qSale.cardDocIds) {
               const cardRef = doc(db, 'cards', cardDocId);
@@ -2530,7 +2676,6 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               }
             }
 
-            // Decrement global Admin package counters only when Super Admin executed the sale
             if (profile.role === 'super_admin') {
               for (const item of qSale.items) {
                 if (item.delivered <= 0) continue;
@@ -2576,7 +2721,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         });
 
         removeSyncedOfflineSale(qSale.localId);
-        syncedCount++;
+        syncedSalesCount++;
       } catch {
         // Keep in queue for next connectivity retry
       } finally {
@@ -2584,10 +2729,117 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       }
     }
 
-    if (syncedCount > 0) {
+    // 2. Flush general offline operations queue (Feeding Requests, Customers, Ledger Payments)
+    for (const op of opsQueue) {
+      const syncKey = `sync_op_${op.clientOpId}`;
+      if (inFlightOpsRef.current.has(syncKey)) continue;
+      inFlightOpsRef.current.add(syncKey);
+      try {
+        if (op.kind === 'topup_request' && op.topup) {
+          const t = op.topup;
+          const existingSnap = await getDoc(doc(db, 'topupRequests', t.reqId)).catch(() => null);
+          if (!existingSnap?.exists()) {
+            const safeName = (t.requesterName || profile.name || 'مستخدم طيبة نت').trim();
+            await setDoc(doc(db, 'topupRequests', t.reqId), {
+              requesterId: activeUser.uid,
+              requesterName: (safeName.length >= 2 ? safeName : `${safeName} نت`).slice(0, 100),
+              requesterPhone: (t.requesterPhone || '').slice(0, 20),
+              requesterRole: t.requesterRole,
+              discountRate: t.discountRate,
+              targetId: t.targetId,
+              targetName: t.targetName.slice(0, 100),
+              items: t.items.slice(0, 20),
+              totalCards: t.totalCards,
+              totalAmount: t.totalAmount,
+              status: 'pending',
+              notes: (t.notes || '').slice(0, 500),
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            });
+            void setDoc(doc(collection(db, 'notifications')), {
+              recipientId: t.targetId,
+              title: 'طلب تغذية جديد',
+              body: `أرسل ${safeName} طلب تغذية (${t.totalCards} كرت — ${t.totalAmount} ر.ي)`,
+              category: 'topup',
+              targetRoute: 'topup_requests',
+              isRead: false,
+              createdAt: serverTimestamp(),
+            }).catch(() => {});
+          }
+          removeOfflineOp(op.clientOpId);
+          syncedOpsCount++;
+        } else if (op.kind === 'create_customer' && op.customer) {
+          const c = op.customer;
+          const existingSnap = await getDoc(doc(db, 'customers', c.customerId)).catch(() => null);
+          if (!existingSnap?.exists()) {
+            await setDoc(doc(db, 'customers', c.customerId), {
+              ownerId: activeUser.uid,
+              name: c.name.trim().slice(0, 100),
+              phone: (c.phone || '').slice(0, 20),
+              category: (c.category || 'عميل كروت').slice(0, 50),
+              totalDebit: c.initialDebit,
+              totalCredit: c.initialCredit,
+              balance: c.initialDebit - c.initialCredit,
+              notes: (c.notes || '').slice(0, 500),
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            });
+          }
+          removeOfflineOp(op.clientOpId);
+          syncedOpsCount++;
+        } else if (op.kind === 'ledger_entry' && op.ledger) {
+          const l = op.ledger;
+          const custRef = doc(db, 'customers', l.customerId);
+          await runTransaction(db, async (tx) => {
+            const existingEntry = await tx.get(doc(db, 'ledgerEntries', l.entryId));
+            if (existingEntry.exists()) return;
+            const cSnap = await tx.get(custRef);
+            if (!cSnap.exists()) throw new Error('Customer not synced yet');
+            const cData = cSnap.data() as CustomerAccount;
+            const nextDebit =
+              l.entryType === 'debit'
+                ? (Number(cData.totalDebit) || 0) + l.amount
+                : Number(cData.totalDebit) || 0;
+            const nextCredit =
+              l.entryType === 'credit'
+                ? (Number(cData.totalCredit) || 0) + l.amount
+                : Number(cData.totalCredit) || 0;
+            const nextBalance =
+              l.entryType === 'adjustment'
+                ? (Number(cData.balance) || 0) - l.amount
+                : nextDebit - nextCredit;
+
+            tx.set(doc(db, 'ledgerEntries', l.entryId), {
+              ownerId: activeUser.uid,
+              customerId: l.customerId,
+              entryType: l.entryType,
+              amount: l.amount,
+              description: l.description.trim().slice(0, 300),
+              createdAt: serverTimestamp(),
+            });
+            tx.update(custRef, {
+              totalDebit: nextDebit,
+              totalCredit: nextCredit,
+              balance: nextBalance,
+              updatedAt: serverTimestamp(),
+            });
+          });
+          removeOfflineOp(op.clientOpId);
+          syncedOpsCount++;
+        }
+      } catch {
+        // Keep in queue for next connectivity retry
+      } finally {
+        inFlightOpsRef.current.delete(syncKey);
+      }
+    }
+
+    const totalSynced = syncedSalesCount + syncedOpsCount;
+    if (totalSynced > 0) {
       setPendingOfflineSales(getPendingOfflineSales());
+      setPendingOfflineOps(getOfflineSyncQueue());
       setOfflinePoolVersion((v) => v + 1);
-      notifySuccess(`تمت مزامنة ${syncedCount} عملية بيع محلية مع السحابة بنجاح ✅`);
+      notifySuccess(`تمت مزامنة ${totalSynced} عملية محلية مع السحابة بنجاح ✅`);
     }
   }, [firebaseUser, notifySuccess, profile]);
 
@@ -2595,7 +2847,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     if (isOnline && authReady && profile?.status === 'active') {
       flushOfflineSalesQueue().catch(() => {});
     }
-  }, [isOnline, authReady, profile?.status, flushOfflineSalesQueue]);
+  }, [isOnline, authReady, profile?.status, firebaseUser?.uid, flushOfflineSalesQueue]);
 
   const refreshVerificationStatus = useCallback(async (): Promise<boolean> => {
     if (!auth.currentUser) return false;
@@ -3958,7 +4210,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   );
 
   // =========================================================================
-  // UPDATE 5: CUSTOMERS & GENERAL ACCOUNTING LEDGER
+  // UPDATE 5: CUSTOMERS & GENERAL ACCOUNTING LEDGER (True Offline-First)
   // =========================================================================
   const createCustomerAccount = useCallback(
     async (input: {
@@ -3969,17 +4221,52 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       initialDebit?: number;
       initialCredit?: number;
     }): Promise<CustomerAccount | null> => {
-      const activeUser = auth.currentUser || firebaseUser;
-      if (!activeUser) return null;
+      const ownerUid = auth.currentUser?.uid || firebaseUser?.uid || profile?.uid;
+      if (!ownerUid) return null;
       const customerId = generateSafeDocId('cust');
       const debit = Math.max(0, Number(input.initialDebit) || 0);
       const credit = Math.max(0, Number(input.initialCredit) || 0);
       const balance = debit - credit;
+      const cleanName = input.name.trim().slice(0, 100);
+      if (cleanName.length < 2) {
+        notifyWarning('يرجى كتابة اسم العميل (حرفين على الأقل)');
+        return null;
+      }
+
+      const queueOfflineCustomer = () => {
+        const op: OfflineQueuedOp = {
+          clientOpId: `op_${customerId}`,
+          kind: 'create_customer',
+          ownerUid,
+          createdAtMs: Date.now(),
+          customer: {
+            customerId,
+            ownerId: ownerUid,
+            name: cleanName,
+            phone: (input.phone || '').slice(0, 20),
+            category: (input.category || 'عميل كروت').slice(0, 50),
+            notes: (input.notes || '').slice(0, 500),
+            initialDebit: debit,
+            initialCredit: credit,
+          },
+        };
+        enqueueOfflineOp(op);
+        setPendingOfflineOps(getOfflineSyncQueue());
+        notifyWarning(
+          `تم حفظ حساب ${cleanName} محلياً ⚡`,
+          'سيتم إرساله للسحابة تلقائياً فور توفر الإنترنت.'
+        );
+        return offlineCustomerOpToDoc(op);
+      };
+
+      if (!navigator.onLine || !auth.currentUser) {
+        return queueOfflineCustomer();
+      }
 
       try {
         await setDoc(doc(db, 'customers', customerId), {
-          ownerId: activeUser.uid,
-          name: input.name.trim().slice(0, 100),
+          ownerId: auth.currentUser.uid,
+          name: cleanName,
           phone: (input.phone || '').slice(0, 20),
           category: (input.category || 'عميل كروت').slice(0, 50),
           totalDebit: debit,
@@ -3991,32 +4278,32 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         });
 
         if (debit > 0) {
-          await setDoc(doc(db, 'ledgerEntries', generateSafeDocId('led')), {
-            ownerId: activeUser.uid,
+          void setDoc(doc(db, 'ledgerEntries', generateSafeDocId('led')), {
+            ownerId: auth.currentUser.uid,
             customerId,
             entryType: 'debit',
             amount: debit,
             description: 'رصيد افتتاحي مستحق (عليه)',
             createdAt: serverTimestamp(),
-          });
+          }).catch(() => {});
         }
         if (credit > 0) {
-          await setDoc(doc(db, 'ledgerEntries', generateSafeDocId('led')), {
-            ownerId: activeUser.uid,
+          void setDoc(doc(db, 'ledgerEntries', generateSafeDocId('led')), {
+            ownerId: auth.currentUser.uid,
             customerId,
             entryType: 'credit',
             amount: credit,
             description: 'دفعة افتتاحية مسلّمة (له)',
             createdAt: serverTimestamp(),
-          });
+          }).catch(() => {});
         }
 
-        await writeAuditLog('إضافة حساب عميل', `تم فتح حساب دفتر محاسبي: ${input.name}`);
-        notifySuccess(`تم إضافة حساب ${input.name} بنجاح`);
+        void writeAuditLog('إضافة حساب عميل', `تم فتح حساب دفتر محاسبي: ${cleanName}`).catch(() => {});
+        notifySuccess(`تم إضافة حساب ${cleanName} بنجاح`);
         return {
           id: customerId,
-          ownerId: activeUser.uid,
-          name: input.name.trim(),
+          ownerId: auth.currentUser.uid,
+          name: cleanName,
           phone: input.phone,
           category: input.category || 'عميل كروت',
           totalDebit: debit,
@@ -4026,11 +4313,10 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         };
       } catch (err) {
         handleFirestoreError(err, OperationType.CREATE, `customers/${customerId}`);
-        notifyError('تعذر إضافة الحساب');
-        return null;
+        return queueOfflineCustomer();
       }
     },
-    [firebaseUser, notifyError, notifySuccess, writeAuditLog]
+    [firebaseUser, notifySuccess, notifyWarning, profile?.uid, writeAuditLog]
   );
 
   const updateCustomerAccount = useCallback(
@@ -4056,7 +4342,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     async (customerId: string) => {
       try {
         await deleteDoc(doc(db, 'customers', customerId));
-        await writeAuditLog('حذف حساب عميل', `تم حذف الحساب المحاسبي ${customerId}`);
+        void writeAuditLog('حذف حساب عميل', `تم حذف الحساب المحاسبي ${customerId}`).catch(() => {});
         notifySuccess('تم حذف حساب العميل بنجاح');
       } catch (err) {
         handleFirestoreError(err, OperationType.DELETE, `customers/${customerId}`);
@@ -4073,8 +4359,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       amount: number;
       description: string;
     }): Promise<boolean> => {
-      const activeUser = auth.currentUser || firebaseUser;
-      if (!activeUser || input.amount <= 0) return false;
+      const ownerUid = auth.currentUser?.uid || firebaseUser?.uid || profile?.uid;
+      if (!ownerUid || input.amount <= 0) return false;
       const opKey = `ledger_${input.customerId}_${input.entryType}_${input.amount}`;
       if (inFlightOpsRef.current.has(opKey)) {
         notifyWarning('جاري حفظ القيد المحاسبي بالفعل...');
@@ -4083,7 +4369,33 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       inFlightOpsRef.current.add(opKey);
       const entryId = generateSafeDocId('led');
 
+      const queueOfflineLedger = () => {
+        enqueueOfflineOp({
+          clientOpId: `op_${entryId}`,
+          kind: 'ledger_entry',
+          ownerUid,
+          createdAtMs: Date.now(),
+          ledger: {
+            entryId,
+            ownerId: ownerUid,
+            customerId: input.customerId,
+            entryType: input.entryType,
+            amount: input.amount,
+            description: input.description.trim().slice(0, 300) || 'قيد محاسبي محلي',
+          },
+        });
+        setPendingOfflineOps(getOfflineSyncQueue());
+        notifyWarning(
+          `تم تسجيل ${input.entryType === 'credit' ? 'التسديد' : 'القيد'} (${input.amount} ر.ي) محلياً ⚡`,
+          'سيتم مزامنته تلقائياً فور توفر الإنترنت.'
+        );
+        return true;
+      };
+
       try {
+        if (!navigator.onLine || !auth.currentUser) {
+          return queueOfflineLedger();
+        }
         const custRef = doc(db, 'customers', input.customerId);
         await runTransaction(db, async (tx) => {
           const cSnap = await tx.get(custRef);
@@ -4103,7 +4415,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               : nextDebit - nextCredit;
 
           tx.set(doc(db, 'ledgerEntries', entryId), {
-            ownerId: activeUser.uid,
+            ownerId: auth.currentUser!.uid,
             customerId: input.customerId,
             entryType: input.entryType,
             amount: input.amount,
@@ -4118,10 +4430,10 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           });
         });
 
-        await writeAuditLog(
+        void writeAuditLog(
           input.entryType === 'credit' ? 'تسديد مالي' : 'قيد محاسبي',
           `${input.description} — المبلغ ${input.amount} ر.ي`
-        );
+        ).catch(() => {});
         notifySuccess(
           input.entryType === 'credit'
             ? `تم تسجيل التسديد (${input.amount} ر.ي) بنجاح`
@@ -4130,13 +4442,12 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         return true;
       } catch (err) {
         handleFirestoreError(err, OperationType.WRITE, `ledgerEntries/${entryId}`);
-        notifyError('تعذر حفظ القيد المحاسبي');
-        return false;
+        return queueOfflineLedger();
       } finally {
         inFlightOpsRef.current.delete(opKey);
       }
     },
-    [firebaseUser, notifyError, notifySuccess, notifyWarning, writeAuditLog]
+    [firebaseUser, notifySuccess, notifyWarning, profile?.uid, writeAuditLog]
   );
 
   const deleteLedgerEntry = useCallback(
@@ -4164,7 +4475,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           }
           tx.delete(doc(db, 'ledgerEntries', entry.id));
         });
-        notifySuccess('تم حذف القيد وتصحيح الرصيد بنجاح');
+        notifySuccess('تم حذف القيد وتحديث الرصيد بنجاح');
       } catch (err) {
         handleFirestoreError(err, OperationType.DELETE, `ledgerEntries/${entry.id}`);
         notifyError('تعذر حذف القيد');
@@ -4174,19 +4485,22 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   );
 
   // =========================================================================
-  // UPDATE 7: TWO-TIER TOPUP / FEED REQUESTS
+  // UPDATE 7: TWO-TIER TOPUP / FEED REQUESTS (100% Online + Offline-First)
   // =========================================================================
   const submitTopupRequest = useCallback(
     async (input: { items: TopupLineItem[]; notes?: string }): Promise<boolean> => {
-      const activeUser = auth.currentUser || firebaseUser;
-      if (!activeUser || !profile) return false;
+      const effectiveUid = auth.currentUser?.uid || firebaseUser?.uid || profile?.uid;
+      if (!effectiveUid || !profile) {
+        notifyError('يرجى تسجيل الدخول أولاً لإرسال طلب التغذية');
+        return false;
+      }
       const validItems = input.items.filter((i) => i.quantity > 0);
       if (validItems.length === 0) {
         notifyWarning('اختر كمية كروت واحدة على الأقل');
         return false;
       }
 
-      const opKey = `topup_submit_${activeUser.uid}`;
+      const opKey = `topup_submit_${effectiveUid}`;
       if (inFlightOpsRef.current.has(opKey)) {
         notifyWarning('جاري إرسال طلب التغذية بالفعل...');
         return false;
@@ -4203,40 +4517,92 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         targetId === 'super_admin'
           ? SUPER_ADMIN_CONFIG.name
           : parentAgent?.name || 'الوكيل المباشر';
+      const rawName = (profile.name || 'مستخدم طيبة نت').trim();
+      const safeName = (rawName.length >= 2 ? rawName : `${rawName} نت`).slice(0, 100);
+      const safePhone = (profile.phone || '').slice(0, 20);
+      const safeRole: 'agent' | 'client' = profile.role === 'agent' ? 'agent' : 'client';
+      const safeDiscountRate = Number(
+        profile.discountRate ||
+          (safeRole === 'agent' ? appSettings.agentDiscountPercent : appSettings.clientDiscountPercent) ||
+          (safeRole === 'agent' ? 70 : 80)
+      );
+      const safeNotes = (input.notes || '').trim().slice(0, 500);
+
+      const queueOfflineTopup = () => {
+        enqueueOfflineOp({
+          clientOpId: `op_${reqId}`,
+          kind: 'topup_request',
+          ownerUid: effectiveUid,
+          createdAtMs: Date.now(),
+          topup: {
+            reqId,
+            requesterId: effectiveUid,
+            requesterName: safeName,
+            requesterPhone: safePhone,
+            requesterRole: safeRole,
+            discountRate: safeDiscountRate,
+            targetId,
+            targetName: targetName.slice(0, 100),
+            items: validItems.slice(0, 20),
+            totalCards,
+            totalAmount,
+            notes: safeNotes,
+          },
+        });
+        setPendingOfflineOps(getOfflineSyncQueue());
+        notifyWarning(
+          `تم حفظ طلب التغذية (${totalCards} كرت) محلياً ⚡`,
+          'بانتظار الإرسال عند توفر الإنترنت — سيُرسل تلقائياً فور عودة الاتصال.'
+        );
+        return true;
+      };
 
       try {
-        await setDoc(doc(db, 'topupRequests', reqId), {
-          requesterId: activeUser.uid,
-          requesterName: profile.name.slice(0, 100),
-          requesterPhone: (profile.phone || '').slice(0, 20),
-          requesterRole: profile.role === 'agent' ? 'agent' : 'client',
-          discountRate: profile.discountRate || (profile.role === 'agent' ? appSettings.agentDiscountPercent : appSettings.clientDiscountPercent),
-          targetId,
-          targetName: targetName.slice(0, 100),
-          items: validItems.slice(0, 20),
-          totalCards,
-          totalAmount,
-          status: 'pending',
-          notes: (input.notes || '').slice(0, 500),
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
+        // Offline or cloud auth still warming up -> instant zero-block local queue
+        if (!navigator.onLine || !auth.currentUser) {
+          return queueOfflineTopup();
+        }
 
-        await sendCloudNotification({
+        await raceWithTimeout(
+          setDoc(doc(db, 'topupRequests', reqId), {
+            requesterId: auth.currentUser.uid,
+            requesterName: safeName,
+            requesterPhone: safePhone,
+            requesterRole: safeRole,
+            discountRate: safeDiscountRate,
+            targetId,
+            targetName: targetName.slice(0, 100),
+            items: validItems.slice(0, 20),
+            totalCards,
+            totalAmount,
+            status: 'pending',
+            notes: safeNotes,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          }),
+          8000
+        );
+
+        // Fire-and-forget secondary notification & audit log so they NEVER cause a false failure
+        void sendCloudNotification({
           recipientId: targetId,
           title: 'طلب تغذية جديد',
-          body: `أرسل ${profile.name} طلب تغذية (${totalCards} كرت — ${totalAmount} ر.ي)`,
+          body: `أرسل ${safeName} طلب تغذية (${totalCards} كرت — ${totalAmount} ر.ي)`,
           category: 'topup',
           targetRoute: 'topup_requests',
-        });
+        }).catch(() => {});
 
-        await writeAuditLog('طلب تغذية', `طلب ${totalCards} كرت بإجمالي ${totalAmount} ر.ي إلى ${targetName}`);
-        notifySuccess(`تم إرسال طلب التغذية (${totalCards} كرت) إلى ${targetName} بنجاح`);
+        void writeAuditLog(
+          'طلب تغذية',
+          `طلب ${totalCards} كرت بإجمالي ${totalAmount} ر.ي إلى ${targetName}`
+        ).catch(() => {});
+
+        notifySuccess(`تم إرسال طلب التغذية (${totalCards} كرت) إلى ${targetName} بنجاح ✅`);
         return true;
       } catch (err) {
         handleFirestoreError(err, OperationType.CREATE, `topupRequests/${reqId}`);
-        notifyError('تعذر إرسال طلب التغذية');
-        return false;
+        // Network/timeout/transient failure -> queue safely offline so the request is NEVER lost!
+        return queueOfflineTopup();
       } finally {
         inFlightOpsRef.current.delete(opKey);
       }
@@ -6777,16 +7143,20 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       isOnline,
       firestoreConnected,
       isSyncing,
+      pendingOfflineSyncCount,
+      prefillTopupPackageId,
+      clearPrefillTopupPackage,
+      openTopupForPackage,
       packages,
       totalAvailableCards,
       sales: mergedSales,
-      customers,
-      ledgerEntries,
+      customers: mergedCustomers,
+      ledgerEntries: mergedLedgerEntries,
       notifications,
       unreadNotificationsCount,
       pendingRegistrations,
       pendingPasswordResets,
-      topupRequests,
+      topupRequests: mergedTopupRequests,
       pendingTopups,
       appSettings,
       auditLogs,
@@ -6795,7 +7165,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       setActiveRoute,
       hasMoreSales: mergedSales.length >= salesLimit,
       loadMoreSales,
-      hasMoreCustomers: customers.length >= customersLimit,
+      hasMoreCustomers: mergedCustomers.length >= customersLimit,
       loadMoreCustomers,
       hasMoreAuditLogs: auditLogs.length >= auditLogsLimit,
       loadMoreAuditLogs,
@@ -6851,16 +7221,20 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       isOnline,
       firestoreConnected,
       isSyncing,
+      pendingOfflineSyncCount,
+      prefillTopupPackageId,
+      clearPrefillTopupPackage,
+      openTopupForPackage,
       packages,
       totalAvailableCards,
       mergedSales,
-      customers,
-      ledgerEntries,
+      mergedCustomers,
+      mergedLedgerEntries,
       notifications,
       unreadNotificationsCount,
       pendingRegistrations,
       pendingPasswordResets,
-      topupRequests,
+      mergedTopupRequests,
       pendingTopups,
       appSettings,
       auditLogs,

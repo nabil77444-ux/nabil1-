@@ -40,35 +40,64 @@ jobs:
       - name: Install Dependencies
         run: npm install --legacy-peer-deps --no-audit --no-fund
 
-      - name: TypeScript Lint, Production Web Build & OTA Bundle (update.zip + version.json)
+      - name: TypeScript Lint, Production Web Build & Lightweight OTA Bundle (update.zip + version.json)
         env:
           VITE_GITHUB_REPO: ${{ github.repository }}
-          VITE_APP_VERSION: 2.0.${{ github.run_number }}
-          VITE_NATIVE_VERSION: 2.0.${{ github.run_number }}
+          VITE_APP_VERSION: 2.1.${{ github.run_number }}
+          VITE_NATIVE_VERSION: "2.1.0"
           VITE_APP_BUILD_NUMBER: ${{ github.run_number }}
+          APP_BUILD_NUMBER: ${{ github.run_number }}
+          APP_NATIVE_VERSION: "2.1.0"
         run: |
           set -euo pipefail
           npm run lint
           npm run build
           rm -f update.zip version.json
-          (cd dist && zip -r -q ../update.zip .)
+          # Ultra-compressed UI-only OTA bundle (-9): excludes source maps, heavy OCR/PDF workers, and unused large launcher PNGs
+          (cd dist && zip -r -9 -q ../update.zip . \
+            -x "*.map" \
+            -x "*tesseract*" \
+            -x "*vendor-ocr*" \
+            -x "*pdf.worker*" \
+            -x "*vendor-pdf*" \
+            -x "pwa-512x512.png" \
+            -x "pwa-maskable-512x512.png" \
+            -x "apple-touch-icon.png")
           test -s update.zip || { echo "::error::update.zip was not created"; exit 1; }
-          OTA_SIZE_MB=$(python3 -c 'import os; print(round(os.path.getsize("update.zip") / (1024 * 1024), 2))')
-          cat > version.json <<EOF
-          {
-            "version": "2.0.${GITHUB_RUN_NUMBER}",
-            "buildNumber": ${GITHUB_RUN_NUMBER},
-            "sizeMb": ${OTA_SIZE_MB},
-            "notes": "تحديث خفيف وسريع لتطبيق كروت طيبة نت — تحسينات الأداء والبصمة ونظام التحديث التلقائي.",
-            "bundleUrl": "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/update.zip",
-            "otaUrl": "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/update.zip",
-            "apkUrl": "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/TaibahNet-Cards.apk",
-            "minNativeVersion": "2.0.0",
-            "publishedAt": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          python3 - <<'PYEOF'
+          import json, os, datetime
+
+          size_bytes = os.path.getsize("update.zip")
+          size_mb = round(size_bytes / (1024 * 1024), 2)
+          if size_bytes < 1024 * 1024:
+              size_text = f"{max(1, round(size_bytes / 1024))} كيلوبايت"
+          else:
+              size_text = f"{size_bytes / (1024 * 1024):.1f} ميجابايت"
+
+          run_num = int(os.environ["GITHUB_RUN_NUMBER"])
+          repo = os.environ["GITHUB_REPOSITORY"]
+          version = f"2.1.{run_num}"
+          native_version = os.environ.get("APP_NATIVE_VERSION", "2.1.0")
+
+          manifest = {
+              "version": version,
+              "buildNumber": run_num,
+              "nativeVersion": native_version,
+              "minNativeVersion": native_version,
+              "updateSizeBytes": size_bytes,
+              "updateSizeText": size_text,
+              "sizeMb": size_mb,
+              "notes": "تحديث خفيف وسريع لتطبيق كروت طيبة نت — إشعارات التحديث الفورية، تحسين طلبات التغذية والعمل أوفلاين والأداء العام.",
+              "bundleUrl": f"https://github.com/{repo}/releases/latest/download/update.zip",
+              "otaUrl": f"https://github.com/{repo}/releases/latest/download/update.zip",
+              "apkUrl": f"https://github.com/{repo}/releases/latest/download/TaibahNet-Cards.apk",
+              "publishedAt": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
           }
-          EOF
-          echo "=== Generated OTA Manifest (version.json) ==="
-          cat version.json
+          with open("version.json", "w", encoding="utf-8") as f:
+              json.dump(manifest, f, ensure_ascii=False, indent=2)
+          print("=== Generated OTA Manifest (version.json) ===")
+          print(json.dumps(manifest, ensure_ascii=False, indent=2))
+          PYEOF
           ls -lh update.zip
 
       - name: Initialize & Sync Capacitor Android Project with Native Plugins
@@ -87,13 +116,17 @@ jobs:
           fi
           npx cap sync android
 
-          # Integrate Native AndroidX BiometricPrompt Plugin (TaibahBiometricPlugin.java)
+          # Integrate Native AndroidX BiometricPrompt & WorkManager OTA Update Notifier Plugins
           JAVA_PKG_DIR="android/app/src/main/java/net/taibah/wireless"
           mkdir -p "$JAVA_PKG_DIR"
           cp -f native-android/TaibahBiometricPlugin.java "$JAVA_PKG_DIR/TaibahBiometricPlugin.java"
+          cp -f native-android/UpdateCheckWorker.java "$JAVA_PKG_DIR/UpdateCheckWorker.java"
+          cp -f native-android/TaibahUpdateNotifierPlugin.java "$JAVA_PKG_DIR/TaibahUpdateNotifierPlugin.java"
           test -s "$JAVA_PKG_DIR/TaibahBiometricPlugin.java" || { echo "::error::TaibahBiometricPlugin.java copy failed"; exit 1; }
+          test -s "$JAVA_PKG_DIR/UpdateCheckWorker.java" || { echo "::error::UpdateCheckWorker.java copy failed"; exit 1; }
+          test -s "$JAVA_PKG_DIR/TaibahUpdateNotifierPlugin.java" || { echo "::error::TaibahUpdateNotifierPlugin.java copy failed"; exit 1; }
 
-          # Register TaibahBiometricPlugin in MainActivity BEFORE super.onCreate(savedInstanceState)
+          # Register TaibahBiometricPlugin & TaibahUpdateNotifierPlugin in MainActivity BEFORE super.onCreate(savedInstanceState)
           python3 - <<'PYEOF'
           import os, re
           main_activity = "android/app/src/main/java/net/taibah/wireless/MainActivity.java"
@@ -103,25 +136,32 @@ jobs:
           with open(main_activity, "r", encoding="utf-8") as f:
               src = f.read()
 
-          if "TaibahBiometricPlugin.class" not in src:
-              if "import android.os.Bundle;" not in src:
-                  src = re.sub(
-                      r'(package\s+net\.taibah\.wireless;\s*)',
-                      '\\1\nimport android.os.Bundle;\n',
-                      src,
-                      count=1
-                  )
+          if "import android.os.Bundle;" not in src:
+              src = re.sub(
+                  r'(package\s+net\.taibah\.wireless;\s*)',
+                  '\\1\nimport android.os.Bundle;\n',
+                  src,
+                  count=1
+              )
+
+          plugins_to_register = [
+              "TaibahBiometricPlugin.class",
+              "TaibahUpdateNotifierPlugin.class",
+          ]
+          missing = [p for p in plugins_to_register if p not in src]
+          if missing:
+              reg_lines = "\n        ".join(f"registerPlugin({p});" for p in missing)
               if re.search(r'super\.onCreate\s*\(\s*savedInstanceState\s*\)\s*;', src):
                   src = re.sub(
                       r'(super\.onCreate\s*\(\s*savedInstanceState\s*\)\s*;)',
-                      'registerPlugin(TaibahBiometricPlugin.class);\n        \\1',
+                      f'{reg_lines}\n        \\1',
                       src,
                       count=1
                   )
               else:
                   src = re.sub(
                       r'(public\s+class\s+MainActivity\s+extends\s+BridgeActivity\s*\{)',
-                      '\\1\n    @Override\n    public void onCreate(Bundle savedInstanceState) {\n        registerPlugin(TaibahBiometricPlugin.class);\n        super.onCreate(savedInstanceState);\n    }\n',
+                      f'\\1\n    @Override\n    public void onCreate(Bundle savedInstanceState) {{\n        {reg_lines}\n        super.onCreate(savedInstanceState);\n    }}\n',
                       src,
                       count=1
                   )
@@ -131,22 +171,28 @@ jobs:
           print(src)
           PYEOF
 
-          # Ensure androidx.biometric:biometric:1.1.0 dependency is declared in android/app/build.gradle
+          # Ensure androidx.biometric:biometric:1.1.0 & androidx.work:work-runtime:2.9.0 dependencies are declared
           python3 - <<'PYEOF'
           import re
           gradle_path = "android/app/build.gradle"
           with open(gradle_path, "r", encoding="utf-8") as f:
               txt = f.read()
-          if "androidx.biometric:biometric:" not in txt:
-              txt = re.sub(
-                  r'(dependencies\s*\{)',
-                  '\\1\n    implementation "androidx.biometric:biometric:1.1.0"',
-                  txt,
-                  count=1
-              )
-              with open(gradle_path, "w", encoding="utf-8") as f:
-                  f.write(txt)
-          print("Verified androidx.biometric:biometric:1.1.0 in android/app/build.gradle")
+          deps_to_add = [
+              'implementation "androidx.biometric:biometric:1.1.0"',
+              'implementation "androidx.work:work-runtime:2.9.0"',
+          ]
+          for dep in deps_to_add:
+              artifact = dep.split('"')[1].rsplit(':', 1)[0]
+              if artifact not in txt:
+                  txt = re.sub(
+                      r'(dependencies\s*\{)',
+                      f'\\1\n    {dep}',
+                      txt,
+                      count=1
+                  )
+          with open(gradle_path, "w", encoding="utf-8") as f:
+              f.write(txt)
+          print("Verified androidx.biometric & androidx.work:work-runtime:2.9.0 in android/app/build.gradle")
           PYEOF
 
       - name: Generate Full Circular Uncropped Android Adaptive Icon, Round Launcher & Splash
@@ -267,7 +313,7 @@ jobs:
           APP_GRADLE="android/app/build.gradle"
           sed -i -E 's/(minSdk(Version)?[[:space:]]*=?[[:space:]]*)[0-9]+/\123/' "$APP_GRADLE"
           VERSION_CODE=$((1000 + GITHUB_RUN_NUMBER))
-          VERSION_NAME="2.0.${GITHUB_RUN_NUMBER}"
+          VERSION_NAME="2.1.${GITHUB_RUN_NUMBER}"
           sed -i -E "s/versionCode\s+[0-9]+/versionCode ${VERSION_CODE}/" "$APP_GRADLE"
           sed -i -E "s/versionName\s+\"[^\"]+\"/versionName \"${VERSION_NAME}\"/" "$APP_GRADLE"
           echo "=== Configured APK Version: versionCode=${VERSION_CODE}, versionName=${VERSION_NAME} ==="

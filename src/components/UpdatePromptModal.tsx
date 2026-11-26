@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
-import { BellRing, DownloadCloud, ExternalLink, Loader2, Sparkles, X } from 'lucide-react';
+import { BellRing, DownloadCloud, ExternalLink, Loader2, ShieldCheck, Sparkles, X } from 'lucide-react';
 import {
   downloadAndApplyAppUpdate,
+  formatUpdateSizeAr,
+  resolveManifestSizeText,
   saveUpdateSnooze,
   type AppUpdateManifest,
 } from '../services/updaterService';
@@ -24,9 +26,15 @@ export const UpdatePromptModal: React.FC<UpdatePromptModalProps> = ({
 
   if (!manifest) return null;
 
+  const sizeText = resolveManifestSizeText(manifest);
+  const totalBytes =
+    manifest.updateSizeBytes ||
+    (manifest.sizeMb ? Math.round(manifest.sizeMb * 1024 * 1024) : 0);
+  const downloadedBytes = totalBytes > 0 ? Math.round((totalBytes * progress) / 100) : 0;
+
   const handleSnooze = () => {
     if (downloading) return;
-    saveUpdateSnooze(manifest.version);
+    saveUpdateSnooze(manifest.version, manifest.buildNumber);
     onDismiss();
   };
 
@@ -42,7 +50,9 @@ export const UpdatePromptModal: React.FC<UpdatePromptModalProps> = ({
         (pct) => setProgress(pct)
       );
       if (!result.ok) {
-        setErrorText(result.message || 'تعذر تثبيت التحديث الخفيف — يمكنك تحميل ملف APK المباشر بالأسفل.');
+        setErrorText(
+          result.message || 'تعذر تثبيت التحديث الخفيف — يمكنك تحميل ملف APK المباشر بالأسفل.'
+        );
         setDownloading(false);
       } else if (result.mode === 'apk') {
         setDownloading(false);
@@ -80,12 +90,11 @@ export const UpdatePromptModal: React.FC<UpdatePromptModalProps> = ({
             <div className="min-w-0">
               <h3 className="text-[13.5px] sm:text-sm font-extrabold text-white flex items-center gap-1.5 leading-snug">
                 <Sparkles className="w-4 h-4 text-[#FDE68A] shrink-0" />
-                <span>يتوفر تحديث جديد لتطبيق طيبة نت</span>
+                <span>تحديث جديد لتطبيق كروت طيبة نت</span>
               </h3>
               <p className="text-[11px] font-bold text-[#FDE68A] tabular-nums">
                 الإصدار: v{manifest.version}
                 {manifest.buildNumber ? ` (#${manifest.buildNumber})` : ''}
-                {manifest.sizeMb ? ` • ${manifest.sizeMb.toFixed(1)} ميجا` : ''}
               </p>
             </div>
           </div>
@@ -102,15 +111,31 @@ export const UpdatePromptModal: React.FC<UpdatePromptModalProps> = ({
           )}
         </div>
 
-        <div className="p-4 space-y-3.5">
-          {/* Update Type, Size & Notes */}
-          <div className="rounded-2xl bg-slate-50 dark:bg-slate-800/90 border-2 border-[#D4AF37]/75 p-3 space-y-1.5">
+        <div className="p-4 space-y-3">
+          {/* Lightweight Size Guarantee Banner */}
+          <div
+            className={`rounded-2xl border-2 px-3 py-2 flex items-start gap-2 ${
+              requiresNativeApk
+                ? 'bg-amber-50 dark:bg-amber-950/40 border-amber-500 text-amber-900 dark:text-amber-200'
+                : 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-500 text-emerald-900 dark:text-emerald-200'
+            }`}
+          >
+            <ShieldCheck className="w-4 h-4 shrink-0 mt-0.5" />
+            <p className="text-[11.5px] font-extrabold leading-relaxed">
+              {requiresNativeApk
+                ? `يتطلب هذا الإصدار تحديث التطبيق الأساسي (APK) — جميع بياناتك وحسابك محفوظة ولن تتأثر.`
+                : `حجم التحديث: ${sizeText} فقط — لا يحتاج تحميل التطبيق بالكامل ولا يفقد بياناتك`}
+            </p>
+          </div>
+
+          {/* Update Notes */}
+          <div className="rounded-2xl bg-slate-50 dark:bg-slate-800/90 border border-[#D4AF37]/60 p-3 space-y-1.5">
             <div className="flex items-center justify-between gap-2 text-xs font-extrabold text-[#1A365D] dark:text-[#FDE68A]">
               <span>
-                {requiresNativeApk ? 'تحديث شامل (APK فوق التطبيق)' : 'تحديث خفيف وفوري (OTA)'}
+                {requiresNativeApk ? 'تحديث أساسي (APK)' : 'تحديث خفيف وفوري (OTA)'}
               </span>
-              <span className="tabular-nums text-[11px] px-2 py-0.5 rounded-lg bg-[#1A365D] text-[#FDE68A] border border-[#D4AF37]">
-                {manifest.sizeMb ? `${manifest.sizeMb.toFixed(1)} MB` : `v${manifest.version}`}
+              <span className="tabular-nums text-[10.5px] px-2 py-0.5 rounded-lg bg-[#1A365D] text-[#FDE68A] border border-[#D4AF37]">
+                {sizeText}
               </span>
             </div>
             <p className="text-xs font-bold text-slate-700 dark:text-slate-200 leading-relaxed whitespace-pre-line">
@@ -119,19 +144,23 @@ export const UpdatePromptModal: React.FC<UpdatePromptModalProps> = ({
             </p>
           </div>
 
-          {/* Live 0%–100% Download Progress Bar */}
+          {/* Live 0%–100% Download Progress Bar + Downloaded Size */}
           {downloading && (
             <div className="space-y-1.5">
-              <div className="flex items-center justify-between text-xs font-extrabold text-[#1A365D] dark:text-[#FDE68A] tabular-nums">
+              <div className="flex items-center justify-between text-[11px] font-extrabold text-[#1A365D] dark:text-[#FDE68A] tabular-nums">
                 <span className="flex items-center gap-1.5">
                   <Loader2 className="w-3.5 h-3.5 animate-spin" />
                   <span>
                     {progress >= 100
-                      ? 'جاري التثبيت وإعادة التشغيل...'
-                      : 'جاري تحميل التحديث...'}
+                      ? 'جاري التطبيق وإعادة التحميل...'
+                      : 'جاري تحميل التحديث الخفيف...'}
                   </span>
                 </span>
-                <span>{progress}%</span>
+                <span>
+                  {downloadedBytes > 0
+                    ? `${formatUpdateSizeAr(downloadedBytes)} / ${sizeText} (${progress}%)`
+                    : `${progress}%`}
+                </span>
               </div>
               <div className="w-full h-3 rounded-full bg-slate-200 dark:bg-slate-800 border-2 border-[#D4AF37]/80 overflow-hidden">
                 <div

@@ -16,8 +16,15 @@ import {
 } from './lib/sessionGuard';
 import {
   checkForAppUpdate,
+  clearUpdateSnooze,
+  configureNativeUpdateNotifier,
+  consumePendingUpdateDialogIntent,
+  hasDeferredUpdate,
   isUpdateSnoozedForCurrentSession,
+  listenForUpdateDialogIntent,
   notifyUpdaterReady,
+  requestNativeNotificationPermissionOnce,
+  subscribeDeferredUpdateChanges,
   type AppUpdateManifest,
 } from './services/updaterService';
 import type { AppRoute } from './types/taibah';
@@ -90,17 +97,28 @@ const TaibahAppShell: React.FC = () => {
     manifest: AppUpdateManifest;
     requiresNativeApk: boolean;
   } | null>(null);
+  const [deferredUpdate, setDeferredUpdate] = useState<boolean>(() => hasDeferredUpdate());
+
+  useEffect(() => {
+    return subscribeDeferredUpdateChanges(() => {
+      setDeferredUpdate(hasDeferredUpdate());
+    });
+  }, []);
 
   const runUpdateCheck = useCallback(
-    async (silent: boolean): Promise<void> => {
+    async (silent: boolean, ignoreSnooze = false): Promise<void> => {
       try {
+        if (!silent || ignoreSnooze) {
+          clearUpdateSnooze();
+        }
         const result = await checkForAppUpdate({
           apkDownloadUrl: appSettings?.apkDownloadUrl,
           silent,
         });
 
         if (result.hasUpdate && result.manifest) {
-          if (silent && isUpdateSnoozedForCurrentSession(result.manifest.version)) {
+          if (silent && !ignoreSnooze && isUpdateSnoozedForCurrentSession(result.manifest.version)) {
+            setDeferredUpdate(true);
             return;
           }
           setAvailableUpdate({
@@ -185,11 +203,42 @@ const TaibahAppShell: React.FC = () => {
     return () => window.clearTimeout(preloadTimer);
   }, [isFullyVerifiedSession]);
 
-  // 3. Automatic Silent Update Check 3 seconds after entering the workspace (ALL users: Admin, Agent, Client)
+  // 3. Automatic Silent Update Check + Native WorkManager Background Notifier (ALL users: Admin, Agent, Client)
   useEffect(() => {
     if (!isFullyVerifiedSession) return;
 
     let cancelled = false;
+    const listenerBox: { remove: (() => void) | null } = { remove: null };
+
+    // Configure native Android background WorkManager (checks every 2 hours even when app is closed)
+    void configureNativeUpdateNotifier(appSettings?.apkDownloadUrl, true);
+
+    // Gently request POST_NOTIFICATIONS permission once on Android 13+ after first login
+    const notifPermTimer = window.setTimeout(() => {
+      if (!cancelled) {
+        void requestNativeNotificationPermissionOnce();
+      }
+    }, 1800);
+
+    // If user opened app by tapping a native system update notification, open UpdatePromptModal immediately
+    void consumePendingUpdateDialogIntent().then((openedFromNotif) => {
+      if (!cancelled && openedFromNotif) {
+        void runUpdateCheck(false, true);
+      }
+    });
+
+    void listenForUpdateDialogIntent(() => {
+      if (!cancelled) {
+        void runUpdateCheck(false, true);
+      }
+    }).then((cleanup) => {
+      if (cancelled) {
+        cleanup?.();
+      } else {
+        listenerBox.remove = cleanup;
+      }
+    });
+
     const initialCheckTimer = window.setTimeout(() => {
       if (!cancelled) void runUpdateCheck(true);
     }, 3000);
@@ -218,12 +267,14 @@ const TaibahAppShell: React.FC = () => {
 
     return () => {
       cancelled = true;
+      window.clearTimeout(notifPermTimer);
       window.clearTimeout(initialCheckTimer);
+      listenerBox.remove?.();
       if (appStateHandle) {
         void appStateHandle.remove().catch(() => {});
       }
     };
-  }, [isFullyVerifiedSession, runUpdateCheck]);
+  }, [appSettings?.apkDownloadUrl, isFullyVerifiedSession, runUpdateCheck]);
 
   const [isDark, setIsDark] = useState<boolean>(() => {
     try {
@@ -346,6 +397,7 @@ const TaibahAppShell: React.FC = () => {
             onToggleTheme={toggleTheme}
             hideNumbers={hideNumbers}
             onToggleHideNumbers={toggleHideNumbers}
+            hasDeferredUpdate={deferredUpdate}
           />
         </ErrorBoundary>
       ) : (
@@ -356,7 +408,8 @@ const TaibahAppShell: React.FC = () => {
           isDark={isDark}
           onToggleTheme={toggleTheme}
           hideNumbers={hideNumbers}
-          onManualCheckUpdate={() => runUpdateCheck(false)}
+          hasDeferredUpdate={deferredUpdate}
+          onManualCheckUpdate={() => runUpdateCheck(false, true)}
         />
       )}
 

@@ -53,6 +53,7 @@ interface WholesaleCardsScreenProps {
 
 export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode, hideNumbers }) => {
   const {
+    profile,
     packages,
     managedUsers,
     customers,
@@ -61,11 +62,13 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
     executeSaleTransaction,
     deliverPartialCards,
     createCustomerAccount,
+    openTopupForPackage,
   } = useFirebase();
   const { notifySuccess, notifyWarning, notifyError } = useFeedback();
 
   const displayPackages = packages.length > 0 ? packages : (EXCLUSIVE_PACKAGES as PackageDoc[]);
   const isElectronic = mode === 'electronic';
+  const isAdmin = profile?.role === 'super_admin';
 
   // Recipient Selection
   const [selectedRecipientKey, setSelectedRecipientKey] = useState('');
@@ -598,6 +601,7 @@ export const WholesaleCardsScreen: React.FC<WholesaleCardsScreenProps> = ({ mode
               onSetQty={setQtyDirect}
               onConfirm={handleTileConfirm}
               onClearOrDelete={handleClearPkg}
+              onRequestTopup={!isAdmin && isElectronic ? openTopupForPackage : undefined}
             />
           );
         })}
