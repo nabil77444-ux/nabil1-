@@ -1,0 +1,32 @@
+{
+  "version": "2.1.36",
+  "buildNumber": 36,
+  "versionCode": 1036,
+  "nativeVersion": "2.1.0",
+  "minNativeVersion": "2.1.0",
+  "updateSizeBytes": 1131800,
+  "updateSizeText": "1.1 ميجابايت",
+  "sizeMb": 1.08,
+  "releaseTitle": "إصلاح اكتشاف التحديثات الجديدة فورياً",
+  "releaseSummary": "مقارنة جميع مصادر التحديث واختيار أحدث إصدار تلقائياً مع تجاوز التخزين المؤقت.",
+  "changes": [
+    {
+      "type": "fix",
+      "text": "إصلاح عدم ظهور التحديثات الجديدة بسبب التخزين المؤقت أو تأخر تحديث أحد المرايا"
+    },
+    {
+      "type": "improve",
+      "text": "منع تكرار رسائل التنبيه عند فحص التحديثات وتسريع اكتشاف الإصدار الأحدث"
+    }
+  ],
+  "notes": "مقارنة جميع مصادر التحديث واختيار أحدث إصدار تلقائياً مع تجاوز التخزين المؤقت.\n• إصلاح عدم ظهور التحديثات الجديدة بسبب التخزين المؤقت أو تأخر تحديث أحد المرايا\n• منع تكرار رسائل التنبيه عند فحص التحديثات وتسريع اكتشاف الإصدار الأحدث",
+  "bundleUrl": "https://raw.githubusercontent.com/nabil77444-ux/nabil1-/ota-dist/update.zip?v=36",
+  "otaUrl": "https://raw.githubusercontent.com/nabil77444-ux/nabil1-/ota-dist/update.zip?v=36",
+  "bundleMirrors": [
+    "https://raw.githubusercontent.com/nabil77444-ux/nabil1-/ota-dist/update.zip?v=36",
+    "https://cdn.jsdelivr.net/gh/nabil77444-ux/nabil1-@ota-dist/update.zip?v=36",
+    "https://github.com/nabil77444-ux/nabil1-/releases/latest/download/update.zip"
+  ],
+  "apkUrl": "https://github.com/nabil77444-ux/nabil1-/releases/latest/download/TaibahNet-Cards.apk",
+  "publishedAt": "2026-11-27T14:30:34Z"
+}
