@@ -79,6 +79,7 @@ jobs:
           run_num = int(os.environ["GITHUB_RUN_NUMBER"])
           repo = os.environ["GITHUB_REPOSITORY"]
           version = f"2.1.{run_num}"
+          version_code = 1000 + run_num
           native_version = os.environ.get("APP_NATIVE_VERSION", "2.1.0")
 
           # Read structured Arabic release notes from release-notes.json (root)
@@ -144,6 +145,7 @@ jobs:
           manifest = {
               "version": version,
               "buildNumber": run_num,
+              "versionCode": version_code,
               "nativeVersion": native_version,
               "minNativeVersion": native_version,
               "updateSizeBytes": size_bytes,
@@ -184,6 +186,11 @@ jobs:
           git -C /tmp/ota-dist push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" HEAD:refs/heads/ota-dist
           rm -rf /tmp/ota-dist
           echo "Published version.json & update.zip to ota-dist CDN mirror branch cleanly (main untouched)."
+          echo "=== Purging jsDelivr CDN cache for ota-dist ==="
+          curl -fsS "https://purge.jsdelivr.net/gh/${{ github.repository }}@ota-dist/version.json" || true
+          echo ""
+          curl -fsS "https://purge.jsdelivr.net/gh/${{ github.repository }}@ota-dist/update.zip" || true
+          echo ""
 
       - name: Initialize & Sync Capacitor Android Project with Native Plugins
         run: |
@@ -526,6 +533,7 @@ jobs:
           draft: false
           prerelease: false
           make_latest: true
+          overwrite_files: true
           body_path: .github-release-final.md
           files: |
             version.json
@@ -533,3 +541,12 @@ jobs:
             TaibahNet-Cards.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Guarantee Clobber Upload & Latest Release Tag Verification
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release upload latest version.json update.zip TaibahNet-Cards.apk --clobber --repo "${{ github.repository }}"
+          gh release edit latest --latest --draft=false --prerelease=false --repo "${{ github.repository }}"
+          echo "Verified latest GitHub Release assets (--clobber) & Latest badge for v${{ env.APK_VERSION_NAME }}."

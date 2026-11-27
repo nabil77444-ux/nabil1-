@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Capacitor } from '@capacitor/core';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { FeedbackProvider, useFeedback } from './lib/feedback';
@@ -100,6 +100,16 @@ const TaibahAppShell: React.FC = () => {
     requiresNativeApk: boolean;
   } | null>(null);
   const [deferredUpdate, setDeferredUpdate] = useState<boolean>(() => hasDeferredUpdate());
+  const [isCheckingUpdate, setIsCheckingUpdate] = useState<boolean>(false);
+  const [lastUpdateCheckInfo, setLastUpdateCheckInfo] = useState<{
+    version?: string;
+    buildNumber?: number;
+    sourceLabel?: string;
+    hasUpdate: boolean;
+    checkedAt: number;
+    error?: string;
+  } | null>(null);
+  const updateCheckInFlightRef = useRef(false);
 
   useEffect(() => {
     return subscribeDeferredUpdateChanges(() => {
@@ -125,6 +135,11 @@ const TaibahAppShell: React.FC = () => {
 
   const runUpdateCheck = useCallback(
     async (silent: boolean, ignoreSnooze = false): Promise<void> => {
+      // Single-flight lock prevents double-taps & duplicate Toast notifications
+      if (updateCheckInFlightRef.current) {
+        return;
+      }
+
       // Never touch network or React state while the user is actively typing
       if (silent && isTextInputFocused()) {
         window.setTimeout(() => {
@@ -133,6 +148,11 @@ const TaibahAppShell: React.FC = () => {
           }
         }, 4000);
         return;
+      }
+
+      updateCheckInFlightRef.current = true;
+      if (!silent) {
+        setIsCheckingUpdate(true);
       }
 
       try {
@@ -145,6 +165,15 @@ const TaibahAppShell: React.FC = () => {
           canMirrorToFirestore: profile?.role === 'super_admin',
         });
 
+        setLastUpdateCheckInfo({
+          version: result.latestCheckedVersion || result.manifest?.version || result.currentVersion,
+          buildNumber: result.latestCheckedBuildNumber || result.manifest?.buildNumber,
+          sourceLabel: result.checkedSourceLabel || result.manifest?.sourceLabel,
+          hasUpdate: result.hasUpdate,
+          checkedAt: Date.now(),
+          error: result.error,
+        });
+
         if (result.hasUpdate && result.manifest) {
           if (silent && !ignoreSnooze && isUpdateSnoozedForCurrentSession(result.manifest.version)) {
             setDeferredUpdate(true);
@@ -155,21 +184,31 @@ const TaibahAppShell: React.FC = () => {
             requiresNativeApk: result.requiresNativeApk,
           });
           if (!silent) {
+            const srcSuffix = result.checkedSourceLabel ? ` (${result.checkedSourceLabel})` : '';
             notifyInfo(
               'يتوفر تحديث جديد لتطبيق طيبة نت',
-              `الإصدار الجديد: v${result.manifest.version}`
+              `الإصدار الجديد: v${result.manifest.version}${srcSuffix}`
             );
           }
         } else if (!silent) {
           if (result.error) {
             notifyInfo('تعذر الاتصال بسيرفر التحديثات', result.error);
           } else {
-            notifySuccess(`تطبيقك محدّث إلى آخر إصدار (v${result.currentVersion}) ✅`);
+            const latestVer = result.latestCheckedVersion || result.currentVersion;
+            const srcNote = result.checkedSourceLabel ? ` • المصدر: ${result.checkedSourceLabel}` : '';
+            notifySuccess(
+              `تطبيقك محدّث إلى آخر إصدار (v${result.currentVersion}) — آخر إصدار مفحوص: v${latestVer}${srcNote}`
+            );
           }
         }
       } catch {
         if (!silent) {
           notifyInfo('تعذر الاتصال بسيرفر التحديثات', 'يرجى التحقق من الإنترنت والمحاولة مجدداً.');
+        }
+      } finally {
+        updateCheckInFlightRef.current = false;
+        if (!silent) {
+          setIsCheckingUpdate(false);
         }
       }
     },
@@ -447,6 +486,8 @@ const TaibahAppShell: React.FC = () => {
           onToggleTheme={toggleTheme}
           hideNumbers={hideNumbers}
           hasDeferredUpdate={deferredUpdate}
+          isCheckingUpdate={isCheckingUpdate}
+          lastUpdateCheckInfo={lastUpdateCheckInfo}
           onManualCheckUpdate={() => runUpdateCheck(false, true)}
         />
       )}

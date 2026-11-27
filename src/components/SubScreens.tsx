@@ -222,6 +222,15 @@ interface ActiveSubScreenProps {
   onToggleTheme: () => void;
   hideNumbers: boolean;
   hasDeferredUpdate?: boolean;
+  isCheckingUpdate?: boolean;
+  lastUpdateCheckInfo?: {
+    version?: string;
+    buildNumber?: number;
+    sourceLabel?: string;
+    hasUpdate: boolean;
+    checkedAt: number;
+    error?: string;
+  } | null;
   onManualCheckUpdate?: () => void | Promise<void>;
 }
 
@@ -233,6 +242,8 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
   onToggleTheme,
   hideNumbers,
   hasDeferredUpdate = false,
+  isCheckingUpdate = false,
+  lastUpdateCheckInfo = null,
   onManualCheckUpdate,
 }) => {
   const {
@@ -842,9 +853,9 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
             </p>
             <button
               type="button"
-              disabled={checkingUpdate}
+              disabled={checkingUpdate || isCheckingUpdate}
               onClick={async () => {
-                if (checkingUpdate || !onManualCheckUpdate) return;
+                if (checkingUpdate || isCheckingUpdate || !onManualCheckUpdate) return;
                 setCheckingUpdate(true);
                 const updateGuard = window.setTimeout(() => setCheckingUpdate(false), 12000);
                 try {
@@ -854,17 +865,35 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
                   setCheckingUpdate(false);
                 }
               }}
-              className="w-full min-h-[44px] rounded-xl bg-gradient-to-b from-[#1E3A8A] via-[#1A365D] to-[#0F172A] border-2 border-[#D4AF37] text-white text-xs font-extrabold flex items-center justify-center gap-2 shadow active:scale-[0.99] transition-transform disabled:opacity-70"
+              className="w-full min-h-[44px] rounded-xl bg-gradient-to-b from-[#1E3A8A] via-[#1A365D] to-[#0F172A] border-2 border-[#D4AF37] text-white text-xs font-extrabold flex items-center justify-center gap-2 shadow active:scale-[0.99] transition-transform disabled:opacity-70 disabled:pointer-events-none"
             >
-              {checkingUpdate ? (
+              {checkingUpdate || isCheckingUpdate ? (
                 <Loader2 className="w-4 h-4 animate-spin text-[#FDE68A]" />
               ) : (
                 <DownloadCloud className="w-4 h-4 text-[#FDE68A]" />
               )}
               <span>
-                {checkingUpdate ? 'جاري فحص التحديثات...' : 'التحقق من وجود تحديث خفيف'}
+                {checkingUpdate || isCheckingUpdate
+                  ? 'جاري فحص جميع مصادر التحديث...'
+                  : 'التحقق من وجود تحديث خفيف'}
               </span>
             </button>
+            {lastUpdateCheckInfo && !lastUpdateCheckInfo.error && lastUpdateCheckInfo.version && (
+              <div className="rounded-xl bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 px-3 py-2 flex items-center justify-between gap-2 flex-wrap text-[11px] font-bold text-slate-600 dark:text-slate-300">
+                <span className="tabular-nums">
+                  آخر إصدار تم فحصه:{' '}
+                  <strong className="text-[#1A365D] dark:text-[#FDE68A]">
+                    v{lastUpdateCheckInfo.version}
+                    {lastUpdateCheckInfo.buildNumber ? ` (#${lastUpdateCheckInfo.buildNumber})` : ''}
+                  </strong>
+                </span>
+                {lastUpdateCheckInfo.sourceLabel && (
+                  <span className="text-[10.5px] font-extrabold text-emerald-700 dark:text-emerald-400">
+                    المصدر: {lastUpdateCheckInfo.sourceLabel}
+                  </span>
+                )}
+              </div>
+            )}
           </div>
 
           {pendingBioMethod && profile && (

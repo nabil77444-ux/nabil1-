@@ -907,13 +907,14 @@ service cloud.firestore {
     function isValidAppUpdateMetaDoc(data) {
       return data.keys().hasAll(['version', 'updatedAt']) &&
         data.keys().hasOnly([
-          'version', 'buildNumber', 'nativeVersion', 'minNativeVersion',
+          'version', 'buildNumber', 'versionCode', 'nativeVersion', 'minNativeVersion',
           'updateSizeBytes', 'updateSizeText', 'sizeMb',
           'releaseTitle', 'releaseSummary', 'changes', 'notes',
           'bundleUrl', 'otaUrl', 'bundleMirrors', 'apkUrl', 'publishedAt', 'updatedAt'
         ]) &&
         isValidString(data.version, 1, 32) &&
         (!('buildNumber' in data) || (data.buildNumber is number && data.buildNumber >= 0 && data.buildNumber <= 1000000)) &&
+        (!('versionCode' in data) || (data.versionCode is number && data.versionCode >= 0 && data.versionCode <= 10000000)) &&
         (!('nativeVersion' in data) || isValidString(data.nativeVersion, 0, 32)) &&
         (!('minNativeVersion' in data) || isValidString(data.minNativeVersion, 0, 32)) &&
         (!('updateSizeBytes' in data) || (data.updateSizeBytes is number && data.updateSizeBytes >= 0 && data.updateSizeBytes <= 200000000)) &&

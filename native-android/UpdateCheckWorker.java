@@ -24,6 +24,13 @@ import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -33,12 +40,15 @@ import java.util.regex.Pattern;
  * Periodic background Android WorkManager worker for TAIBAH NET (كروت طيبة نت).
  * - Runs every 2 hours (when NetworkType.CONNECTED) even while the app is closed.
  * - Uses BuildConfig.GITHUB_REPO (auto-injected by GitHub Actions / Gradle) with SharedPreferences override.
- * - Stage 1: Downloads `https://github.com/<REPO>/releases/latest/download/version.json` following
- *   cross-domain 301/302/303/307/308 redirects (github.com -> objects.githubusercontent.com).
- * - Stage 2 (404 fallback): Queries `https://api.github.com/repos/<REPO>/releases?per_page=1`
- *   to locate `version.json` / `update.zip` even if a release is marked pre-release.
- * - Compares remote `buildNumber` with local `currentBuildNumber` and displays a single
- *   high-priority Android notification per new buildNumber.
+ * - Queries ALL 3 remote sources in parallel (8s timeout per source, unique `?t=<NOW>`, `Cache-Control: no-cache`):
+ *     1) GitHub Releases Direct: `https://github.com/<REPO>/releases/latest/download/version.json?t=<NOW>`
+ *     2) GitHub Raw (`ota-dist`): `https://raw.githubusercontent.com/<REPO>/ota-dist/version.json?t=<NOW>`
+ *     3) jsDelivr CDN Mirror: `https://cdn.jsdelivr.net/gh/<REPO>@ota-dist/version.json?t=<NOW>`
+ *   Falls back to GitHub Releases API only if all 3 fail.
+ * - NEVER stops at the first responder; collects all valid JSON manifests and selects the single
+ *   highest release by `buildNumber` -> `versionCode` -> numeric semantic `version` parts.
+ * - Compares remote release vs local installed release using `isNewerRelease` and displays a single
+ *   high-priority Android notification per new release.
  */
 public class UpdateCheckWorker extends Worker {
 
@@ -46,15 +56,43 @@ public class UpdateCheckWorker extends Worker {
     public static final String KEY_CURRENT_BUILD = "currentBuildNumber";
     public static final String KEY_VERSION_URL = "versionJsonUrl";
     public static final String KEY_LAST_NOTIFIED_BUILD = "lastNotifiedBuild";
+    public static final String KEY_LAST_NOTIFIED_VERSION = "lastNotifiedVersion";
     public static final String KEY_PENDING_OPEN_DIALOG = "pendingOpenUpdateDialog";
 
     public static final String CHANNEL_ID = "taibah_updates_channel";
     public static final int NOTIFICATION_ID = 772466;
     public static final String EXTRA_OPEN_UPDATE_DIALOG = "OPEN_UPDATE_DIALOG";
 
+    private static final int SOURCE_TIMEOUT_MS = 8000;
+
     private static final Pattern GITHUB_REPO_PATTERN =
             Pattern.compile("github\\.com/([^/\\s]+/[^/\\s]+)", Pattern.CASE_INSENSITIVE);
     private static final Pattern SEMVER_PATTERN = Pattern.compile("(\\d+\\.\\d+\\.\\d+)");
+
+    private static final class ManifestCandidate {
+        final JSONObject json;
+        final int buildNumber;
+        final int versionCode;
+        final String version;
+        final int sourcePriority;
+
+        ManifestCandidate(JSONObject json, int sourcePriority) {
+            this.json = json;
+            this.version = json.optString("version", "").trim();
+            int rawBuild = json.optInt("buildNumber", 0);
+            int rawCode = json.optInt("versionCode", 0);
+            int derivedBuild = extractPatchBuild(this.version);
+            if (rawBuild > 0) {
+                this.buildNumber = rawBuild;
+            } else if (rawCode > 1000) {
+                this.buildNumber = rawCode - 1000;
+            } else {
+                this.buildNumber = derivedBuild;
+            }
+            this.versionCode = rawCode > 0 ? rawCode : (this.buildNumber > 0 ? 1000 + this.buildNumber : 0);
+            this.sourcePriority = sourcePriority;
+        }
+    }
 
     public UpdateCheckWorker(@NonNull Context context, @NonNull WorkerParameters workerParams) {
         super(context, workerParams);
@@ -106,6 +144,78 @@ public class UpdateCheckWorker extends Worker {
         return "";
     }
 
+    private static int[] parseVersionParts(String ver) {
+        if (ver == null || ver.trim().isEmpty()) {
+            return new int[] { 0, 0, 0 };
+        }
+        String cleaned = ver.trim().replaceFirst("^[vV]", "");
+        String[] tokens = cleaned.split("[^0-9]+");
+        List<Integer> nums = new ArrayList<>();
+        for (String t : tokens) {
+            if (t == null || t.isEmpty()) continue;
+            try {
+                nums.add(Integer.parseInt(t));
+            } catch (NumberFormatException ignored) {
+                nums.add(0);
+            }
+        }
+        int len = Math.max(nums.size(), 3);
+        int[] out = new int[len];
+        for (int i = 0; i < nums.size(); i++) {
+            out[i] = nums.get(i);
+        }
+        return out;
+    }
+
+    private static int extractPatchBuild(String ver) {
+        int[] parts = parseVersionParts(ver);
+        return parts.length >= 3 ? Math.max(0, parts[2]) : 0;
+    }
+
+    private static int compareSemver(String a, String b) {
+        int[] pa = parseVersionParts(a);
+        int[] pb = parseVersionParts(b);
+        int maxLen = Math.max(pa.length, pb.length);
+        for (int i = 0; i < maxLen; i++) {
+            int va = i < pa.length ? pa[i] : 0;
+            int vb = i < pb.length ? pb[i] : 0;
+            if (va != vb) return Integer.compare(va, vb);
+        }
+        return 0;
+    }
+
+    private static int compareCandidates(ManifestCandidate a, ManifestCandidate b) {
+        if (a.buildNumber != b.buildNumber) {
+            return Integer.compare(a.buildNumber, b.buildNumber);
+        }
+        if (a.versionCode != b.versionCode) {
+            return Integer.compare(a.versionCode, b.versionCode);
+        }
+        int semverCmp = compareSemver(a.version, b.version);
+        if (semverCmp != 0) {
+            return semverCmp;
+        }
+        return Integer.compare(a.sourcePriority, b.sourcePriority);
+    }
+
+    private static boolean isNewerRelease(
+            int remoteBuild,
+            int remoteVersionCode,
+            String remoteVersion,
+            int currentBuild,
+            int currentVersionCode,
+            String currentVersion
+    ) {
+        if (remoteBuild > 0 && currentBuild > 0 && remoteBuild > currentBuild) {
+            return true;
+        }
+        if (remoteVersionCode > 0 && currentVersionCode > 0 && remoteVersionCode > currentVersionCode) {
+            return true;
+        }
+        return remoteVersion != null && !remoteVersion.isEmpty()
+                && compareSemver(remoteVersion, currentVersion) > 0;
+    }
+
     @NonNull
     @Override
     public Result doWork() {
@@ -130,67 +240,96 @@ public class UpdateCheckWorker extends Worker {
         if (nativeBuild > currentBuild) {
             currentBuild = nativeBuild;
         }
+        int currentVersionCode = currentBuild > 0 ? (1000 + currentBuild) : 0;
+        String currentVersion = currentBuild > 0 ? ("2.1." + currentBuild) : "2.1.0";
+        try {
+            android.content.pm.PackageInfo pInfo =
+                    context.getPackageManager().getPackageInfo(context.getPackageName(), 0);
+            if (pInfo != null) {
+                if (pInfo.versionCode > currentVersionCode) {
+                    currentVersionCode = pInfo.versionCode;
+                }
+                if (pInfo.versionName != null && !pInfo.versionName.trim().isEmpty()
+                        && compareSemver(pInfo.versionName.trim(), currentVersion) > 0) {
+                    currentVersion = pInfo.versionName.trim();
+                }
+            }
+        } catch (Throwable ignored) {
+            // Keep BuildConfig / prefs baseline
+        }
+
         int lastNotifiedBuild = prefs.getInt(KEY_LAST_NOTIFIED_BUILD, 0);
+        String lastNotifiedVersion = prefs.getString(KEY_LAST_NOTIFIED_VERSION, "");
 
         if ((versionUrl == null || versionUrl.trim().isEmpty()) && repo.isEmpty()) {
             return Result.success();
         }
 
+        ExecutorService pool = Executors.newFixedThreadPool(3);
         try {
-            JSONObject manifestJson = null;
-            long ts = System.currentTimeMillis();
+            final long ts = System.currentTimeMillis();
+            List<Callable<ManifestCandidate>> tasks = new ArrayList<>();
 
-            // Stage 1A (Fastest Global CDN): jsDelivr ota-dist/version.json
+            // 1. GitHub Releases Direct (highest freshness priority)
+            final String releasesDirectUrl;
             if (!repo.isEmpty()) {
-                String cdnUrl = "https://cdn.jsdelivr.net/gh/" + repo + "@ota-dist/version.json?t=" + ts;
-                String jsonRaw = fetchTextFollowingRedirects(cdnUrl, 5);
-                if (jsonRaw != null && !jsonRaw.trim().isEmpty()) {
-                    try {
-                        manifestJson = new JSONObject(jsonRaw);
-                    } catch (Throwable ignored) {
-                        manifestJson = null;
-                    }
-                }
-            }
-
-            // Stage 1B (Fast Direct Mirror): GitHub Raw ota-dist/version.json
-            if (manifestJson == null && !repo.isEmpty()) {
-                String rawUrl = "https://raw.githubusercontent.com/" + repo + "/ota-dist/version.json?t=" + ts;
-                String jsonRaw = fetchTextFollowingRedirects(rawUrl, 5);
-                if (jsonRaw != null && !jsonRaw.trim().isEmpty()) {
-                    try {
-                        manifestJson = new JSONObject(jsonRaw);
-                    } catch (Throwable ignored) {
-                        manifestJson = null;
-                    }
-                }
-            }
-
-            // Stage 1C: Direct releases/latest/download/version.json
-            if (manifestJson == null && versionUrl != null && !versionUrl.trim().isEmpty()) {
+                releasesDirectUrl = "https://github.com/" + repo + "/releases/latest/download/version.json?t=" + ts;
+            } else {
                 String sep = versionUrl.contains("?") ? "&" : "?";
-                String fetchUrl = versionUrl.trim() + sep + "t=" + ts;
-                String jsonRaw = fetchTextFollowingRedirects(fetchUrl, 5);
-                if (jsonRaw != null && !jsonRaw.trim().isEmpty()) {
-                    try {
-                        manifestJson = new JSONObject(jsonRaw);
-                    } catch (Throwable ignored) {
-                        manifestJson = null;
+                releasesDirectUrl = versionUrl.trim() + sep + "t=" + ts;
+            }
+            tasks.add(() -> fetchCandidate(releasesDirectUrl, 3));
+
+            // 2. GitHub Raw (ota-dist branch)
+            if (!repo.isEmpty()) {
+                final String rawUrl = "https://raw.githubusercontent.com/" + repo + "/ota-dist/version.json?t=" + ts;
+                tasks.add(() -> fetchCandidate(rawUrl, 2));
+
+                // 3. jsDelivr Mirror (ota-dist branch)
+                final String cdnUrl = "https://cdn.jsdelivr.net/gh/" + repo + "@ota-dist/version.json?t=" + ts;
+                tasks.add(() -> fetchCandidate(cdnUrl, 1));
+            }
+
+            List<ManifestCandidate> candidates = new ArrayList<>();
+            List<Future<ManifestCandidate>> futures = pool.invokeAll(tasks, 10, TimeUnit.SECONDS);
+            for (Future<ManifestCandidate> f : futures) {
+                try {
+                    if (!f.isCancelled()) {
+                        ManifestCandidate c = f.get(1, TimeUnit.SECONDS);
+                        if (c != null) {
+                            candidates.add(c);
+                        }
                     }
+                } catch (Throwable ignored) {
+                    // Single source failed or timed out — keep collecting others
                 }
             }
 
-            // Stage 2 (404 / prerelease fallback): GitHub Releases list API (per_page=1)
-            if (manifestJson == null && !repo.isEmpty()) {
-                manifestJson = fetchManifestFromReleasesApi(repo);
+            // Fallback: GitHub Releases list API only if all direct sources failed
+            if (candidates.isEmpty() && !repo.isEmpty()) {
+                JSONObject apiManifest = fetchManifestFromReleasesApi(repo);
+                if (apiManifest != null) {
+                    candidates.add(new ManifestCandidate(apiManifest, 2));
+                }
             }
 
-            if (manifestJson == null) {
+            if (candidates.isEmpty()) {
                 return Result.retry();
             }
 
-            int remoteBuild = manifestJson.optInt("buildNumber", 0);
-            String remoteVersion = manifestJson.optString("version", "").trim();
+            // Pick the SINGLE highest release across ALL responded sources
+            ManifestCandidate best = candidates.get(0);
+            for (int i = 1; i < candidates.size(); i++) {
+                ManifestCandidate cand = candidates.get(i);
+                if (compareCandidates(cand, best) > 0) {
+                    best = cand;
+                }
+            }
+
+            JSONObject manifestJson = best.json;
+            int remoteBuild = best.buildNumber;
+            int remoteVersionCode = best.versionCode;
+            String remoteVersion = best.version;
             String updateSizeText = manifestJson.optString("updateSizeText", "").trim();
 
             if (updateSizeText.isEmpty()) {
@@ -209,7 +348,21 @@ public class UpdateCheckWorker extends Worker {
                 }
             }
 
-            if (remoteBuild > 0 && remoteBuild > currentBuild && remoteBuild > lastNotifiedBuild) {
+            boolean isNewerThanInstalled = isNewerRelease(
+                    remoteBuild,
+                    remoteVersionCode,
+                    remoteVersion,
+                    currentBuild,
+                    currentVersionCode,
+                    currentVersion
+            );
+            boolean alreadyNotified =
+                    (remoteBuild > 0 && remoteBuild <= lastNotifiedBuild)
+                            && (lastNotifiedVersion != null
+                            && !lastNotifiedVersion.isEmpty()
+                            && compareSemver(remoteVersion, lastNotifiedVersion) <= 0);
+
+            if (isNewerThanInstalled && !alreadyNotified) {
                 String releaseTitle = manifestJson.optString("releaseTitle", "").trim();
                 String releaseSummary = manifestJson.optString("releaseSummary", "").trim();
                 JSONArray changesArr = manifestJson.optJSONArray("changes");
@@ -221,13 +374,33 @@ public class UpdateCheckWorker extends Worker {
                         releaseSummary,
                         changesArr
                 );
-                prefs.edit().putInt(KEY_LAST_NOTIFIED_BUILD, remoteBuild).apply();
+                prefs.edit()
+                        .putInt(KEY_LAST_NOTIFIED_BUILD, Math.max(remoteBuild, lastNotifiedBuild))
+                        .putString(KEY_LAST_NOTIFIED_VERSION, remoteVersion)
+                        .apply();
             }
 
             return Result.success();
         } catch (Throwable ignored) {
             return Result.retry();
+        } finally {
+            pool.shutdownNow();
         }
+    }
+
+    private ManifestCandidate fetchCandidate(String url, int sourcePriority) {
+        try {
+            String jsonRaw = fetchTextFollowingRedirects(url, 5);
+            if (jsonRaw != null && !jsonRaw.trim().isEmpty()) {
+                JSONObject obj = new JSONObject(jsonRaw);
+                if (!obj.optString("version", "").trim().isEmpty()) {
+                    return new ManifestCandidate(obj, sourcePriority);
+                }
+            }
+        } catch (Throwable ignored) {
+            // Non-fatal single-source failure
+        }
+        return null;
     }
 
     private JSONObject fetchManifestFromReleasesApi(String repo) {
@@ -317,12 +490,13 @@ public class UpdateCheckWorker extends Worker {
                 conn = (HttpURLConnection) url.openConnection();
                 conn.setRequestMethod("GET");
                 conn.setInstanceFollowRedirects(true);
-                conn.setConnectTimeout(10000);
-                conn.setReadTimeout(10000);
+                conn.setConnectTimeout(SOURCE_TIMEOUT_MS);
+                conn.setReadTimeout(SOURCE_TIMEOUT_MS);
                 conn.setUseCaches(false);
                 conn.setRequestProperty("User-Agent", "TaibahNet-Android-Updater/2.1");
                 conn.setRequestProperty("Accept", "application/vnd.github+json, application/json");
-                conn.setRequestProperty("Cache-Control", "no-cache");
+                conn.setRequestProperty("Cache-Control", "no-cache, no-store, max-age=0");
+                conn.setRequestProperty("Pragma", "no-cache");
 
                 int code = conn.getResponseCode();
                 if (code == HttpURLConnection.HTTP_MOVED_PERM

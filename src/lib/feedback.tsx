@@ -68,6 +68,7 @@ function playFeedbackTone(variant: ToastVariant) {
 
 export const FeedbackProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const recentToastRef = React.useRef<{ key: string; at: number } | null>(null);
 
   const dismiss = useCallback((id: string) => {
     setToasts((prev) => prev.filter((item) => item.id !== id));
@@ -75,8 +76,28 @@ export const FeedbackProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const pushToast = useCallback(
     (variant: ToastVariant, title: string, detail?: string) => {
-      const id = `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-      setToasts((prev) => [...prev.slice(-3), { id, variant, title, detail }]);
+      const dedupeKey = `${variant}::${title.trim()}::${(detail || '').trim()}`;
+      const now = Date.now();
+      if (
+        recentToastRef.current &&
+        recentToastRef.current.key === dedupeKey &&
+        now - recentToastRef.current.at < 2600
+      ) {
+        return;
+      }
+      recentToastRef.current = { key: dedupeKey, at: now };
+
+      const id = `${now}_${Math.random().toString(36).slice(2, 7)}`;
+      setToasts((prev) => {
+        const alreadyVisible = prev.some(
+          (t) =>
+            t.variant === variant &&
+            t.title.trim() === title.trim() &&
+            (t.detail || '').trim() === (detail || '').trim()
+        );
+        if (alreadyVisible) return prev;
+        return [...prev.slice(-3), { id, variant, title, detail }];
+      });
       playFeedbackTone(variant);
       setTimeout(() => {
         dismiss(id);
