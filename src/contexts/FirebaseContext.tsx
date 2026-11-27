@@ -84,14 +84,18 @@ import {
   canonicalPackageId,
   clearAllLocalOfflineCardCaches,
   clearOfflineSalesQueueOnly,
-  consumeCachedAvailableCardsForOwners,
   enqueueOfflineSale,
   getCachedAvailableCardsForOwners,
   getPendingOfflineSales,
+  getPendingSoldCardIds,
+  getSellableCardsForPackage,
+  hydrateOfflineCardsFromIDB,
   isCardLocallyLocked,
   lockCardsLocally,
   markCardIdsPendingSold,
+  markCardsSoldInLocalPool,
   offlineSaleToSaleDoc,
+  parseNormalizedPrice,
   releaseCardLocksLocally,
   releasePendingSoldCardIds,
   removeCardsFromCacheForOwners,
@@ -183,6 +187,7 @@ interface FirebaseContextValue {
   clearPrefillTopupPackage: () => void;
   openTopupForPackage: (packageId: string) => void;
   packages: PackageDoc[];
+  localOfflineCards: CachedAvailableCard[];
   totalAvailableCards: number;
   personalStockSplit: PersonalStockSplit;
   sales: SaleDoc[];
@@ -711,6 +716,10 @@ function buildOwnerIdentifiers(
   const phoneDigits = normalizePhoneDigits(p?.phone);
   if (phoneDigits.length >= 7) push(phoneDigits);
   if (p?.email) push(p.email.trim().toLowerCase());
+  if (p?.role === 'super_admin') {
+    push('super_admin');
+    push('admin');
+  }
   return out;
 }
 
@@ -772,6 +781,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     return uid ? readCachedJson<Record<string, number>>(`taibah_paper_stock_v1_${uid}`, {}) : {};
   });
   const [offlinePoolVersion, setOfflinePoolVersion] = useState(0);
+  const [idbHydratedForUid, setIdbHydratedForUid] = useState<string>('');
   const [pendingOfflineSales, setPendingOfflineSales] = useState<OfflineQueuedSale[]>(() =>
     getPendingOfflineSales()
   );
@@ -2177,6 +2187,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               notifySuccess(
                 `تمت الموافقة على طلب التغذية (${item.totalCards} كرت) وإضافة الكروت إلى مخزونك ✅`
               );
+              setSyncNonce((n) => n + 1);
             } else if (
               item.requesterId !== activeUser.uid &&
               item.status === 'pending' &&
@@ -2270,6 +2281,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                   notifySuccess(
                     `تمت الموافقة على طلب التغذية (${item.totalCards} كرت) وإضافة الكروت إلى مخزونك ✅`
                   );
+                  setSyncNonce((n) => n + 1);
                 }
               }
             }
@@ -2618,11 +2630,40 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     syncNonce,
   ]);
 
-  // Account-isolated packages view: Super Admin sees central inventory; Agents & Clients see ONLY their own cards!
+  // Hydrate high-capacity IndexedDB (`taibah_offline_cards_db`) into RAM immediately on login / user switch
+  useEffect(() => {
+    const activeUid = profile?.uid || auth.currentUser?.uid || firebaseUser?.uid || '';
+    if (!activeUid || !profile) return;
+    let cancelled = false;
+    const ownerIds = buildOwnerIdentifiers(profile, activeUid);
+    void hydrateOfflineCardsFromIDB(ownerIds).then((hydrated) => {
+      if (cancelled) return;
+      setIdbHydratedForUid(activeUid);
+      if (hydrated.length > 0) {
+        setOfflinePoolVersion((v) => v + 1);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [profile?.uid, profile?.role, profile?.linkedSourceId, profile?.phone, firebaseUser?.uid]);
+
+  // Unified live in-memory pool of locally stored cards (backed by IndexedDB + RAM)
+  const localOfflineCards = useMemo<CachedAvailableCard[]>(() => {
+    const activeUid = auth.currentUser?.uid || firebaseUser?.uid || profile?.uid || '';
+    if (!activeUid || !profile) return [];
+    const ownerIds = buildOwnerIdentifiers(profile, activeUid);
+    return ownerIds.length > 0 ? getCachedAvailableCardsForOwners(ownerIds) : [];
+  }, [profile, firebaseUser?.uid, offlinePoolVersion, idbHydratedForUid, pendingOfflineSales]);
+
+  // Account-isolated packages view:
+  // Uses the EXACT same `getSellableCardsForPackage(...)` single source of truth for offline counts
+  // so it is mathematically impossible to show `المتاح: X` and then fail with insufficient local stock!
   const packages = useMemo<PackageDoc[]>(() => {
     const baseList = rawPackages.length > 0 ? rawPackages : (EXCLUSIVE_PACKAGES as PackageDoc[]);
     const activeUid = auth.currentUser?.uid || firebaseUser?.uid || profile?.uid || '';
     const isAdmin = profile?.role === 'super_admin';
+    const pendingSoldIds = getPendingSoldCardIds();
 
     // Subtract any unsynced offline sales for instant accurate counts
     const offlineSoldByPkg: Record<string, number> = {};
@@ -2635,36 +2676,43 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       }
     }
 
+    const sellableLocalByPkg: Record<string, number> = {};
+    for (const pkg of baseList) {
+      sellableLocalByPkg[pkg.id] = getSellableCardsForPackage(
+        localOfflineCards,
+        pkg,
+        profile,
+        pendingSoldIds
+      ).length;
+    }
+
     if (isAdmin) {
       return baseList.map((pkg) => {
         const offlineUsed = offlineSoldByPkg[pkg.id] || 0;
+        const localSellable = sellableLocalByPkg[pkg.id] || 0;
+        const serverAvail = Math.max(0, (Number(pkg.availableCount) || 0) - offlineUsed);
+        // Offline: show strictly real locally sellable cards from IndexedDB/RAM (zero false stock mismatch!)
+        // Online: show server count (or local if freshly cached/uploaded)
+        const avail = !isOnline ? localSellable : Math.max(serverAvail, localSellable);
         return {
           ...pkg,
-          availableCount: Math.max(0, (Number(pkg.availableCount) || 0) - offlineUsed),
+          availableCount: avail,
           soldCount: (Number(pkg.soldCount) || 0) + offlineUsed,
         };
       });
     }
 
     // Strict Isolation for Agent & Client: NEVER expose Admin's availableCount/uploadedCount/soldCount/injectedCount
-    const ownerIds = buildOwnerIdentifiers(profile, activeUid);
-    const cachedOfflinePool = ownerIds.length > 0 ? getCachedAvailableCardsForOwners(ownerIds) : [];
-    const cachedByPkg: Record<string, number> = {};
-    for (const c of cachedOfflinePool) {
-      const normPkg = canonicalPackageId(c.packageId);
-      if (!normPkg) continue;
-      cachedByPkg[normPkg] = (cachedByPkg[normPkg] || 0) + 1;
-    }
-
     return baseList.map((pkg) => {
       const livePersonal = personalCardCounts[pkg.id];
-      const cachedCount = cachedByPkg[pkg.id] || 0;
+      const localSellable = sellableLocalByPkg[pkg.id] || 0;
       const offlineUsed = offlineSoldByPkg[pkg.id] || 0;
-      // Server Snapshot + Pending Queue Overlay:
-      // `cachedOfflinePool` ALREADY excludes locally locked & pending-sold cards,
-      // while `livePersonal` (from server stats) may still include them until sync finishes.
       const serverAvail = Math.max(0, (livePersonal ?? 0) - offlineUsed);
-      const baseAvail = cachedCount > 0 ? Math.max(cachedCount, serverAvail) : serverAvail;
+      const baseAvail = !isOnline
+        ? localSellable
+        : localSellable > 0
+          ? Math.max(localSellable, serverAvail)
+          : serverAvail;
       return {
         ...pkg,
         availableCount: baseAvail,
@@ -2673,7 +2721,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         injectedCount: 0,
       };
     });
-  }, [rawPackages, profile, firebaseUser?.uid, personalCardCounts, personalSoldCounts, pendingOfflineSales, offlinePoolVersion]);
+  }, [rawPackages, profile, firebaseUser?.uid, personalCardCounts, personalSoldCounts, pendingOfflineSales, localOfflineCards, isOnline]);
 
   // Merge pending offline sales at the top of live Firestore sales so they show up immediately in all lists/reports
   const mergedSales = useMemo<SaleDoc[]>(() => {
@@ -2713,18 +2761,14 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       return { electronicByPkg, paperByPkg, totalElectronic, totalPaper: 0 };
     }
 
-    const ownerIds = buildOwnerIdentifiers(profile, activeUid);
-    const cachedPool = ownerIds.length > 0 ? getCachedAvailableCardsForOwners(ownerIds) : [];
-    const cachedElecByPkg: Record<string, number> = {};
+    const pendingSoldIds = getPendingSoldCardIds();
     const cachedPaperByPkg: Record<string, number> = {};
 
-    for (const c of cachedPool) {
-      const normPkg = canonicalPackageId(c.packageId);
+    for (const c of localOfflineCards) {
+      const normPkg = canonicalPackageId(c.packageId || c.categoryId || c.price);
       if (!normPkg) continue;
       if (resolveCardKind(c) === 'paper') {
         cachedPaperByPkg[normPkg] = (cachedPaperByPkg[normPkg] || 0) + 1;
-      } else {
-        cachedElecByPkg[normPkg] = (cachedElecByPkg[normPkg] || 0) + 1;
       }
     }
 
@@ -2737,6 +2781,12 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     let totalPaper = 0;
     for (const pkg of packages) {
       const pkgAvail = Math.max(0, Number(pkg.availableCount) || 0);
+      const sellableElec = getSellableCardsForPackage(
+        localOfflineCards,
+        pkg,
+        profile,
+        pendingSoldIds
+      ).length;
       const paperFromCards = cachedPaperByPkg[pkg.id] || 0;
       const paperFromInvoices = Math.max(
         0,
@@ -2744,9 +2794,10 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       );
       const paperCount = paperFromCards + paperFromInvoices;
 
-      const elecCount =
-        cachedPool.length > 0
-          ? Math.max(cachedElecByPkg[pkg.id] || 0, Math.max(0, pkgAvail - paperFromCards))
+      const elecCount = !isOnline
+        ? sellableElec
+        : localOfflineCards.length > 0
+          ? Math.max(sellableElec, Math.max(0, pkgAvail - paperFromCards))
           : Math.max(0, pkgAvail - paperFromCards);
 
       electronicByPkg[pkg.id] = elecCount;
@@ -2756,7 +2807,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
 
     return { electronicByPkg, paperByPkg, totalElectronic, totalPaper };
-  }, [packages, profile, firebaseUser?.uid, personalPaperCounts, offlinePoolVersion]);
+  }, [packages, profile, firebaseUser?.uid, personalPaperCounts, localOfflineCards, isOnline, offlinePoolVersion]);
 
   const unreadNotificationsCount = useMemo(
     () => notifications.filter((n) => !n.isRead).length,
@@ -3427,24 +3478,30 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
       const ownerIds = buildOwnerIdentifiers(profile, activeUid);
       const isAdmin = profile.role === 'super_admin';
-      const existingLocal = getCachedAvailableCardsForOwners(ownerIds);
+      const existingLocal = await hydrateOfflineCardsFromIDB(ownerIds);
 
       if (isRefreshingInventory) return existingLocal.length;
       setIsRefreshingInventory(true);
 
       try {
-        // Super Admin refreshes lightweight package counters (`packages` = 8 docs only)
+        // Super Admin: refresh lightweight package summaries AND persist full available central cards into IndexedDB!
         if (isAdmin) {
           if (typeof navigator !== 'undefined' && !navigator.onLine) {
+            setOfflinePoolVersion((v) => v + 1);
             if (forceServer) {
-              notifyInfo('وضع عدم الاتصال', 'يتم عرض المخزون المحفوظ محلياً حالياً.');
+              notifyInfo(
+                'وضع عدم الاتصال',
+                `يوجد ${existingLocal.length.toLocaleString('en-US')} كرت محفوظ محلياً جاهز للبيع بدون إنترنت.`
+              );
             }
-            return totalAvailableCards;
+            return existingLocal.length;
           }
+
+          // 1. Refresh the 8 package summary documents
           const pkgQ = query(collection(db, 'packages'), where('price', '>', 0));
-          const snap = await getDocs(pkgQ);
-          if (!snap.empty) {
-            const list = snap.docs
+          const pkgSnap = await raceWithTimeout(getDocs(pkgQ), 10000).catch(() => null);
+          if (pkgSnap && !pkgSnap.empty) {
+            const list = pkgSnap.docs
               .map((d) => ({ id: d.id, ...(d.data() as Omit<PackageDoc, 'id'>) }))
               .sort((a, b) => a.sortOrder - b.sortOrder);
             setRawPackages(list);
@@ -3452,17 +3509,91 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               CACHE_PACKAGES_KEY,
               list.map(({ updatedAt: _u, ...rest }) => rest)
             );
-            const total = list.reduce((sum, p) => sum + (Number(p.availableCount) || 0), 0);
-            if (forceServer) {
-              notifySuccess(`تم تحديث المخزون المركزي بنجاح (${total.toLocaleString('en-US')} كرت متاح) ✅`);
-            }
-            return total;
           }
-          return totalAvailableCards;
+
+          // 2. Fetch & store Super Admin's actual available cards into IndexedDB (`taibah_offline_cards_db`) for instant 100% offline selling
+          const adminCardsQ = query(
+            collection(db, 'cards'),
+            where('status', '==', 'available'),
+            limit(6000)
+          );
+          const canHitServer = Boolean(auth.currentUser) && navigator.onLine;
+          let cardsSnap = null;
+          try {
+            cardsSnap = canHitServer
+              ? await raceWithTimeout(getDocs(adminCardsQ), 15000)
+              : await getDocsFromCache(adminCardsQ);
+          } catch (err) {
+            if (forceServer && (isFirestoreQuotaError(err) || isFirestoreOfflineError(err))) {
+              notifyInfo(
+                'تم الاحتفاظ بمخزونك المحلي بأمان',
+                `مخزونك المحفوظ (${existingLocal.length.toLocaleString('en-US')} كرت) جاهز للبيع بدون إنترنت.`
+              );
+            }
+            return existingLocal.length;
+          }
+
+          const mergedAdminCards = new Map<string, CachedAvailableCard>();
+          const adminOwnerSet = new Set(ownerIds.map((o) => o.toLowerCase()));
+          for (const d of cardsSnap.docs) {
+            const data = d.data() as CardDoc & {
+              denomination?: string | number;
+              price?: number | string;
+              categoryId?: string;
+            };
+            if (!data.cardNumber || isCardLocallyLocked(data.cardNumber, d.id)) continue;
+            const rawOwner = String(data.ownerId ?? '').trim();
+            const rawOwnerLower = rawOwner.toLowerCase();
+            // Include central/admin cards (owned by admin uid, 'super_admin', 'admin', or empty)
+            if (
+              rawOwner &&
+              rawOwnerLower !== 'super_admin' &&
+              rawOwnerLower !== 'admin' &&
+              !adminOwnerSet.has(rawOwnerLower)
+            ) {
+              continue;
+            }
+            const normPkg = canonicalPackageId(data.packageId || data.categoryId || data.denomination || data.price);
+            if (!normPkg) continue;
+            if (!mergedAdminCards.has(data.cardNumber)) {
+              mergedAdminCards.set(data.cardNumber, {
+                id: d.id,
+                packageId: normPkg,
+                categoryId: data.categoryId,
+                price: parseNormalizedPrice(data.price) || undefined,
+                cardNumber: data.cardNumber,
+                ownerId: rawOwner || activeUid,
+                status: data.status || 'available',
+                cardType: resolveCardKind(data),
+              });
+            }
+          }
+
+          const freshAdminList = Array.from(mergedAdminCards.values());
+          if (freshAdminList.length > 0 || (canHitServer && forceServer && existingLocal.length === 0)) {
+            saveCachedAvailableCards(activeUid, freshAdminList, {
+              allowEmpty: canHitServer && existingLocal.length === 0,
+            });
+            setOfflinePoolVersion((v) => v + 1);
+            setFirestoreConnected(true);
+            if (forceServer) {
+              notifySuccess(
+                `تم حفظ ${freshAdminList.length.toLocaleString('en-US')} كرتاً جاهزاً للبيع بدون إنترنت ✅`
+              );
+            }
+            return freshAdminList.length;
+          }
+
+          if (forceServer) {
+            notifySuccess(
+              `تم حفظ ${existingLocal.length.toLocaleString('en-US')} كرتاً جاهزاً للبيع بدون إنترنت ✅`
+            );
+          }
+          return existingLocal.length;
         }
 
-        // Agent / Client: lightweight filtered query for ALL unsold cards (`available` + `assigned_to_agent`)
-        // across `uid` and `linkedSourceId` (never capped at 50!) with strict No Empty Overwrite protection.
+        // Agent / Client: fetch ALL unsold cards (`available` + `assigned_to_agent`) across `uid` + `linkedSourceId`
+        // and store full objects into high-capacity IndexedDB (`taibah_offline_cards_db`) with No Empty Overwrite protection.
         const queryOwnerIds = Array.from(
           new Set([activeUid, profile.linkedSourceId || ''].map((s) => s.trim()).filter(Boolean))
         );
@@ -3478,29 +3609,38 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             collection(db, 'cards'),
             where('ownerId', '==', oid),
             where('status', 'in', ['available', 'assigned_to_agent']),
-            limit(3000)
+            limit(6000)
           );
           try {
             const snap =
               forceServer && canHitServer
-                ? await raceWithTimeout(getDocs(cardsQ), 12000)
+                ? await raceWithTimeout(getDocs(cardsQ), 14000)
                 : canHitServer
-                  ? await raceWithTimeout(getDocs(cardsQ), 10000)
+                  ? await raceWithTimeout(getDocs(cardsQ), 12000)
                   : await getDocsFromCache(cardsQ);
 
             if (canHitServer) anyServerQuerySucceeded = true;
 
             for (const d of snap.docs) {
-              const data = d.data() as CardDoc & { denomination?: string | number; price?: number };
+              const data = d.data() as CardDoc & {
+                denomination?: string | number;
+                price?: number | string;
+                categoryId?: string;
+              };
               if (!data.cardNumber || isCardLocallyLocked(data.cardNumber, d.id)) continue;
-              const normPkg = canonicalPackageId(data.packageId || data.denomination || data.price);
+              const normPkg = canonicalPackageId(
+                data.packageId || data.categoryId || data.denomination || data.price
+              );
               if (!normPkg) continue;
               if (!mergedByCard.has(data.cardNumber)) {
                 mergedByCard.set(data.cardNumber, {
                   id: d.id,
                   packageId: normPkg,
+                  categoryId: data.categoryId,
+                  price: parseNormalizedPrice(data.price) || undefined,
                   cardNumber: data.cardNumber,
                   ownerId: data.ownerId || oid,
+                  status: data.status || 'assigned_to_agent',
                   cardType: resolveCardKind(data),
                 });
               }
@@ -3593,7 +3733,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           if (forceServer) {
             notifySuccess(
               freshList.length > 0
-                ? `تم تحديث مخزونك بنجاح — ${freshList.length.toLocaleString('en-US')} كرت جاهز للبيع ✅`
+                ? `تم حفظ ${freshList.length.toLocaleString('en-US')} كرتاً جاهزاً للبيع بدون إنترنت ✅`
                 : 'تم فحص مخزونك السحابي — لا توجد كروت متبقية حالياً.'
             );
           }
@@ -3603,7 +3743,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         if (forceServer) {
           notifyInfo(
             'مخزونك المحلي محفوظ',
-            `يوجد ${existingLocal.length.toLocaleString('en-US')} كرت جاهز للبيع في جهازك.`
+            `تم حفظ ${existingLocal.length.toLocaleString('en-US')} كرتاً جاهزاً للبيع بدون إنترنت.`
           );
         }
         return existingLocal.length;
@@ -3614,39 +3754,37 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         setIsRefreshingInventory(false);
       }
     },
-    [firebaseUser?.uid, isRefreshingInventory, notifyInfo, notifySuccess, personalSoldCounts, profile, totalAvailableCards]
+    [firebaseUser?.uid, isRefreshingInventory, notifyInfo, notifySuccess, personalSoldCounts, profile]
   );
 
-  // Silent deferred one-time inventory warm-up for Agents & Clients so their cards NEVER show 0!
+  // Silent automatic IndexedDB warm-up for ALL active roles (Super Admin, Agent, AND Client!)
+  // Automatically populates `taibah_offline_cards_db` on login, reconnect, or Direct Sale entry without manual tapping!
   useEffect(() => {
     const activeUid = profile?.uid || auth.currentUser?.uid || firebaseUser?.uid || '';
     if (
       !authReady ||
       !activeUid ||
       !profile ||
-      profile.role === 'super_admin' ||
       profile.status !== 'active' ||
       !hasActiveSessionUnlocked()
     ) {
       return;
     }
-    if (!auth.currentUser || auth.currentUser.uid !== activeUid || !isOnline) return;
-    if (autoInventorySyncedRef.current === `${activeUid}_${syncNonce}`) return;
+    if (!auth.currentUser || !isOnline) return;
+    if (profile.role !== 'super_admin' && auth.currentUser.uid !== activeUid) return;
 
     const ownerIds = buildOwnerIdentifiers(profile, activeUid);
     const localCount = getCachedAvailableCardsForOwners(ownerIds).length;
-    // Fetch automatically once if local pool is empty OR user clicked manual sync
-    if (localCount > 0 && syncNonce === 0) {
-      autoInventorySyncedRef.current = `${activeUid}_${syncNonce}`;
-      return;
-    }
+    const isDirectSaleEmpty = activeRoute === 'direct_sale' && localCount === 0;
+    const syncTag = `${activeUid}_${syncNonce}_${isDirectSaleEmpty ? 'ds_empty' : 'session'}`;
+    if (autoInventorySyncedRef.current === syncTag) return;
 
     const timer = window.setTimeout(() => {
-      autoInventorySyncedRef.current = `${activeUid}_${syncNonce}`;
+      autoInventorySyncedRef.current = syncTag;
       void refreshMyInventory(false);
-    }, 600);
+    }, isDirectSaleEmpty ? 200 : 800);
     return () => window.clearTimeout(timer);
-  }, [authReady, firebaseUser?.uid, isOnline, profile, refreshMyInventory, syncNonce]);
+  }, [authReady, activeRoute, firebaseUser?.uid, isOnline, profile, refreshMyInventory, syncNonce]);
 
   // Zero-Touch Continuous Auto-Sync Engine Lifecycle:
   // Automatically runs on network restore (<1s), app launch/resume, every mutation,
@@ -4073,27 +4211,142 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       };
 
       try {
-        // STEP 1: INSTANT CARD PULL (0ms synchronous RAM/storage cache across ALL owner identifiers first -> Firestore fallback ONLY if needed)
+        // STEP 1: UNIFIED SINGLE-SOURCE-OF-TRUTH CARD PULL
+        // Uses the EXACT same `getSellableCardsForPackage(...)` used to render `المتاح: X`:
+        // 1) Instant 0ms RAM / React localOfflineCards
+        // 2) High-capacity IndexedDB (`taibah_offline_cards_db`) fallback if RAM wasn't hydrated yet
+        // 3) Firestore offline cache (`getDocsFromCache`) fallback offline, or server query online
         if (isElectronic) {
-          const allCachedLocally = requestedItems.every((item) => {
-            const deliverTarget = Math.min(item.quantity, item.deliverNow ?? item.quantity);
-            if (deliverTarget <= 0) return true;
-            return getCachedAvailableCardsForOwners(ownerIds, item.packageId).length >= deliverTarget;
-          });
+          const pendingSoldIds = getPendingSoldCardIds();
+          const mergeCandidateCards = (
+            ...lists: CachedAvailableCard[][]
+          ): CachedAvailableCard[] => {
+            const byNum = new Map<string, CachedAvailableCard>();
+            for (const list of lists) {
+              for (const c of list) {
+                if (c?.cardNumber && !byNum.has(c.cardNumber)) {
+                  byNum.set(c.cardNumber, c);
+                }
+              }
+            }
+            return Array.from(byNum.values());
+          };
 
-          if (allCachedLocally) {
-            // 0ms Synchronous Optimistic Pool Consumption (strict local lock prevents duplicate card numbers; ZERO 50-card cap!)
+          let unifiedLocalPool = mergeCandidateCards(
+            localOfflineCards,
+            getCachedAvailableCardsForOwners(ownerIds)
+          );
+
+          const resolvePkgForItem = (pkgId: string) =>
+            packages.find((p) => p.id === pkgId) ||
+            EXCLUSIVE_PACKAGES.find((p) => p.id === pkgId) ||
+            pkgId;
+
+          const hasAllInPool = (pool: CachedAvailableCard[]) =>
+            requestedItems.every((item) => {
+              const deliverTarget = Math.min(item.quantity, item.deliverNow ?? item.quantity);
+              if (deliverTarget <= 0) return true;
+              return (
+                getSellableCardsForPackage(
+                  pool,
+                  resolvePkgForItem(item.packageId),
+                  profile,
+                  pendingSoldIds
+                ).length >= deliverTarget
+              );
+            });
+
+          // If RAM didn't satisfy yet, hydrate directly from IndexedDB (`taibah_offline_cards_db`) BEFORE failing!
+          if (!hasAllInPool(unifiedLocalPool)) {
+            const idbCards = await hydrateOfflineCardsFromIDB(ownerIds);
+            if (idbCards.length > 0) {
+              unifiedLocalPool = mergeCandidateCards(unifiedLocalPool, idbCards);
+            }
+          }
+
+          // If STILL short while offline, also read Firestore's own offline IndexedDB cache (`getDocsFromCache`)
+          if (!hasAllInPool(unifiedLocalPool) && !navigator.onLine) {
+            const queryOwnerIds = Array.from(
+              new Set([activeUser.uid, profile.linkedSourceId || ''].map((s) => s.trim()).filter(Boolean))
+            );
+            const firestoreCacheCards: CachedAvailableCard[] = [];
+            for (const item of requestedItems) {
+              const normPkgId = canonicalPackageId(item.packageId);
+              if (!normPkgId) continue;
+              const queriesToTry =
+                profile.role === 'super_admin'
+                  ? [
+                      query(
+                        collection(db, 'cards'),
+                        where('packageId', '==', normPkgId),
+                        where('status', '==', 'available'),
+                        limit(item.quantity + 10)
+                      ),
+                    ]
+                  : queryOwnerIds.map((oid) =>
+                      query(
+                        collection(db, 'cards'),
+                        where('ownerId', '==', oid),
+                        where('packageId', '==', normPkgId),
+                        where('status', 'in', ['available', 'assigned_to_agent']),
+                        limit(item.quantity + 10)
+                      )
+                    );
+              for (const qTry of queriesToTry) {
+                try {
+                  const snap = await getDocsFromCache(qTry);
+                  for (const d of snap.docs) {
+                    const cData = d.data() as CardDoc & { price?: number | string; categoryId?: string };
+                    if (!cData.cardNumber) continue;
+                    firestoreCacheCards.push({
+                      id: d.id,
+                      packageId: canonicalPackageId(cData.packageId || cData.categoryId || cData.price || normPkgId),
+                      categoryId: cData.categoryId,
+                      price: parseNormalizedPrice(cData.price) || undefined,
+                      cardNumber: cData.cardNumber,
+                      ownerId: cData.ownerId || activeUser.uid,
+                      status: cData.status || 'available',
+                      cardType: resolveCardKind(cData),
+                    });
+                  }
+                } catch {
+                  // Cache miss on this query
+                }
+              }
+            }
+            if (firestoreCacheCards.length > 0) {
+              unifiedLocalPool = mergeCandidateCards(unifiedLocalPool, firestoreCacheCards);
+            }
+          }
+
+          if (hasAllInPool(unifiedLocalPool)) {
+            // Instant 0ms Unified Local Selection using `getSellableCardsForPackage`
+            const workingPending = new Set(pendingSoldIds);
             for (const item of requestedItems) {
               const deliverTarget = Math.min(item.quantity, item.deliverNow ?? item.quantity);
               if (deliverTarget <= 0) {
                 pickedCardsByPkg[item.packageId] = [];
                 continue;
               }
-              const picked = consumeCachedAvailableCardsForOwners(ownerIds, item.packageId, deliverTarget);
-              if (!picked || picked.length < deliverTarget) {
+              const sellable = getSellableCardsForPackage(
+                unifiedLocalPool,
+                resolvePkgForItem(item.packageId),
+                profile,
+                workingPending
+              );
+              if (sellable.length < deliverTarget) {
                 rollbackLocalSelection();
                 notifyWarning('أحد الكروت قيد التنفيذ حالياً، يرجى إعادة المحاولة فوراً.');
                 return null;
+              }
+              const picked = sellable.slice(0, deliverTarget);
+              if (!markCardsSoldInLocalPool(ownerIds, picked)) {
+                rollbackLocalSelection();
+                notifyWarning('أحد الكروت قيد التنفيذ حالياً، يرجى إعادة المحاولة فوراً.');
+                return null;
+              }
+              for (const c of picked) {
+                workingPending.add(c.id);
               }
               consumedFromCacheList.push({ pkgId: item.packageId, cards: picked });
               pickedCardsByPkg[item.packageId] = picked.map((c) => ({
@@ -4101,26 +4354,41 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                 cardNumber: c.cardNumber,
               }));
             }
+            setOfflinePoolVersion((v) => v + 1);
           } else {
-            // Offline guard when local cache cannot fulfill request
+            // Offline guard ONLY if RAM + IndexedDB + Firestore cache genuinely lack the requested quantity
             if (!navigator.onLine) {
               const shortageItem = requestedItems.find((item) => {
                 const deliverTarget = Math.min(item.quantity, item.deliverNow ?? item.quantity);
-                return getCachedAvailableCardsForOwners(ownerIds, item.packageId).length < deliverTarget;
+                return (
+                  getSellableCardsForPackage(
+                    unifiedLocalPool,
+                    resolvePkgForItem(item.packageId),
+                    profile,
+                    pendingSoldIds
+                  ).length < deliverTarget
+                );
               });
               const pkgMeta = packages.find((p) => p.id === shortageItem?.packageId);
               const deliverTarget = shortageItem
                 ? Math.min(shortageItem.quantity, shortageItem.deliverNow ?? shortageItem.quantity)
                 : 0;
+              const actualLocalAvail = shortageItem
+                ? getSellableCardsForPackage(
+                    unifiedLocalPool,
+                    resolvePkgForItem(shortageItem.packageId),
+                    profile,
+                    pendingSoldIds
+                  ).length
+                : 0;
               notifyError(
                 'المخزون المحلي غير كافٍ دون إنترنت',
-                `المتوفر محلياً لباقة ${pkgMeta?.price || shortageItem?.packageId || ''} ر.ي أقل من المطلوب (${deliverTarget}). يرجى الاتصال بالإنترنت أو الضغط على «تحديث مخزوني».`
+                `المتوفر محلياً لباقة ${pkgMeta?.price || shortageItem?.packageId || ''} ر.ي هو (${actualLocalAvail}) والمطلوب (${deliverTarget}). يرجى الاتصال بالإنترنت والضغط على «تحديث مخزوني».`
               );
               return null;
             }
 
-            // Cache-First (`localStorage` -> `getDocsFromCache`) then EXACT-LIMIT Firestore fetch (`limit(1)` direct / `limit(qty)` wholesale)
-            // Matches BOTH `available` and `assigned_to_agent` statuses across `uid` + `linkedSourceId`!
+            // Online server fetch fallback for any remaining needed cards
             const queryOwnerIds = Array.from(
               new Set([activeUser.uid, profile.linkedSourceId || ''].map((s) => s.trim()).filter(Boolean))
             );
@@ -4131,7 +4399,12 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                   return { item, deliverTarget, list: [] as Array<{ id: string; cardNumber: string }>, fromCache: true };
                 }
                 const normPkgId = canonicalPackageId(item.packageId);
-                const localPool = getCachedAvailableCardsForOwners(ownerIds, normPkgId);
+                const localPool = getSellableCardsForPackage(
+                  unifiedLocalPool,
+                  resolvePkgForItem(normPkgId),
+                  profile,
+                  pendingSoldIds
+                );
                 if (localPool.length >= deliverTarget) {
                   return {
                     item,
@@ -4157,7 +4430,6 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                   }
                 };
 
-                // Try IndexedDB cache first, then exact-limit server query across owner IDs
                 for (const oid of queryOwnerIds) {
                   if (collectedMap.size >= deliverTarget) break;
                   const remainingNeeded = deliverTarget - collectedMap.size;
@@ -4228,6 +4500,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               }
               markCardIdsPendingSold(fetchedAndLockedDocIds);
               removeCardsFromCacheForOwners(ownerIds, fetchedAndLockedNumbers);
+              setOfflinePoolVersion((v) => v + 1);
             }
           }
         }
@@ -4395,7 +4668,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         inFlightOpsRef.current.delete(opKey);
       }
     },
-    [firebaseUser, notifyError, notifySuccess, notifyWarning, packages, profile]
+    [firebaseUser, localOfflineCards, notifyError, notifySuccess, notifyWarning, packages, profile]
   );
 
   // Deliver remaining cards for a partial electronic wholesale order
@@ -7781,6 +8054,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       clearPrefillTopupPackage,
       openTopupForPackage,
       packages,
+      localOfflineCards,
       totalAvailableCards,
       personalStockSplit,
       sales: mergedSales,
@@ -7862,6 +8136,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       clearPrefillTopupPackage,
       openTopupForPackage,
       packages,
+      localOfflineCards,
       totalAvailableCards,
       personalStockSplit,
       mergedSales,

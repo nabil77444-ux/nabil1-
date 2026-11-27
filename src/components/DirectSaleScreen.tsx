@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   CheckCircle2,
   Copy,
@@ -17,6 +17,7 @@ import {
 import { useFirebase } from '../contexts/FirebaseContext';
 import { useFeedback } from '../lib/feedback';
 import { normalizeDigits } from '../lib/firebase';
+import { getPendingSoldCardIds, getSellableCardsForPackage } from '../lib/offlineCards';
 import {
   applyMessageTemplate,
   exportAsArabicPDF,
@@ -57,7 +58,8 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
   const {
     profile,
     packages,
-    totalAvailableCards,
+    localOfflineCards,
+    isOnline,
     appSettings,
     isRefreshingInventory,
     refreshMyInventory,
@@ -68,8 +70,42 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
   } = useFirebase();
   const { notifySuccess, notifyWarning, notifyError } = useFeedback();
 
-  const displayPackages = packages.length > 0 ? packages : (EXCLUSIVE_PACKAGES as PackageDoc[]);
   const isAdmin = profile?.role === 'super_admin';
+
+  // Silent auto-cache into IndexedDB when opening Direct Sale online without requiring manual tap
+  const didSilentWarmupRef = useRef(false);
+  useEffect(() => {
+    if (!isOnline || didSilentWarmupRef.current) return;
+    if (localOfflineCards.length === 0 && !isRefreshingInventory) {
+      didSilentWarmupRef.current = true;
+      void refreshMyInventory(false);
+    }
+  }, [isOnline, localOfflineCards.length, isRefreshingInventory, refreshMyInventory]);
+
+  // Unified Single Source of Truth: exact same `getSellableCardsForPackage(...)` used by «تأكيد البيع»!
+  const displayPackages = useMemo<PackageDoc[]>(() => {
+    const base = packages.length > 0 ? packages : (EXCLUSIVE_PACKAGES as PackageDoc[]);
+    const pendingIds = getPendingSoldCardIds();
+    return base.map((pkg) => {
+      const localSellable = getSellableCardsForPackage(
+        localOfflineCards,
+        pkg,
+        profile,
+        pendingIds
+      ).length;
+      return {
+        ...pkg,
+        availableCount: !isOnline
+          ? localSellable
+          : Math.max(Number(pkg.availableCount) || 0, localSellable),
+      };
+    });
+  }, [packages, localOfflineCards, profile, isOnline]);
+
+  const directTotalAvailableCards = useMemo(
+    () => displayPackages.reduce((sum, p) => sum + (Number(p.availableCount) || 0), 0),
+    [displayPackages]
+  );
 
   // Consumer details (optional quick bar)
   const [buyerName, setBuyerName] = useState('');
@@ -367,7 +403,7 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
                 البيع المباشر للمستهلك (100%)
               </h2>
               <p className="text-[11px] font-bold text-[#FDE68A] tabular-nums">
-                الكروت المتاحة: {formatCount(totalAvailableCards, hideNumbers)} كرت
+                الكروت المتاحة: {formatCount(directTotalAvailableCards, hideNumbers)} كرت
               </p>
             </div>
           </div>

@@ -1,13 +1,25 @@
 import { EXCLUSIVE_PACKAGES, type SaleDoc, type SaleLineItem } from '../types/taibah';
+import { normalizeDigits } from './firebase';
 
 export type CardInventoryKind = 'electronic' | 'paper';
 
 export interface CachedAvailableCard {
   id: string;
   packageId: string;
+  categoryId?: string;
+  price?: number;
   cardNumber: string;
   ownerId: string;
+  status?: string;
   cardType?: CardInventoryKind;
+}
+
+export interface SellableCardOwnerContext {
+  uid?: string | null;
+  role?: string | null;
+  phone?: string | null;
+  email?: string | null;
+  linkedSourceId?: string | null;
 }
 
 /**
@@ -41,12 +53,24 @@ export function resolveCardKind(raw?: {
 }
 
 /**
- * Normalize any package identifier or denomination (e.g. `250`, `"250"`, `"pkg_250"`, `"باقة 250"`)
+ * Parse a numeric price from any string/number including Arabic-Indic numerals (`٢٥٠`).
+ */
+export function parseNormalizedPrice(val: unknown): number {
+  if (typeof val === 'number') return Number.isFinite(val) && val > 0 ? val : 0;
+  if (typeof val !== 'string') return 0;
+  const cleaned = normalizeDigits(val).replace(/[^\d.]/g, '');
+  if (!cleaned) return 0;
+  const parsed = Number(cleaned);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+/**
+ * Normalize any package identifier or denomination (e.g. `250`, `"٢٥٠"`, `"pkg_250"`, `"باقة 250"`)
  * into its canonical exclusive package ID (`"pkg_250"`).
  */
 export function canonicalPackageId(pkgIdOrPrice: string | number | undefined | null): string {
   if (pkgIdOrPrice === undefined || pkgIdOrPrice === null) return '';
-  const raw = String(pkgIdOrPrice).trim();
+  const raw = normalizeDigits(String(pkgIdOrPrice)).trim();
   if (!raw) return '';
   const lower = raw.toLowerCase();
   const exact = EXCLUSIVE_PACKAGES.find(
@@ -59,6 +83,166 @@ export function canonicalPackageId(pkgIdOrPrice: string | number | undefined | n
     if (byPrice) return byPrice.id;
   }
   return raw;
+}
+
+function resolvePackagePriceFromMeta(
+  pkgOrId: { id?: string; code?: string; price?: number | string } | string | number
+): number {
+  if (typeof pkgOrId === 'object' && pkgOrId !== null) {
+    const direct = parseNormalizedPrice(pkgOrId.price);
+    if (direct > 0) return direct;
+    const cid = canonicalPackageId(pkgOrId.id || pkgOrId.code);
+    const found = EXCLUSIVE_PACKAGES.find((p) => p.id === cid);
+    return found ? found.price : 0;
+  }
+  const direct = parseNormalizedPrice(pkgOrId);
+  if (direct > 0) {
+    const byPrice = EXCLUSIVE_PACKAGES.find((p) => p.price === direct);
+    if (byPrice) return byPrice.price;
+  }
+  const cid = canonicalPackageId(pkgOrId);
+  const found = EXCLUSIVE_PACKAGES.find((p) => p.id === cid);
+  return found ? found.price : direct;
+}
+
+function normalizeOwnerToken(val: unknown): string {
+  if (typeof val !== 'string' && typeof val !== 'number') return '';
+  return String(val).trim();
+}
+
+function normalizePhoneVariants(phone: unknown): string[] {
+  if (typeof phone !== 'string' && typeof phone !== 'number') return [];
+  const digits = normalizeDigits(String(phone)).replace(/[^\d]/g, '');
+  if (digits.length < 7) return [];
+  const stripped = digits.replace(/^00967|^967/, '');
+  const out = new Set<string>([digits]);
+  if (stripped.length >= 7) out.add(stripped);
+  return Array.from(out);
+}
+
+const EXCLUDED_CARD_STATUSES = new Set([
+  'sold',
+  'returned',
+  'recalled',
+  'injected',
+  'used',
+  'deleted',
+  'cancelled',
+  'canceled',
+]);
+
+/**
+ * SINGLE SOURCE OF TRUTH for both UI stock display («المتاح: X» / «الكروت المتاحة»)
+ * and Direct/Wholesale Sale card selection («تأكيد البيع» online & offline).
+ *
+ * Guarantees mathematically that if a package displays `المتاح: N`, those exact `N`
+ * sellable electronic cards exist in `allCards` and can be sold immediately without error.
+ */
+export function getSellableCardsForPackage(
+  allCards: CachedAvailableCard[],
+  pkg: { id?: string; code?: string; price?: number | string } | string | number,
+  currentUser: SellableCardOwnerContext | null | undefined,
+  pendingSoldCardIds?: Set<string>
+): CachedAvailableCard[] {
+  if (!Array.isArray(allCards) || allCards.length === 0) return [];
+
+  const pendingIds = pendingSoldCardIds ?? getPendingSoldCardIds();
+  const lockedNums = getLocallyLockedCards();
+
+  const targetPkgId =
+    typeof pkg === 'object' && pkg !== null
+      ? canonicalPackageId(pkg.id || pkg.code || pkg.price)
+      : canonicalPackageId(pkg);
+  const targetPrice = resolvePackagePriceFromMeta(pkg);
+
+  const roleNorm = String(currentUser?.role || '').trim().toLowerCase();
+  const isAdmin = roleNorm === 'super_admin' || roleNorm === 'admin';
+
+  const ownerSet = new Set<string>();
+  const ownerLowerSet = new Set<string>();
+  const addOwner = (v: unknown) => {
+    const t = normalizeOwnerToken(v);
+    if (!t) return;
+    ownerSet.add(t);
+    ownerLowerSet.add(t.toLowerCase());
+  };
+  if (currentUser) {
+    addOwner(currentUser.uid);
+    addOwner(currentUser.linkedSourceId);
+    addOwner(currentUser.email);
+    for (const pv of normalizePhoneVariants(currentUser.phone)) {
+      addOwner(pv);
+    }
+    if (isAdmin) {
+      addOwner('super_admin');
+      addOwner('admin');
+    }
+  }
+
+  const seenNumbers = new Set<string>();
+  const seenIds = new Set<string>();
+  const result: CachedAvailableCard[] = [];
+
+  for (const card of allCards) {
+    if (!card || !card.cardNumber) continue;
+
+    // 1. Exclude pending-sold & locally locked cards
+    if (card.id && pendingIds.has(card.id)) continue;
+    if (lockedNums.has(card.cardNumber)) continue;
+
+    // 2. Exclude non-sellable statuses (accept 'available', 'assigned_to_agent', 'active', 'assigned', '', undefined)
+    const statusNorm = String(card.status ?? '').trim().toLowerCase();
+    if (statusNorm && EXCLUDED_CARD_STATUSES.has(statusNorm)) continue;
+
+    // 3. Accept electronic cards (or unspecified cardType); reject explicit paper cards
+    if (resolveCardKind(card) === 'paper') continue;
+
+    // 4. Strict role-aware ownership match (tolerant of admin central legacy owner values)
+    if (currentUser && (ownerSet.size > 0 || isAdmin)) {
+      const cardOwnerRaw = normalizeOwnerToken(card.ownerId);
+      const cardOwnerLower = cardOwnerRaw.toLowerCase();
+      if (isAdmin) {
+        const isCentralOrMine =
+          !cardOwnerRaw ||
+          cardOwnerLower === 'admin' ||
+          cardOwnerLower === 'super_admin' ||
+          ownerSet.has(cardOwnerRaw) ||
+          ownerLowerSet.has(cardOwnerLower);
+        if (!isCentralOrMine) continue;
+      } else {
+        const phoneMatch = normalizePhoneVariants(cardOwnerRaw).some((pv) => ownerSet.has(pv));
+        const directMatch =
+          ownerSet.has(cardOwnerRaw) || ownerLowerSet.has(cardOwnerLower) || phoneMatch;
+        if (!directMatch) continue;
+      }
+    }
+
+    // 5. Type-insensitive package & price match (handles pkg_250, "250", 250, "٢٥٠", categoryId)
+    const cardPkgId = canonicalPackageId(card.packageId || card.categoryId || card.price);
+    const cardPrice =
+      parseNormalizedPrice(card.price) ||
+      resolvePackagePriceFromMeta(cardPkgId || card.packageId || card.categoryId || '');
+
+    const matchesPkg =
+      (Boolean(targetPkgId) && cardPkgId === targetPkgId) ||
+      (targetPrice > 0 && cardPrice > 0 && cardPrice === targetPrice);
+    if (!matchesPkg) continue;
+
+    // 6. Deduplicate strictly by cardNumber and doc id
+    if (seenNumbers.has(card.cardNumber) || (card.id && seenIds.has(card.id))) continue;
+    seenNumbers.add(card.cardNumber);
+    if (card.id) seenIds.add(card.id);
+
+    result.push({
+      ...card,
+      packageId: cardPkgId || targetPkgId,
+      price: cardPrice || targetPrice || undefined,
+      status: statusNorm || 'available',
+      cardType: 'electronic',
+    });
+  }
+
+  return result;
 }
 
 export interface OfflineQueuedSale {
@@ -91,6 +275,110 @@ const LOCKED_CARDS_KEY = 'taibah_locked_cards_v1';
 const PENDING_SOLD_CARD_IDS_KEY = 'taibah_pending_sold_card_ids_v1';
 const OFFLINE_QUEUE_KEY = 'taibah_offline_sales_queue_v1';
 const CACHED_CARDS_PREFIX = 'taibah_cached_cards_v1_';
+
+// =========================================================================
+// HIGH-CAPACITY INDEXEDDB OFFLINE CARD STORE (`taibah_offline_cards_db`)
+// Eliminates localStorage 5MB QuotaExceededError for hundreds/thousands of cards!
+// =========================================================================
+const IDB_NAME = 'taibah_offline_cards_db';
+const IDB_VERSION = 1;
+const IDB_STORE_OWNER_CARDS = 'owner_cards';
+
+interface IdbOwnerCardsRecord {
+  ownerKey: string;
+  cards: CachedAvailableCard[];
+  updatedAt: number;
+}
+
+let idbPromise: Promise<IDBDatabase | null> | null = null;
+
+function openOfflineCardsDB(): Promise<IDBDatabase | null> {
+  if (typeof indexedDB === 'undefined') return Promise.resolve(null);
+  if (idbPromise) return idbPromise;
+  idbPromise = new Promise<IDBDatabase | null>((resolve) => {
+    try {
+      const req = indexedDB.open(IDB_NAME, IDB_VERSION);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(IDB_STORE_OWNER_CARDS)) {
+          db.createObjectStore(IDB_STORE_OWNER_CARDS, { keyPath: 'ownerKey' });
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => {
+        idbPromise = null;
+        resolve(null);
+      };
+    } catch {
+      idbPromise = null;
+      resolve(null);
+    }
+  });
+  return idbPromise;
+}
+
+async function writeOwnerCardsToIDB(ownerKey: string, cards: CachedAvailableCard[]): Promise<void> {
+  if (!ownerKey) return;
+  const db = await openOfflineCardsDB();
+  if (!db) return;
+  await new Promise<void>((resolve) => {
+    try {
+      const tx = db.transaction(IDB_STORE_OWNER_CARDS, 'readwrite');
+      const store = tx.objectStore(IDB_STORE_OWNER_CARDS);
+      const record: IdbOwnerCardsRecord = {
+        ownerKey,
+        cards,
+        updatedAt: Date.now(),
+      };
+      store.put(record);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+      tx.onabort = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
+}
+
+async function readOwnerCardsFromIDB(ownerKey: string): Promise<CachedAvailableCard[] | null> {
+  if (!ownerKey) return null;
+  const db = await openOfflineCardsDB();
+  if (!db) return null;
+  return new Promise<CachedAvailableCard[] | null>((resolve) => {
+    try {
+      const tx = db.transaction(IDB_STORE_OWNER_CARDS, 'readonly');
+      const store = tx.objectStore(IDB_STORE_OWNER_CARDS);
+      const req = store.get(ownerKey);
+      req.onsuccess = () => {
+        const rec = req.result as IdbOwnerCardsRecord | undefined;
+        if (rec && Array.isArray(rec.cards)) {
+          resolve(rec.cards);
+        } else {
+          resolve(null);
+        }
+      };
+      req.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+async function clearOfflineCardsIDB(): Promise<void> {
+  const db = await openOfflineCardsDB();
+  if (!db) return;
+  await new Promise<void>((resolve) => {
+    try {
+      const tx = db.transaction(IDB_STORE_OWNER_CARDS, 'readwrite');
+      tx.objectStore(IDB_STORE_OWNER_CARDS).clear();
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+      tx.onabort = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
+}
 
 // Synchronous in-memory lock sets to block rapid double-taps or concurrent sales instantly
 const memoryLockedCards = new Set<string>();
@@ -131,7 +419,9 @@ export function buildDeterministicSaleTxId(cardDocIds: string[], fallbackSeed?: 
     const digest = fnv1aHex(cleanIds.join(','));
     return `sale_${first}_n${cleanIds.length}_${digest}`.slice(0, 120);
   }
-  const seed = sanitizeTxSegment(fallbackSeed || '') || `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const seed =
+    sanitizeTxSegment(fallbackSeed || '') ||
+    `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   return `sale_paper_${seed}`.slice(0, 120);
 }
 
@@ -283,6 +573,64 @@ export function releaseCardLocksLocally(cardNumbers: string[]): void {
 // Fast in-memory RAM cache per owner so reading/filtering available cards takes <1ms
 const memoryCardPoolByOwner = new Map<string, CachedAvailableCard[]>();
 
+function normalizeCardForStorage(c: CachedAvailableCard, fallbackOwnerId: string): CachedAvailableCard | null {
+  if (!c?.cardNumber) return null;
+  const normPkg = canonicalPackageId(c.packageId || c.categoryId || c.price);
+  if (!normPkg) return null;
+  const resolvedPrice =
+    parseNormalizedPrice(c.price) || resolvePackagePriceFromMeta(normPkg) || undefined;
+  return {
+    id: c.id,
+    packageId: normPkg,
+    ...(c.categoryId ? { categoryId: c.categoryId } : {}),
+    ...(resolvedPrice ? { price: resolvedPrice } : {}),
+    cardNumber: c.cardNumber,
+    ownerId: c.ownerId ?? fallbackOwnerId,
+    status: String(c.status || 'available').trim().toLowerCase(),
+    cardType: resolveCardKind(c),
+  };
+}
+
+/**
+ * Hydrates cached available cards from high-capacity IndexedDB (`taibah_offline_cards_db`)
+ * into synchronous RAM memory (`memoryCardPoolByOwner`) for instant offline display & sales.
+ * Automatically migrates any legacy `localStorage` cards if IndexedDB is empty.
+ */
+export async function hydrateOfflineCardsFromIDB(ownerIds: string[]): Promise<CachedAvailableCard[]> {
+  const uniqueOwners = Array.from(new Set(ownerIds.map((o) => (o || '').trim()).filter(Boolean)));
+  if (uniqueOwners.length === 0) return [];
+
+  const locked = getLocallyLockedCards();
+  const pendingIds = getPendingSoldCardIds();
+
+  for (const oid of uniqueOwners) {
+    const idbCards = await readOwnerCardsFromIDB(oid);
+    if (idbCards && idbCards.length > 0) {
+      const cleaned: CachedAvailableCard[] = [];
+      for (const raw of idbCards) {
+        const norm = normalizeCardForStorage(raw, oid);
+        if (!norm) continue;
+        if (locked.has(norm.cardNumber) || pendingIds.has(norm.id)) continue;
+        const st = String(norm.status || '').toLowerCase();
+        if (st && EXCLUDED_CARD_STATUSES.has(st)) continue;
+        cleaned.push(norm);
+      }
+      const existingRam = memoryCardPoolByOwner.get(oid) || [];
+      if (cleaned.length >= existingRam.length) {
+        memoryCardPoolByOwner.set(oid, cleaned);
+      }
+    } else {
+      // Seamless migration: if legacy localStorage has cards, mirror them into IndexedDB
+      const legacy = getCachedAvailableCards(oid);
+      if (legacy.length > 0) {
+        void writeOwnerCardsToIDB(oid, legacy);
+      }
+    }
+  }
+
+  return getCachedAvailableCardsForOwners(uniqueOwners);
+}
+
 export function saveCachedAvailableCards(
   ownerId: string,
   cards: CachedAvailableCard[],
@@ -297,17 +645,14 @@ export function saveCachedAvailableCards(
     if (!c?.cardNumber || locked.has(c.cardNumber) || pendingIds.has(c.id) || seen.has(c.cardNumber)) {
       continue;
     }
-    const normPkg = canonicalPackageId(c.packageId);
-    if (!normPkg) continue;
-    seen.add(c.cardNumber);
-    clean.push({
-      id: c.id,
-      packageId: normPkg,
-      cardNumber: c.cardNumber,
-      ownerId: c.ownerId || ownerId,
-      cardType: resolveCardKind(c),
-    });
-    if (clean.length >= 6000) break;
+    const statusNorm = String(c.status ?? '').trim().toLowerCase();
+    if (statusNorm && EXCLUDED_CARD_STATUSES.has(statusNorm)) continue;
+
+    const norm = normalizeCardForStorage(c, ownerId);
+    if (!norm) continue;
+    seen.add(norm.cardNumber);
+    clean.push(norm);
+    if (clean.length >= 50000) break;
   }
 
   // NO EMPTY OVERWRITE GUARD: Never wipe an existing local card pool with an empty array
@@ -319,15 +664,20 @@ export function saveCachedAvailableCards(
     }
   }
 
+  // 1. Instant 0ms RAM update
   memoryCardPoolByOwner.set(ownerId, clean);
+
+  // 2. Primary high-capacity persistence in IndexedDB (`taibah_offline_cards_db` — zero 5MB quota limit!)
+  void writeOwnerCardsToIDB(ownerId, clean);
+
+  // 3. Best-effort lightweight secondary mirror in localStorage for instant cold-start before IDB resolves
   try {
-    localStorage.setItem(`${CACHED_CARDS_PREFIX}${ownerId}`, JSON.stringify(clean));
+    localStorage.setItem(`${CACHED_CARDS_PREFIX}${ownerId}`, JSON.stringify(clean.slice(0, 2000)));
   } catch {
-    // If quota exceeded, persist top 2,500 while keeping full 6,000 in RAM
     try {
-      localStorage.setItem(`${CACHED_CARDS_PREFIX}${ownerId}`, JSON.stringify(clean.slice(0, 2500)));
+      localStorage.setItem(`${CACHED_CARDS_PREFIX}${ownerId}`, JSON.stringify(clean.slice(0, 500)));
     } catch {
-      // Ignore storage quota errors
+      // Safe to ignore: IndexedDB holds the complete authoritative offline pool
     }
   }
 }
@@ -350,19 +700,19 @@ export function getCachedAvailableCards(ownerId: string, packageId?: string): Ca
       if (raw) {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed)) {
-          pool = parsed
-            .filter(
-              (c): c is CachedAvailableCard =>
-                !!c &&
-                typeof c.id === 'string' &&
-                typeof c.packageId === 'string' &&
-                typeof c.cardNumber === 'string'
-            )
-            .map((c) => ({
-              ...c,
-              packageId: canonicalPackageId(c.packageId),
-              cardType: resolveCardKind(c),
-            }));
+          const normalized: CachedAvailableCard[] = [];
+          for (const item of parsed) {
+            if (
+              !item ||
+              typeof item.id !== 'string' ||
+              typeof item.cardNumber !== 'string'
+            ) {
+              continue;
+            }
+            const norm = normalizeCardForStorage(item as CachedAvailableCard, ownerId);
+            if (norm) normalized.push(norm);
+          }
+          pool = normalized;
           memoryCardPoolByOwner.set(ownerId, pool);
         }
       }
@@ -373,17 +723,21 @@ export function getCachedAvailableCards(ownerId: string, packageId?: string): Ca
 
   if (!pool || pool.length === 0) return [];
   const targetPkg = packageId ? canonicalPackageId(packageId) : '';
-  return pool.filter(
-    (c) =>
-      !locked.has(c.cardNumber) &&
-      !pendingIds.has(c.id) &&
-      (!targetPkg || canonicalPackageId(c.packageId) === targetPkg)
-  );
+  return pool.filter((c) => {
+    if (locked.has(c.cardNumber) || pendingIds.has(c.id)) return false;
+    const statusNorm = String(c.status ?? '').trim().toLowerCase();
+    if (statusNorm && EXCLUDED_CARD_STATUSES.has(statusNorm)) return false;
+    if (targetPkg && canonicalPackageId(c.packageId || c.categoryId || c.price) !== targetPkg) {
+      return false;
+    }
+    return true;
+  });
 }
 
 /**
  * Retrieve all cached unsold cards matching ANY of the user's owner identifiers
- * (e.g. `uid`, `linkedSourceId`, normalized phone, email), deduplicated by `cardNumber`.
+ * (e.g. `uid`, `linkedSourceId`, normalized phone, email, `'super_admin'`, `'admin'`),
+ * deduplicated by `cardNumber`.
  */
 export function getCachedAvailableCardsForOwners(
   ownerIds: string[],
@@ -409,8 +763,9 @@ export function removeCardsFromCache(ownerId: string, cardNumbers: string[]): vo
   const numSet = new Set(cardNumbers);
   const remaining = getCachedAvailableCards(ownerId).filter((c) => !numSet.has(c.cardNumber));
   memoryCardPoolByOwner.set(ownerId, remaining);
+  void writeOwnerCardsToIDB(ownerId, remaining);
   try {
-    localStorage.setItem(`${CACHED_CARDS_PREFIX}${ownerId}`, JSON.stringify(remaining.slice(0, 6000)));
+    localStorage.setItem(`${CACHED_CARDS_PREFIX}${ownerId}`, JSON.stringify(remaining.slice(0, 2000)));
   } catch {
     // Ignore storage errors
   }
@@ -424,6 +779,25 @@ export function removeCardsFromCacheForOwners(ownerIds: string[], cardNumbers: s
   }
 }
 
+/**
+ * Atomically marks picked cards as sold/locked across `pendingSoldCardIds`, `memoryLockedCards`,
+ * RAM pools, IndexedDB (`taibah_offline_cards_db`), and localStorage mirror.
+ */
+export function markCardsSoldInLocalPool(
+  ownerIds: string[],
+  pickedCards: Array<{ id: string; cardNumber: string }>
+): boolean {
+  if (pickedCards.length === 0) return true;
+  const nums = pickedCards.map((c) => c.cardNumber).filter(Boolean);
+  const ids = pickedCards.map((c) => c.id).filter(Boolean);
+  if (!lockCardsLocally(nums)) {
+    return false;
+  }
+  markCardIdsPendingSold(ids);
+  removeCardsFromCacheForOwners(ownerIds, nums);
+  return true;
+}
+
 export function consumeCachedAvailableCards(
   ownerId: string,
   packageId: string,
@@ -432,31 +806,27 @@ export function consumeCachedAvailableCards(
   const pool = getCachedAvailableCards(ownerId, packageId);
   if (pool.length < quantity) return null;
   const picked = pool.slice(0, quantity);
-  const pickedNums = picked.map((c) => c.cardNumber);
-  const pickedIds = picked.map((c) => c.id);
-  if (!lockCardsLocally(pickedNums)) {
+  if (!markCardsSoldInLocalPool([ownerId], picked)) {
     return null;
   }
-  markCardIdsPendingSold(pickedIds);
-  removeCardsFromCache(ownerId, pickedNums);
   return picked;
 }
 
 export function consumeCachedAvailableCardsForOwners(
   ownerIds: string[],
   packageId: string,
-  quantity: number
+  quantity: number,
+  currentUser?: SellableCardOwnerContext | null
 ): CachedAvailableCard[] | null {
-  const pool = getCachedAvailableCardsForOwners(ownerIds, packageId);
+  const rawPool = getCachedAvailableCardsForOwners(ownerIds);
+  const pool = currentUser
+    ? getSellableCardsForPackage(rawPool, packageId, currentUser, getPendingSoldCardIds())
+    : getCachedAvailableCardsForOwners(ownerIds, packageId);
   if (pool.length < quantity) return null;
   const picked = pool.slice(0, quantity);
-  const pickedNums = picked.map((c) => c.cardNumber);
-  const pickedIds = picked.map((c) => c.id);
-  if (!lockCardsLocally(pickedNums)) {
+  if (!markCardsSoldInLocalPool(ownerIds, picked)) {
     return null;
   }
-  markCardIdsPendingSold(pickedIds);
-  removeCardsFromCacheForOwners(ownerIds, pickedNums);
   return picked;
 }
 
@@ -528,7 +898,9 @@ export function offlineSaleToSaleDoc(q: OfflineQueuedSale): SaleDoc {
     items: q.items,
     cardNumbers: q.cardNumbers,
     status: q.remainingAmount > 0 ? 'partial' : 'completed',
-    notes: q.notes ? `${q.notes} (قيد المزامنة السحابية)` : 'عملية مسجلة دون إنترنت — قيد المزامنة السحابية',
+    notes: q.notes
+      ? `${q.notes} (قيد المزامنة السحابية)`
+      : 'عملية مسجلة دون إنترنت — قيد المزامنة السحابية',
     createdAt: fakeTs,
     updatedAt: fakeTs,
   };
@@ -546,13 +918,14 @@ export function clearOfflineSalesQueueOnly(): void {
 }
 
 /**
- * Clears all locally cached card pools, local card locks, and offline sales queue
- * (used during Super Admin full app data reset).
+ * Clears all locally cached card pools (RAM + IndexedDB + localStorage),
+ * local card locks, and offline sales queue (used during Super Admin full app data reset).
  */
 export function clearAllLocalOfflineCardCaches(): void {
   memoryLockedCards.clear();
   memoryPendingSoldCardIds.clear();
   memoryCardPoolByOwner.clear();
+  void clearOfflineCardsIDB();
   try {
     localStorage.removeItem(LOCKED_CARDS_KEY);
     localStorage.removeItem(PENDING_SOLD_CARD_IDS_KEY);
