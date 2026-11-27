@@ -3049,6 +3049,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                 tx.update(cardRef, {
                   status: 'available',
                   ownerId: qSale.buyerId,
+                  previousOwnerId: qSale.sellerId,
                   soldTo: soldToValue,
                   soldToName: qSale.buyerName.slice(0, 128),
                   soldToPhone: (qSale.buyerPhone || '').slice(0, 32),
@@ -3104,6 +3105,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                     b.update(cardRef, {
                       status: 'available',
                       ownerId: qSale.buyerId,
+                      previousOwnerId: qSale.sellerId,
                       soldTo: soldToValue,
                       soldToName: qSale.buyerName.slice(0, 128),
                       soldToPhone: (qSale.buyerPhone || '').slice(0, 32),
@@ -3511,18 +3513,38 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             );
           }
 
-          // 2. Fetch & store Super Admin's actual available cards into IndexedDB (`taibah_offline_cards_db`) for instant 100% offline selling
-          const adminCardsQ = query(
+          // 2. Fetch & store Super Admin's actual available cards into IndexedDB (`taibah_offline_cards_db`)
+          // Uses single-field queries ONLY (zero composite index dependency) for 100% reliability across all 8 packages
+          const adminOwnedQ = query(
+            collection(db, 'cards'),
+            where('ownerId', '==', activeUid),
+            limit(6000)
+          );
+          const adminAvailQ = query(
             collection(db, 'cards'),
             where('status', '==', 'available'),
             limit(6000)
           );
           const canHitServer = Boolean(auth.currentUser) && navigator.onLine;
-          let cardsSnap = null;
+          const adminSnapshots: Array<{ docs: Array<{ id: string; data: () => unknown }> }> = [];
           try {
-            cardsSnap = canHitServer
-              ? await raceWithTimeout(getDocs(adminCardsQ), 15000)
-              : await getDocsFromCache(adminCardsQ);
+            const [ownedRes, availRes] = await Promise.allSettled([
+              canHitServer
+                ? raceWithTimeout(getDocs(adminOwnedQ), 15000)
+                : getDocsFromCache(adminOwnedQ),
+              canHitServer
+                ? raceWithTimeout(getDocs(adminAvailQ), 15000)
+                : getDocsFromCache(adminAvailQ),
+            ]);
+            if (ownedRes.status === 'fulfilled' && ownedRes.value) {
+              adminSnapshots.push(ownedRes.value);
+            }
+            if (availRes.status === 'fulfilled' && availRes.value) {
+              adminSnapshots.push(availRes.value);
+            }
+            if (adminSnapshots.length === 0) {
+              throw (ownedRes.status === 'rejected' ? ownedRes.reason : new Error('offline'));
+            }
           } catch (err) {
             if (forceServer && (isFirestoreQuotaError(err) || isFirestoreOfflineError(err))) {
               notifyInfo(
@@ -3535,37 +3557,53 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
           const mergedAdminCards = new Map<string, CachedAvailableCard>();
           const adminOwnerSet = new Set(ownerIds.map((o) => o.toLowerCase()));
-          for (const d of cardsSnap.docs) {
-            const data = d.data() as CardDoc & {
-              denomination?: string | number;
-              price?: number | string;
-              categoryId?: string;
-            };
-            if (!data.cardNumber || isCardLocallyLocked(data.cardNumber, d.id)) continue;
-            const rawOwner = String(data.ownerId ?? '').trim();
-            const rawOwnerLower = rawOwner.toLowerCase();
-            // Include central/admin cards (owned by admin uid, 'super_admin', 'admin', or empty)
-            if (
-              rawOwner &&
-              rawOwnerLower !== 'super_admin' &&
-              rawOwnerLower !== 'admin' &&
-              !adminOwnerSet.has(rawOwnerLower)
-            ) {
-              continue;
-            }
-            const normPkg = canonicalPackageId(data.packageId || data.categoryId || data.denomination || data.price);
-            if (!normPkg) continue;
-            if (!mergedAdminCards.has(data.cardNumber)) {
-              mergedAdminCards.set(data.cardNumber, {
-                id: d.id,
-                packageId: normPkg,
-                categoryId: data.categoryId,
-                price: parseNormalizedPrice(data.price) || undefined,
-                cardNumber: data.cardNumber,
-                ownerId: rawOwner || activeUid,
-                status: data.status || 'available',
-                cardType: resolveCardKind(data),
-              });
+          const excludedStatuses = new Set([
+            'sold',
+            'returned',
+            'recalled',
+            'injected',
+            'used',
+            'deleted',
+            'cancelled',
+            'canceled',
+          ]);
+          for (const snap of adminSnapshots) {
+            for (const d of snap.docs) {
+              const data = d.data() as CardDoc & {
+                denomination?: string | number;
+                price?: number | string;
+                categoryId?: string;
+              };
+              if (!data.cardNumber || isCardLocallyLocked(data.cardNumber, d.id)) continue;
+              const statusNorm = String(data.status ?? '').trim().toLowerCase();
+              if (statusNorm && excludedStatuses.has(statusNorm)) continue;
+              const rawOwner = String(data.ownerId ?? '').trim();
+              const rawOwnerLower = rawOwner.toLowerCase();
+              // Include central/admin cards (owned by admin uid, 'super_admin', 'admin', or empty)
+              if (
+                rawOwner &&
+                rawOwnerLower !== 'super_admin' &&
+                rawOwnerLower !== 'admin' &&
+                !adminOwnerSet.has(rawOwnerLower)
+              ) {
+                continue;
+              }
+              const normPkg = canonicalPackageId(
+                data.packageId || data.categoryId || data.denomination || data.price
+              );
+              if (!normPkg) continue;
+              if (!mergedAdminCards.has(data.cardNumber)) {
+                mergedAdminCards.set(data.cardNumber, {
+                  id: d.id,
+                  packageId: normPkg,
+                  categoryId: data.categoryId,
+                  price: parseNormalizedPrice(data.price) || undefined,
+                  cardNumber: data.cardNumber,
+                  ownerId: rawOwner || activeUid,
+                  status: statusNorm || 'available',
+                  cardType: resolveCardKind(data),
+                });
+              }
             }
           }
 
@@ -3592,8 +3630,9 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           return existingLocal.length;
         }
 
-        // Agent / Client: fetch ALL unsold cards (`available` + `assigned_to_agent`) across `uid` + `linkedSourceId`
-        // and store full objects into high-capacity IndexedDB (`taibah_offline_cards_db`) with No Empty Overwrite protection.
+        // Agent / Client: fetch ALL unsold cards across `uid` + `linkedSourceId`
+        // Uses single-field `where('ownerId', '==', oid)` (ZERO composite index errors!)
+        // and stores full objects into high-capacity IndexedDB (`taibah_offline_cards_db`).
         const queryOwnerIds = Array.from(
           new Set([activeUid, profile.linkedSourceId || ''].map((s) => s.trim()).filter(Boolean))
         );
@@ -3603,12 +3642,21 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
         const mergedByCard = new Map<string, CachedAvailableCard>();
         let anyServerQuerySucceeded = false;
+        const excludedUserCardStatuses = new Set([
+          'sold',
+          'returned',
+          'recalled',
+          'injected',
+          'used',
+          'deleted',
+          'cancelled',
+          'canceled',
+        ]);
 
         for (const oid of queryOwnerIds) {
           const cardsQ = query(
             collection(db, 'cards'),
             where('ownerId', '==', oid),
-            where('status', 'in', ['available', 'assigned_to_agent']),
             limit(6000)
           );
           try {
@@ -3628,6 +3676,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                 categoryId?: string;
               };
               if (!data.cardNumber || isCardLocallyLocked(data.cardNumber, d.id)) continue;
+              const statusNorm = String(data.status ?? '').trim().toLowerCase();
+              if (statusNorm && excludedUserCardStatuses.has(statusNorm)) continue;
               const normPkg = canonicalPackageId(
                 data.packageId || data.categoryId || data.denomination || data.price
               );
@@ -3640,7 +3690,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                   price: parseNormalizedPrice(data.price) || undefined,
                   cardNumber: data.cardNumber,
                   ownerId: data.ownerId || oid,
-                  status: data.status || 'assigned_to_agent',
+                  status: statusNorm || 'assigned_to_agent',
                   cardType: resolveCardKind(data),
                 });
               }
@@ -4265,53 +4315,40 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           }
 
           // If STILL short while offline, also read Firestore's own offline IndexedDB cache (`getDocsFromCache`)
+          // using SINGLE-FIELD queries ONLY (zero composite-index failures!)
           if (!hasAllInPool(unifiedLocalPool) && !navigator.onLine) {
             const queryOwnerIds = Array.from(
               new Set([activeUser.uid, profile.linkedSourceId || ''].map((s) => s.trim()).filter(Boolean))
             );
+            const queriesToTry =
+              profile.role === 'super_admin'
+                ? [
+                    query(collection(db, 'cards'), where('ownerId', '==', activeUser.uid), limit(4000)),
+                    query(collection(db, 'cards'), where('status', '==', 'available'), limit(4000)),
+                  ]
+                : queryOwnerIds.map((oid) =>
+                    query(collection(db, 'cards'), where('ownerId', '==', oid), limit(4000))
+                  );
             const firestoreCacheCards: CachedAvailableCard[] = [];
-            for (const item of requestedItems) {
-              const normPkgId = canonicalPackageId(item.packageId);
-              if (!normPkgId) continue;
-              const queriesToTry =
-                profile.role === 'super_admin'
-                  ? [
-                      query(
-                        collection(db, 'cards'),
-                        where('packageId', '==', normPkgId),
-                        where('status', '==', 'available'),
-                        limit(item.quantity + 10)
-                      ),
-                    ]
-                  : queryOwnerIds.map((oid) =>
-                      query(
-                        collection(db, 'cards'),
-                        where('ownerId', '==', oid),
-                        where('packageId', '==', normPkgId),
-                        where('status', 'in', ['available', 'assigned_to_agent']),
-                        limit(item.quantity + 10)
-                      )
-                    );
-              for (const qTry of queriesToTry) {
-                try {
-                  const snap = await getDocsFromCache(qTry);
-                  for (const d of snap.docs) {
-                    const cData = d.data() as CardDoc & { price?: number | string; categoryId?: string };
-                    if (!cData.cardNumber) continue;
-                    firestoreCacheCards.push({
-                      id: d.id,
-                      packageId: canonicalPackageId(cData.packageId || cData.categoryId || cData.price || normPkgId),
-                      categoryId: cData.categoryId,
-                      price: parseNormalizedPrice(cData.price) || undefined,
-                      cardNumber: cData.cardNumber,
-                      ownerId: cData.ownerId || activeUser.uid,
-                      status: cData.status || 'available',
-                      cardType: resolveCardKind(cData),
-                    });
-                  }
-                } catch {
-                  // Cache miss on this query
+            for (const qTry of queriesToTry) {
+              try {
+                const snap = await getDocsFromCache(qTry);
+                for (const d of snap.docs) {
+                  const cData = d.data() as CardDoc & { price?: number | string; categoryId?: string };
+                  if (!cData.cardNumber) continue;
+                  firestoreCacheCards.push({
+                    id: d.id,
+                    packageId: canonicalPackageId(cData.packageId || cData.categoryId || cData.price),
+                    categoryId: cData.categoryId,
+                    price: parseNormalizedPrice(cData.price) || undefined,
+                    cardNumber: cData.cardNumber,
+                    ownerId: cData.ownerId || activeUser.uid,
+                    status: cData.status || 'available',
+                    cardType: resolveCardKind(cData),
+                  });
                 }
+              } catch {
+                // Cache miss on this query
               }
             }
             if (firestoreCacheCards.length > 0) {
@@ -4388,91 +4425,72 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               return null;
             }
 
-            // Online server fetch fallback for any remaining needed cards
+            // Online server fetch fallback (single-field queries ONLY — zero composite index failures!)
             const queryOwnerIds = Array.from(
               new Set([activeUser.uid, profile.linkedSourceId || ''].map((s) => s.trim()).filter(Boolean))
             );
-            const fetchedAll = await Promise.all(
-              requestedItems.map(async (item) => {
-                const deliverTarget = Math.min(item.quantity, item.deliverNow ?? item.quantity);
-                if (deliverTarget <= 0) {
-                  return { item, deliverTarget, list: [] as Array<{ id: string; cardNumber: string }>, fromCache: true };
-                }
-                const normPkgId = canonicalPackageId(item.packageId);
-                const localPool = getSellableCardsForPackage(
-                  unifiedLocalPool,
-                  resolvePkgForItem(normPkgId),
-                  profile,
-                  pendingSoldIds
-                );
-                if (localPool.length >= deliverTarget) {
-                  return {
-                    item,
-                    deliverTarget,
-                    list: localPool.slice(0, deliverTarget).map((c) => ({ id: c.id, cardNumber: c.cardNumber })),
-                    fromCache: true,
-                  };
-                }
-
-                const collectedMap = new Map<string, { id: string; cardNumber: string }>();
-                for (const c of localPool) {
-                  collectedMap.set(c.cardNumber, { id: c.id, cardNumber: c.cardNumber });
-                }
-
-                const addDocs = (docs: Array<{ id: string; data: () => unknown }>) => {
-                  for (const d of docs) {
-                    const cData = d.data() as CardDoc;
-                    if (!cData.cardNumber || isCardLocallyLocked(cData.cardNumber, d.id)) continue;
-                    if (!collectedMap.has(cData.cardNumber)) {
-                      collectedMap.set(cData.cardNumber, { id: d.id, cardNumber: cData.cardNumber });
-                    }
-                    if (collectedMap.size >= deliverTarget) break;
-                  }
-                };
-
-                for (const oid of queryOwnerIds) {
-                  if (collectedMap.size >= deliverTarget) break;
-                  const remainingNeeded = deliverTarget - collectedMap.size;
-                  const ownerExactQ = query(
-                    collection(db, 'cards'),
-                    where('ownerId', '==', oid),
-                    where('packageId', '==', normPkgId),
-                    where('status', 'in', ['available', 'assigned_to_agent']),
-                    limit(remainingNeeded + 2)
+            const serverQueries =
+              profile.role === 'super_admin'
+                ? [
+                    query(collection(db, 'cards'), where('ownerId', '==', activeUser.uid), limit(4000)),
+                    query(collection(db, 'cards'), where('status', '==', 'available'), limit(4000)),
+                  ]
+                : queryOwnerIds.map((oid) =>
+                    query(collection(db, 'cards'), where('ownerId', '==', oid), limit(4000))
                   );
-                  try {
-                    const idbSnap = await getDocsFromCache(ownerExactQ);
-                    addDocs(idbSnap.docs);
-                  } catch {
-                    // Cache miss
-                  }
-                  if (collectedMap.size < deliverTarget) {
-                    const serverSnap = await getDocs(ownerExactQ);
-                    addDocs(serverSnap.docs);
-                  }
-                }
 
-                // Super Admin central fallback if some cards belong to legacy admin ownerId
-                if (profile.role === 'super_admin' && collectedMap.size < deliverTarget) {
-                  const adminSnap = await getDocs(
-                    query(
-                      collection(db, 'cards'),
-                      where('packageId', '==', normPkgId),
-                      where('status', '==', 'available'),
-                      limit(deliverTarget - collectedMap.size + 2)
-                    )
-                  );
-                  addDocs(adminSnap.docs);
+            const liveFetchedCards: CachedAvailableCard[] = [];
+            for (const qServer of serverQueries) {
+              try {
+                const snap = await getDocs(qServer);
+                for (const d of snap.docs) {
+                  const cData = d.data() as CardDoc & { price?: number | string; categoryId?: string };
+                  if (!cData.cardNumber || isCardLocallyLocked(cData.cardNumber, d.id)) continue;
+                  liveFetchedCards.push({
+                    id: d.id,
+                    packageId: canonicalPackageId(cData.packageId || cData.categoryId || cData.price),
+                    categoryId: cData.categoryId,
+                    price: parseNormalizedPrice(cData.price) || undefined,
+                    cardNumber: cData.cardNumber,
+                    ownerId: cData.ownerId || activeUser.uid,
+                    status: cData.status || 'available',
+                    cardType: resolveCardKind(cData),
+                  });
                 }
+              } catch {
+                // ignore single query error
+              }
+            }
 
-                return {
-                  item,
-                  deliverTarget,
-                  list: Array.from(collectedMap.values()).slice(0, deliverTarget),
-                  fromCache: false,
-                };
-              })
-            );
+            if (liveFetchedCards.length > 0) {
+              unifiedLocalPool = mergeCandidateCards(unifiedLocalPool, liveFetchedCards);
+              // Persist newly discovered live cards into IndexedDB automatically so future offline sales take 0ms!
+              appendCachedAvailableCards(activeUser.uid, liveFetchedCards);
+            }
+
+            const workingPendingOnline = new Set(pendingSoldIds);
+            const fetchedAll = requestedItems.map((item) => {
+              const deliverTarget = Math.min(item.quantity, item.deliverNow ?? item.quantity);
+              if (deliverTarget <= 0) {
+                return { item, deliverTarget, list: [] as Array<{ id: string; cardNumber: string }>, fromCache: false };
+              }
+              const sellable = getSellableCardsForPackage(
+                unifiedLocalPool,
+                resolvePkgForItem(item.packageId),
+                profile,
+                workingPendingOnline
+              );
+              const chosen = sellable.slice(0, deliverTarget);
+              for (const c of chosen) {
+                workingPendingOnline.add(c.id);
+              }
+              return {
+                item,
+                deliverTarget,
+                list: chosen.map((c) => ({ id: c.id, cardNumber: c.cardNumber })),
+                fromCache: false,
+              };
+            });
 
             for (const { item, deliverTarget, list } of fetchedAll) {
               if (list.length < deliverTarget) {
@@ -5352,28 +5370,57 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         const items = req.items || [];
         if (items.length > 0) {
           const ownerIds = buildOwnerIdentifiers(profile, activeUser.uid);
-          const ownerIdList = ownerIds.slice(0, 10);
-          const shortages: string[] = [];
+          const pendingSoldIds = getPendingSoldCardIds();
+          let poolForApproval = getCachedAvailableCardsForOwners(ownerIds);
 
+          const needsLiveRefresh = items.some((item) => {
+            if (item.quantity <= 0) return false;
+            return (
+              getSellableCardsForPackage(poolForApproval, item.packageId, profile, pendingSoldIds)
+                .length < item.quantity
+            );
+          });
+
+          if (needsLiveRefresh && navigator.onLine) {
+            try {
+              const liveQ =
+                profile.role === 'super_admin'
+                  ? query(collection(db, 'cards'), where('status', '==', 'available'), limit(4000))
+                  : query(collection(db, 'cards'), where('ownerId', '==', activeUser.uid), limit(4000));
+              const liveSnap = await getDocs(liveQ);
+              const liveCards: CachedAvailableCard[] = [];
+              for (const d of liveSnap.docs) {
+                const c = d.data() as CardDoc & { price?: number | string; categoryId?: string };
+                if (!c.cardNumber) continue;
+                liveCards.push({
+                  id: d.id,
+                  packageId: canonicalPackageId(c.packageId || c.categoryId || c.price),
+                  categoryId: c.categoryId,
+                  price: parseNormalizedPrice(c.price) || undefined,
+                  cardNumber: c.cardNumber,
+                  ownerId: c.ownerId || activeUser.uid,
+                  status: c.status || 'available',
+                  cardType: resolveCardKind(c),
+                });
+              }
+              if (liveCards.length > 0) {
+                poolForApproval = liveCards;
+                appendCachedAvailableCards(activeUser.uid, liveCards);
+              }
+            } catch {
+              // Keep cached pool if live refresh fails
+            }
+          }
+
+          const shortages: string[] = [];
           for (const item of items) {
             if (item.quantity <= 0) continue;
-            let availableQty = getCachedAvailableCardsForOwners(ownerIds, item.packageId).length;
-            if (availableQty < item.quantity && navigator.onLine && ownerIdList.length > 0) {
-              try {
-                const liveCardsSnap = await getDocs(
-                  query(
-                    collection(db, 'cards'),
-                    where('ownerId', 'in', ownerIdList),
-                    where('packageId', '==', item.packageId),
-                    where('status', 'in', ['available', 'assigned_to_agent']),
-                    limit(item.quantity + 1)
-                  )
-                );
-                availableQty = Math.max(availableQty, liveCardsSnap.size);
-              } catch {
-                // Keep cached count if network check fails
-              }
-            }
+            const availableQty = getSellableCardsForPackage(
+              poolForApproval,
+              item.packageId,
+              profile,
+              pendingSoldIds
+            ).length;
             if (availableQty < item.quantity) {
               const pkgMeta = packages.find((p) => p.id === item.packageId);
               const label = item.packageLabel || (pkgMeta ? `باقة ${pkgMeta.price} ر.ي` : item.packageId);
@@ -7393,18 +7440,77 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         }
       };
 
+      // Strict isolation guard for Agents: an Agent can ONLY inspect their own linked clients
+      const activeActorUid = auth.currentUser?.uid || firebaseUser?.uid || profile?.uid || '';
+      const isAgentViewer = profile?.role === 'agent';
+      const isSuperAdminViewer = profile?.role === 'super_admin';
+      const isTargetLinkedClient =
+        targetUser.role === 'client' &&
+        targetUser.uid !== activeActorUid &&
+        (targetUser.parentAgentId === activeActorUid ||
+          targetUser.agentId === activeActorUid ||
+          targetUser.parentId === activeActorUid ||
+          targetUser.createdBy === activeActorUid);
+
+      if (isAgentViewer && !isTargetLinkedClient && targetUid !== activeActorUid) {
+        return {
+          targetUid,
+          targetName: targetUser.name,
+          targetPhone: targetUser.phone,
+          targetRole: targetUser.role,
+          discountRate: targetUser.discountRate || 80,
+          totalReceived: 0,
+          totalSold: 0,
+          totalRemaining: 0,
+          totalRecalled: 0,
+          byPackage: EXCLUSIVE_PACKAGES.map((p) => ({
+            packageId: p.id,
+            price: p.price,
+            dataLabel: p.dataLabel,
+            receivedCount: 0,
+            soldCount: 0,
+            remainingCount: 0,
+            recalledCount: 0,
+          })),
+          soldCards: [],
+          remainingCards: [],
+          loadedAtMs: Date.now(),
+          fromCache: false,
+        };
+      }
+
+      const pendingSoldSet = getPendingSoldCardIds();
+
       try {
         const [ownedCardsSnap, sellerSalesSnap, buyerSalesSnap, recalledSnap] = await Promise.all([
-          runQuerySafe(
-            query(collection(db, 'cards'), where('ownerId', '==', targetUid), limit(2500))
-          ),
-          runQuerySafe(
-            query(collection(db, 'sales'), where('sellerId', '==', targetUid), limit(500))
-          ),
-          runQuerySafe(
-            query(collection(db, 'sales'), where('buyerId', '==', targetUid), limit(500))
-          ),
-          profile?.role === 'super_admin'
+          isSuperAdminViewer || targetUid === activeActorUid
+            ? runQuerySafe(
+                query(collection(db, 'cards'), where('ownerId', '==', targetUid), limit(2500))
+              )
+            : isAgentViewer && isTargetLinkedClient
+              ? runQuerySafe(
+                  query(
+                    collection(db, 'cards'),
+                    where('previousOwnerId', '==', activeActorUid),
+                    limit(2500)
+                  )
+                )
+              : Promise.resolve(null),
+          isSuperAdminViewer || targetUid === activeActorUid
+            ? runQuerySafe(
+                query(collection(db, 'sales'), where('sellerId', '==', targetUid), limit(500))
+              )
+            : Promise.resolve(null),
+          isSuperAdminViewer || targetUid === activeActorUid
+            ? runQuerySafe(
+                query(collection(db, 'sales'), where('buyerId', '==', targetUid), limit(500))
+              )
+            : isAgentViewer && isTargetLinkedClient
+              ? runQuerySafe(
+                  query(collection(db, 'sales'), where('sellerId', '==', activeActorUid), limit(500))
+                )
+              : Promise.resolve(null),
+          isSuperAdminViewer
             ? runQuerySafe(
                 query(collection(db, 'cards'), where('recalledFrom', '==', targetUid), limit(1500))
               )
@@ -7418,51 +7524,66 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         }
         if (buyerSalesSnap) {
           for (const d of buyerSalesSnap.docs) {
-            allRelevantSalesMap.set(d.id, { id: d.id, ...(d.data() as Omit<SaleDoc, 'id'>) });
+            const sDoc = { id: d.id, ...(d.data() as Omit<SaleDoc, 'id'>) };
+            if (sDoc.buyerId === targetUid || sDoc.sellerId === targetUid) {
+              allRelevantSalesMap.set(d.id, sDoc);
+            }
           }
         }
 
+        const seenCardIds = new Set<string>();
+        const ingestOwnedCardDoc = (docId: string, c: CardDoc) => {
+          if (seenCardIds.has(docId) || c.ownerId !== targetUid) return;
+          seenCardIds.add(docId);
+          const normPkgId = canonicalPackageId(c.packageId || c.price);
+          const pkg = pkgMap.get(normPkgId) || pkgMap.get(c.packageId);
+          const price = pkg?.price || parseNormalizedPrice(c.price) || 0;
+          const label = pkg ? `باقة ${pkg.price} ر.ي (${pkg.dataLabel})` : c.packageId;
+          if (
+            (c.status === 'available' || c.status === 'assigned_to_agent') &&
+            !pendingSoldSet.has(docId)
+          ) {
+            remainingCards.push({
+              id: docId,
+              cardNumber: c.cardNumber,
+              packageId: pkg?.id || normPkgId || c.packageId,
+              packagePrice: price,
+              packageLabel: label,
+              ownerId: c.ownerId,
+              status: c.status,
+              cardType: resolveCardKind(c),
+            });
+          } else if (c.status === 'sold') {
+            const linkedSale = c.saleId ? allRelevantSalesMap.get(c.saleId) : undefined;
+            soldCardsMap.set(c.cardNumber, {
+              cardNumber: c.cardNumber,
+              packageId: pkg?.id || normPkgId || c.packageId,
+              packagePrice: price,
+              packageLabel: label,
+              buyerName: c.soldToName || linkedSale?.buyerName || c.soldTo || 'زبون مباشر',
+              buyerPhone: c.soldToPhone || linkedSale?.buyerPhone || '',
+              soldAtMs: linkedSale ? getSaleMs(linkedSale) : Date.now(),
+              saleType: (c.saleType || linkedSale?.saleType || 'direct') as
+                | 'direct'
+                | 'electronic_wholesale'
+                | 'paper_invoice',
+              saleId: c.saleId || '',
+              invoiceNumber: linkedSale?.invoiceNumber || '',
+              unitPrice:
+                linkedSale?.items?.find((it) => it.packageId === c.packageId)?.unitPrice || price,
+            });
+          }
+        };
+
         if (ownedCardsSnap) {
           for (const d of ownedCardsSnap.docs) {
-            const c = d.data() as CardDoc;
-            const pkg = pkgMap.get(c.packageId);
-            const price = pkg?.price || 0;
-            const label = pkg ? `باقة ${pkg.price} ر.ي (${pkg.dataLabel})` : c.packageId;
-            if (c.status === 'available' || c.status === 'assigned_to_agent') {
-              remainingCards.push({
-                id: d.id,
-                cardNumber: c.cardNumber,
-                packageId: c.packageId,
-                packagePrice: price,
-                packageLabel: label,
-                ownerId: c.ownerId,
-                status: c.status,
-              });
-            } else if (c.status === 'sold') {
-              const linkedSale = c.saleId ? allRelevantSalesMap.get(c.saleId) : undefined;
-              soldCardsMap.set(c.cardNumber, {
-                cardNumber: c.cardNumber,
-                packageId: c.packageId,
-                packagePrice: price,
-                packageLabel: label,
-                buyerName: c.soldToName || linkedSale?.buyerName || c.soldTo || 'زبون مباشر',
-                buyerPhone: c.soldToPhone || linkedSale?.buyerPhone || '',
-                soldAtMs: linkedSale ? getSaleMs(linkedSale) : Date.now(),
-                saleType: (c.saleType || linkedSale?.saleType || 'direct') as
-                  | 'direct'
-                  | 'electronic_wholesale'
-                  | 'paper_invoice',
-                saleId: c.saleId || '',
-                invoiceNumber: linkedSale?.invoiceNumber || '',
-                unitPrice:
-                  linkedSale?.items?.find((it) => it.packageId === c.packageId)?.unitPrice || price,
-              });
-            }
+            ingestOwnedCardDoc(d.id, d.data() as CardDoc);
           }
         } else {
           // Fallback to local cached pool when offline and IndexedDB has no query index
           const localCached = getCachedAvailableCardsForOwners([targetUid]);
           for (const c of localCached) {
+            if (pendingSoldSet.has(c.id)) continue;
             const pkg = pkgMap.get(c.packageId);
             remainingCards.push({
               id: c.id,
@@ -7472,7 +7593,38 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               packageLabel: pkg ? `باقة ${pkg.price} ر.ي (${pkg.dataLabel})` : c.packageId,
               ownerId: c.ownerId,
               status: 'available',
+              cardType: resolveCardKind(c),
             });
+          }
+        }
+
+        // Legacy Agent->Client fallback: verify cards delivered in earlier sales before `previousOwnerId` was stamped
+        if (isAgentViewer && isTargetLinkedClient) {
+          const candidateCardNums = new Set<string>();
+          for (const s of allRelevantSalesMap.values()) {
+            if (s.sellerId !== activeActorUid || s.buyerId !== targetUid || s.status === 'cancelled') {
+              continue;
+            }
+            for (const num of s.cardNumbers || []) {
+              if (num && !seenCardIds.has(num)) candidateCardNums.add(num);
+            }
+            for (const it of s.items || []) {
+              for (const num of it.cardNumbers || []) {
+                if (num && !seenCardIds.has(num)) candidateCardNums.add(num);
+              }
+            }
+          }
+          const legacyNums = Array.from(candidateCardNums).slice(0, 400);
+          for (let i = 0; i < legacyNums.length; i += 25) {
+            const batchNums = legacyNums.slice(i, i + 25);
+            const snaps = await Promise.all(
+              batchNums.map((num) => getDoc(doc(db, 'cards', num)).catch(() => null))
+            );
+            for (const cSnap of snaps) {
+              if (cSnap && cSnap.exists()) {
+                ingestOwnedCardDoc(cSnap.id, cSnap.data() as CardDoc);
+              }
+            }
           }
         }
 
@@ -7591,12 +7743,13 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
       return report;
     },
-    [mergedSales, packages, profile?.role]
+    [firebaseUser?.uid, mergedSales, packages, profile?.role, profile?.uid]
   );
 
   // =========================================================================
-  // SUPER ADMIN EXCLUSIVE: RECALL UNSOLD CARDS FROM AGENT / CLIENT
-  // Atomic return to Main Inventory + Exact Credit Deduction + Ledger Entry
+  // SUPER ADMIN & AGENT: RECALL UNSOLD CARDS
+  // - Super Admin: recalls from any Agent or Client -> returns to Main Inventory
+  // - Agent: STRICTLY isolated to own linked Clients -> returns to Agent's own Inventory
   // =========================================================================
   const recallCardsFromUser = useCallback(
     async (input: RecallCardsInput): Promise<RecallCardsResult> => {
@@ -7613,16 +7766,35 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         notificationMessage: '',
       });
 
-      // STRICT AUTHORIZATION GUARD: Super Admin ONLY!
+      // STRICT AUTHORIZATION GUARD: Super Admin or Agent ONLY (Clients completely blocked!)
       const activeUser = auth.currentUser || firebaseUser;
-      if (!profile || profile.role !== 'super_admin' || !activeUser) {
-        notifyError('صلاحية مرفوضة', 'ميزة سحب الكروت مخصصة للمدير العام فقط.');
-        return emptyFail('ميزة سحب الكروت مخصصة للمدير العام فقط.');
+      const isSuperAdminActor = profile?.role === 'super_admin';
+      const isAgentActor = profile?.role === 'agent';
+      if (!profile || (!isSuperAdminActor && !isAgentActor) || !activeUser) {
+        notifyError('صلاحية مرفوضة', 'ميزة سحب الكروت مخصصة للمدير العام والوكلاء فقط.');
+        return emptyFail('ميزة سحب الكروت مخصصة للمدير العام والوكلاء فقط.');
       }
 
       const targetUser = input.targetUser;
       if (!targetUser?.uid || targetUser.uid === activeUser.uid || targetUser.role === 'super_admin') {
         return emptyFail('لا يمكن سحب الكروت من هذا الحساب.');
+      }
+
+      // STRICT AGENT ISOLATION GUARD: Agent can ONLY recall from their OWN linked clients!
+      if (isAgentActor) {
+        const isMyLinkedClient =
+          targetUser.role === 'client' &&
+          (targetUser.parentAgentId === activeUser.uid ||
+            targetUser.agentId === activeUser.uid ||
+            targetUser.parentId === activeUser.uid ||
+            targetUser.createdBy === activeUser.uid);
+        if (!isMyLinkedClient) {
+          notifyError(
+            'صلاحية معزولة',
+            'يمكن للوكيل سحب الكروت من عملائه التابعين له فقط.'
+          );
+          return emptyFail('يمكن للوكيل سحب الكروت من عملائه التابعين له فقط.');
+        }
       }
 
       if (typeof navigator !== 'undefined' && !navigator.onLine) {
@@ -7637,20 +7809,101 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       inFlightOpsRef.current.add(opKey);
 
       try {
-        // 1. Fetch fresh cards owned by targetUser directly from Firestore (NEVER recall sold cards!)
-        const snap = await getDocs(
-          query(collection(db, 'cards'), where('ownerId', '==', targetUser.uid), limit(2500))
-        );
+        // 0. Server-side verification of target user doc & hierarchy BEFORE touching any card
+        const userRef = doc(db, 'users', targetUser.uid);
+        const userSnap = await getDoc(userRef);
+        if (isAgentActor) {
+          if (!userSnap.exists()) {
+            return emptyFail('تعذر التحقق من حساب العميل التابع لك.');
+          }
+          const serverTarget = userSnap.data() as UserProfile;
+          const serverLinked =
+            serverTarget.role === 'client' &&
+            (serverTarget.parentAgentId === activeUser.uid ||
+              serverTarget.agentId === activeUser.uid ||
+              serverTarget.parentId === activeUser.uid ||
+              serverTarget.createdBy === activeUser.uid);
+          if (!serverLinked) {
+            notifyError('صلاحية مرفوضة', 'هذا الحساب ليس من عملائك التابعين لك.');
+            return emptyFail('هذا الحساب ليس من عملائك التابعين لك.');
+          }
+        }
 
-        const unsoldDocs = snap.docs
-          .map((d) => ({ id: d.id, ref: d.ref, data: d.data() as CardDoc }))
-          .filter(
-            (item) =>
-              item.data.ownerId === targetUser.uid &&
-              item.data.status !== 'sold' &&
-              (item.data.status === 'available' || item.data.status === 'assigned_to_agent')
+        // 1. Fetch fresh unsold cards owned by targetUser directly from Firestore (NEVER recall sold or pendingSold cards!)
+        const pendingSoldSet = getPendingSoldCardIds();
+        const unsoldMap = new Map<
+          string,
+          { id: string; ref: ReturnType<typeof doc>; data: CardDoc }
+        >();
+
+        const collectDocIfUnsold = (docId: string, ref: ReturnType<typeof doc>, data: CardDoc) => {
+          if (unsoldMap.has(docId)) return;
+          if (
+            data.ownerId === targetUser.uid &&
+            data.status !== 'sold' &&
+            (data.status === 'available' || data.status === 'assigned_to_agent') &&
+            !pendingSoldSet.has(docId)
+          ) {
+            unsoldMap.set(docId, { id: docId, ref, data });
+          }
+        };
+
+        if (isSuperAdminActor) {
+          const snap = await getDocs(
+            query(collection(db, 'cards'), where('ownerId', '==', targetUser.uid), limit(2500))
           );
+          for (const d of snap.docs) {
+            collectDocIfUnsold(d.id, d.ref, d.data() as CardDoc);
+          }
+        } else {
+          // Agent: query cards transferred by this agent (`previousOwnerId == activeUser.uid`)
+          // PLUS legacy cards from agent's sales to this client (all validated by `isParentAgentOfOwner` in rules!)
+          const byPrevOwnerSnap = await getDocs(
+            query(collection(db, 'cards'), where('previousOwnerId', '==', activeUser.uid), limit(2500))
+          ).catch(() => null);
+          if (byPrevOwnerSnap) {
+            for (const d of byPrevOwnerSnap.docs) {
+              collectDocIfUnsold(d.id, d.ref, d.data() as CardDoc);
+            }
+          }
 
+          const agentSalesSnap = await getDocs(
+            query(collection(db, 'sales'), where('sellerId', '==', activeUser.uid), limit(500))
+          ).catch(() => null);
+          const legacyNums = new Set<string>();
+          if (agentSalesSnap) {
+            for (const sDoc of agentSalesSnap.docs) {
+              const s = sDoc.data() as SaleDoc;
+              if (s.buyerId !== targetUser.uid || s.status === 'cancelled') continue;
+              for (const num of s.cardNumbers || []) {
+                if (num && !unsoldMap.has(num)) legacyNums.add(num);
+              }
+              for (const it of s.items || []) {
+                for (const num of it.cardNumbers || []) {
+                  if (num && !unsoldMap.has(num)) legacyNums.add(num);
+                }
+              }
+            }
+          }
+          // Also include explicitly selected IDs if user selected them from inventory preview
+          for (const selId of input.selectedCardIds || []) {
+            if (selId && !unsoldMap.has(selId)) legacyNums.add(selId);
+          }
+          const legacyList = Array.from(legacyNums).slice(0, 400);
+          for (let i = 0; i < legacyList.length; i += 25) {
+            const chunk = legacyList.slice(i, i + 25);
+            const snaps = await Promise.all(
+              chunk.map((id) => getDoc(doc(db, 'cards', id)).catch(() => null))
+            );
+            for (const cSnap of snaps) {
+              if (cSnap && cSnap.exists()) {
+                collectDocIfUnsold(cSnap.id, cSnap.ref, cSnap.data() as CardDoc);
+              }
+            }
+          }
+        }
+
+        const unsoldDocs = Array.from(unsoldMap.values());
         if (unsoldDocs.length === 0) {
           return emptyFail('لا توجد أي كروت متبقية (غير مباعة) لدى هذا الحساب لسحبها.');
         }
@@ -7658,12 +7911,14 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         // 2. Select target cards strictly according to mode
         let toRecall = unsoldDocs;
         if (input.mode === 'by_package_qty') {
-          const pkgId = input.packageId || '';
+          const pkgId = canonicalPackageId(input.packageId || '');
           const qty = Math.max(0, Math.floor(Number(input.quantity) || 0));
           if (!pkgId || qty <= 0) {
             return emptyFail('يرجى تحديد الباقة والكمية المطلوب سحبها.');
           }
-          const pkgPool = unsoldDocs.filter((c) => c.data.packageId === pkgId);
+          const pkgPool = unsoldDocs.filter(
+            (c) => canonicalPackageId(c.data.packageId || c.data.price) === pkgId
+          );
           if (pkgPool.length === 0) {
             return emptyFail('لا توجد كروت متبقية غير مباعة في هذه الباقة لدى الحساب.');
           }
@@ -7681,7 +7936,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           }
         }
 
-        // 3. Calculate exact credit value at the user's real pricing rate
+        // 3. Calculate exact credit value at the target user's real pricing rate
         const discountRateApplied =
           typeof targetUser.discountRate === 'number' && targetUser.discountRate > 0
             ? targetUser.discountRate
@@ -7698,17 +7953,19 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
         const countByPkg = new Map<string, number>();
         const creditByPkg = new Map<string, number>();
+        const numbersByPkg = new Map<string, string[]>();
         let totalCreditAmount = 0;
 
         for (const item of toRecall) {
-          const pkg = pkgMap.get(item.data.packageId);
+          const normPkgId = canonicalPackageId(item.data.packageId || item.data.price) || item.data.packageId;
+          const pkg = pkgMap.get(normPkgId);
           const pkgPrice = pkg?.price || 0;
           const unitCredit = Math.round((pkgPrice * discountRateApplied) / 100);
-          countByPkg.set(item.data.packageId, (countByPkg.get(item.data.packageId) || 0) + 1);
-          creditByPkg.set(
-            item.data.packageId,
-            (creditByPkg.get(item.data.packageId) || 0) + unitCredit
-          );
+          countByPkg.set(normPkgId, (countByPkg.get(normPkgId) || 0) + 1);
+          creditByPkg.set(normPkgId, (creditByPkg.get(normPkgId) || 0) + unitCredit);
+          const list = numbersByPkg.get(normPkgId) || [];
+          list.push(item.data.cardNumber);
+          numbersByPkg.set(normPkgId, list);
           totalCreditAmount += unitCredit;
         }
 
@@ -7721,25 +7978,27 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           }))
           .sort((a, b) => a.price - b.price);
 
-        // 4. Read fresh user balance & matching customer ledger account
-        const userRef = doc(db, 'users', targetUser.uid);
-        const userSnap = await getDoc(userRef);
+        // 4. Compute fresh balance & matching customer ledger account
         const previousBalance = userSnap.exists()
           ? Number((userSnap.data() as UserProfile).balance) || 0
           : Number(targetUser.balance) || 0;
         const newBalance = previousBalance - totalCreditAmount;
 
-        // Find or create matching CustomerAccount in `customers` so financial statement updates cleanly
         const normalizedTargetPhone = normalizeDigits(targetUser.phone || '').replace(/[^\d]/g, '');
         let matchedCustomer = customers.find(
           (c) =>
-            c.id === `acct_${targetUser.uid}` ||
-            (normalizedTargetPhone.length >= 7 &&
-              normalizeDigits(c.phone || '').replace(/[^\d]/g, '') === normalizedTargetPhone) ||
-            c.name.trim() === targetUser.name.trim()
+            c.ownerId === activeUser.uid &&
+            (c.id === `acct_${activeUser.uid}_${targetUser.uid}` ||
+              c.id === `acct_${targetUser.uid}` ||
+              (normalizedTargetPhone.length >= 7 &&
+                normalizeDigits(c.phone || '').replace(/[^\d]/g, '') === normalizedTargetPhone) ||
+              c.name.trim() === targetUser.name.trim())
         );
 
-        let customerId = matchedCustomer?.id || `acct_${targetUser.uid}`;
+        const defaultCustomerDocId = isSuperAdminActor
+          ? `acct_${targetUser.uid}`
+          : `acct_${activeUser.uid.slice(0, 16)}_${targetUser.uid}`;
+        let customerId = matchedCustomer?.id || defaultCustomerDocId;
         let customerExists = Boolean(matchedCustomer);
         if (!customerExists) {
           try {
@@ -7760,147 +8019,329 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           .map((b) => `فئة ${b.price}×${b.count}`)
           .join('، ');
         const cleanReason = (input.reason || '').trim();
+        const destinationLabel = isSuperAdminActor ? 'المخزون الرئيسي للإدارة' : 'مخزون الوكيل';
         const ledgerDescription = (
-          `سحب / مرتجع كروت (له) — ${toRecall.length} كرت (${pkgBreakdownText}) بسعر ${discountRateApplied}%` +
+          `سحب / مرتجع كروت (له) — ${toRecall.length} كرت (${pkgBreakdownText}) إلى ${destinationLabel} بسعر ${discountRateApplied}%` +
           (cleanReason ? ` • ${cleanReason}` : '')
         ).slice(0, 300);
 
-        // 5. Build atomic chunked writeBatch operations (<= 400 ops per batch)
-        type BatchOp = (b: ReturnType<typeof writeBatch>) => void;
-        const ops: BatchOp[] = [];
+        const nowMs = Date.now();
+        const recallInvoiceNumber = `RC-${String(nowMs).slice(-6)}`;
+        const recallSaleId = generateSafeDocId('recall');
+        const recallSaleItems: SaleLineItem[] = byPackageSummary.map((b) => {
+          const pkg = pkgMap.get(b.packageId);
+          return {
+            packageId: b.packageId,
+            packageLabel: pkg ? `باقة ${pkg.price} ر.ي (${pkg.dataLabel})` : b.packageId,
+            price: b.price,
+            unitPrice: Math.round((b.price * discountRateApplied) / 100),
+            quantity: b.count,
+            delivered: 0,
+            returned: b.count,
+            cardNumbers: (numbersByPkg.get(b.packageId) || []).slice(0, 200),
+          };
+        });
+        const recallSaleNotes = (
+          `سحب كروت غير مباعة (${toRecall.length} كرت: ${pkgBreakdownText}) وإعادتها إلى ${destinationLabel} — قيد دائن ${formatYER(totalCreditAmount)}` +
+          (cleanReason ? ` • ${cleanReason}` : '')
+        ).slice(0, 500);
 
-        // 5A. Return all recalled cards to Super Admin's Main Inventory (exact real card numbers preserved!)
-        for (const item of toRecall) {
-          ops.push((b) =>
-            b.update(item.ref, {
-              ownerId: activeUser.uid,
-              status: 'available',
-              soldTo: '',
-              soldToName: '',
-              soldToPhone: '',
-              saleType: '',
-              saleId: '',
-              recalledFrom: targetUser.uid,
-              previousOwnerId: targetUser.uid,
-              updatedAt: serverTimestamp(),
-            })
-          );
-        }
-
-        // 5B. Update affected central `packages` counters safely
-        const touchedPkgIds = Array.from(countByPkg.keys());
-        const pkgSnaps = await Promise.all(
-          touchedPkgIds.map((pkgId) => getDoc(doc(db, 'packages', pkgId)))
-        );
-        for (const pSnap of pkgSnaps) {
-          if (!pSnap.exists()) continue;
-          const pData = pSnap.data() as PackageDoc;
-          const addQty = countByPkg.get(pSnap.id) || 0;
-          if (addQty <= 0) continue;
-          ops.push((b) =>
-            b.update(doc(db, 'packages', pSnap.id), {
-              availableCount: (Number(pData.availableCount) || 0) + addQty,
-              soldCount: Math.max(0, (Number(pData.soldCount) || 0) - addQty),
-              updatedAt: serverTimestamp(),
-            })
-          );
-        }
-
-        // 5C. Deduct recalled value from user's balance (`users` & `clients` mirror)
-        if (userSnap.exists()) {
-          ops.push((b) =>
-            b.update(userRef, {
-              balance: newBalance,
-              updatedAt: serverTimestamp(),
-            })
-          );
-        }
-        const clientMirrorRef = doc(db, 'clients', targetUser.uid);
-        const clientMirrorSnap = await getDoc(clientMirrorRef).catch(() => null);
-        if (clientMirrorSnap?.exists()) {
-          ops.push((b) =>
-            b.update(clientMirrorRef, {
-              balance: newBalance,
-              updatedAt: serverTimestamp(),
-            })
-          );
-        }
-
-        // 5D. Create or update customer ledger account + add automatic credit entry "سحب / مرتجع كروت (له)"
         const customerRef = doc(db, 'customers', customerId);
         const prevDebit = Number(matchedCustomer?.totalDebit) || Math.max(0, previousBalance);
         const prevCredit = Number(matchedCustomer?.totalCredit) || Math.max(0, -previousBalance);
         const nextCredit = prevCredit + totalCreditAmount;
         const nextCustBalance = prevDebit - nextCredit;
-
-        if (customerExists) {
-          ops.push((b) =>
-            b.update(customerRef, {
-              totalCredit: nextCredit,
-              balance: nextCustBalance,
-              updatedAt: serverTimestamp(),
-            })
-          );
-        } else {
-          ops.push((b) =>
-            b.set(customerRef, {
-              ownerId: activeUser.uid,
-              name: targetUser.name.slice(0, 100),
-              phone: (targetUser.phone || '').slice(0, 20),
-              category: targetUser.role === 'agent' ? 'وكيل معتمد' : 'عميل / نقطة بيع',
-              totalDebit: prevDebit,
-              totalCredit: nextCredit,
-              balance: nextCustBalance,
-              notes: 'حساب مالي مرتبط تلقائياً بحركات الكروت والمرتجعات',
-              createdAt: serverTimestamp(),
-              updatedAt: serverTimestamp(),
-            })
-          );
-        }
-
         const ledgerEntryId = generateSafeDocId('rec');
-        ops.push((b) =>
-          b.set(doc(db, 'ledgerEntries', ledgerEntryId), {
-            ownerId: activeUser.uid,
-            customerId,
-            entryType: 'credit',
-            amount: totalCreditAmount,
-            description: ledgerDescription,
-            createdAt: serverTimestamp(),
-          })
-        );
 
-        // Commit chunks sequentially (ensures customer doc exists if ledger entry lands in later chunk)
-        const CHUNK_SIZE = 400;
-        for (let i = 0; i < ops.length; i += CHUNK_SIZE) {
-          const b = writeBatch(db);
-          for (const applyOp of ops.slice(i, i + CHUNK_SIZE)) {
-            applyOp(b);
+        const clientMirrorRef = doc(db, 'clients', targetUser.uid);
+        const clientMirrorSnap = await getDoc(clientMirrorRef).catch(() => null);
+        const clientMirrorExists = Boolean(clientMirrorSnap?.exists());
+
+        const touchedPkgIds = Array.from(countByPkg.keys());
+        const pkgSnaps = isSuperAdminActor
+          ? await Promise.all(touchedPkgIds.map((pkgId) => getDoc(doc(db, 'packages', pkgId))))
+          : [];
+
+        const recallSalePayload = {
+          invoiceNumber: recallInvoiceNumber,
+          sellerId: activeUser.uid,
+          buyerId: targetUser.uid,
+          buyerName: targetUser.name.slice(0, 100),
+          buyerPhone: (targetUser.phone || '').slice(0, 20),
+          buyerRole: (targetUser.role === 'agent' ? 'agent' : 'client') as 'agent' | 'client',
+          saleType: 'electronic_wholesale' as const,
+          paymentMethod: 'credit' as const,
+          discountRate: discountRateApplied,
+          totalAmount: 0,
+          paidAmount: 0,
+          remainingAmount: 0,
+          expectedProfit: 0,
+          realizedProfit: 0,
+          totalCards: toRecall.length,
+          deliveredCards: 0,
+          returnedCards: toRecall.length,
+          items: recallSaleItems,
+          cardNumbers: toRecall.map((item) => item.data.cardNumber).slice(0, 200),
+          status: 'returned' as const,
+          notes: recallSaleNotes,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        };
+
+        // 5. Commit atomically: `runTransaction` for <= 40 cards, chunked `writeBatch` for larger recalls
+        if (toRecall.length <= 40) {
+          await runTransaction(db, async (tx) => {
+            // Phase 1: ALL reads first
+            const freshCardRefs: Array<ReturnType<typeof doc>> = [];
+            for (const item of toRecall) {
+              const cSnap = await tx.get(item.ref);
+              if (!cSnap.exists()) continue;
+              const cData = cSnap.data() as CardDoc;
+              if (
+                cData.ownerId === targetUser.uid &&
+                (cData.status === 'available' || cData.status === 'assigned_to_agent')
+              ) {
+                freshCardRefs.push(item.ref);
+              }
+            }
+            if (freshCardRefs.length === 0) {
+              throw new Error('لم تعد الكروت المحددة متوفرة للسحب أو تم بيعها للتو.');
+            }
+
+            const freshPkgUpdates: Array<{
+              ref: ReturnType<typeof doc>;
+              availableCount: number;
+              soldCount: number;
+            }> = [];
+            if (isSuperAdminActor) {
+              for (const pkgId of touchedPkgIds) {
+                const addQty = countByPkg.get(pkgId) || 0;
+                if (addQty <= 0) continue;
+                const pRef = doc(db, 'packages', pkgId);
+                const pSnap = await tx.get(pRef);
+                if (pSnap.exists()) {
+                  const pData = pSnap.data() as PackageDoc;
+                  freshPkgUpdates.push({
+                    ref: pRef,
+                    availableCount: (Number(pData.availableCount) || 0) + addQty,
+                    soldCount: Math.max(0, (Number(pData.soldCount) || 0) - addQty),
+                  });
+                }
+              }
+            }
+
+            // Phase 2: ALL writes atomically
+            for (const cardRef of freshCardRefs) {
+              tx.update(cardRef, {
+                ownerId: activeUser.uid,
+                status: 'available',
+                soldTo: '',
+                soldToName: '',
+                soldToPhone: '',
+                saleType: '',
+                saleId: '',
+                recalledFrom: targetUser.uid,
+                previousOwnerId: targetUser.uid,
+                updatedAt: serverTimestamp(),
+              });
+            }
+
+            for (const pu of freshPkgUpdates) {
+              tx.update(pu.ref, {
+                availableCount: pu.availableCount,
+                soldCount: pu.soldCount,
+                updatedAt: serverTimestamp(),
+              });
+            }
+
+            if (userSnap.exists()) {
+              tx.update(userRef, {
+                balance: newBalance,
+                updatedAt: serverTimestamp(),
+              });
+            }
+            if (clientMirrorExists) {
+              tx.update(clientMirrorRef, {
+                balance: newBalance,
+                updatedAt: serverTimestamp(),
+              });
+            }
+
+            if (customerExists) {
+              tx.update(customerRef, {
+                totalCredit: nextCredit,
+                balance: nextCustBalance,
+                updatedAt: serverTimestamp(),
+              });
+            } else {
+              tx.set(customerRef, {
+                ownerId: activeUser.uid,
+                name: targetUser.name.slice(0, 100),
+                phone: (targetUser.phone || '').slice(0, 20),
+                category: targetUser.role === 'agent' ? 'وكيل معتمد' : 'عميل / نقطة بيع',
+                totalDebit: prevDebit,
+                totalCredit: nextCredit,
+                balance: nextCustBalance,
+                notes: 'حساب مالي مرتبط تلقائياً بحركات الكروت والمرتجعات',
+                createdAt: serverTimestamp(),
+                updatedAt: serverTimestamp(),
+              });
+            }
+
+            tx.set(doc(db, 'ledgerEntries', ledgerEntryId), {
+              ownerId: activeUser.uid,
+              customerId,
+              entryType: 'credit',
+              amount: totalCreditAmount,
+              description: ledgerDescription,
+              createdAt: serverTimestamp(),
+            });
+
+            tx.set(doc(db, 'sales', recallSaleId), recallSalePayload);
+          });
+        } else {
+          type BatchOp = (b: ReturnType<typeof writeBatch>) => void;
+          const ops: BatchOp[] = [];
+
+          // 5A. Return all recalled cards to Actor's Inventory (Admin warehouse or Agent's own stock!)
+          for (const item of toRecall) {
+            ops.push((b) =>
+              b.update(item.ref, {
+                ownerId: activeUser.uid,
+                status: 'available',
+                soldTo: '',
+                soldToName: '',
+                soldToPhone: '',
+                saleType: '',
+                saleId: '',
+                recalledFrom: targetUser.uid,
+                previousOwnerId: targetUser.uid,
+                updatedAt: serverTimestamp(),
+              })
+            );
           }
-          await b.commit();
+
+          // 5B. Update central `packages` counters ONLY when Super Admin recalls
+          if (isSuperAdminActor) {
+            for (const pSnap of pkgSnaps) {
+              if (!pSnap.exists()) continue;
+              const pData = pSnap.data() as PackageDoc;
+              const addQty = countByPkg.get(pSnap.id) || 0;
+              if (addQty <= 0) continue;
+              ops.push((b) =>
+                b.update(doc(db, 'packages', pSnap.id), {
+                  availableCount: (Number(pData.availableCount) || 0) + addQty,
+                  soldCount: Math.max(0, (Number(pData.soldCount) || 0) - addQty),
+                  updatedAt: serverTimestamp(),
+                })
+              );
+            }
+          }
+
+          // 5C. Deduct recalled value from user's balance (`users` & `clients` mirror)
+          if (userSnap.exists()) {
+            ops.push((b) =>
+              b.update(userRef, {
+                balance: newBalance,
+                updatedAt: serverTimestamp(),
+              })
+            );
+          }
+          if (clientMirrorExists) {
+            ops.push((b) =>
+              b.update(clientMirrorRef, {
+                balance: newBalance,
+                updatedAt: serverTimestamp(),
+              })
+            );
+          }
+
+          // 5D. Customer ledger account + automatic credit entry + recall invoice record
+          if (customerExists) {
+            ops.push((b) =>
+              b.update(customerRef, {
+                totalCredit: nextCredit,
+                balance: nextCustBalance,
+                updatedAt: serverTimestamp(),
+              })
+            );
+          } else {
+            ops.push((b) =>
+              b.set(customerRef, {
+                ownerId: activeUser.uid,
+                name: targetUser.name.slice(0, 100),
+                phone: (targetUser.phone || '').slice(0, 20),
+                category: targetUser.role === 'agent' ? 'وكيل معتمد' : 'عميل / نقطة بيع',
+                totalDebit: prevDebit,
+                totalCredit: nextCredit,
+                balance: nextCustBalance,
+                notes: 'حساب مالي مرتبط تلقائياً بحركات الكروت والمرتجعات',
+                createdAt: serverTimestamp(),
+                updatedAt: serverTimestamp(),
+              })
+            );
+          }
+
+          ops.push((b) =>
+            b.set(doc(db, 'ledgerEntries', ledgerEntryId), {
+              ownerId: activeUser.uid,
+              customerId,
+              entryType: 'credit',
+              amount: totalCreditAmount,
+              description: ledgerDescription,
+              createdAt: serverTimestamp(),
+            })
+          );
+
+          ops.push((b) => b.set(doc(db, 'sales', recallSaleId), recallSalePayload));
+
+          // Commit chunks sequentially (keep customer doc + ledgerEntry together in last chunk!)
+          const CHUNK_SIZE = 400;
+          for (let i = 0; i < ops.length; i += CHUNK_SIZE) {
+            const b = writeBatch(db);
+            for (const applyOp of ops.slice(i, i + CHUNK_SIZE)) {
+              applyOp(b);
+            }
+            await b.commit();
+          }
         }
 
-        // 6. Update atomic lightweight stats documents (`stats/summary` + `stats/user_{targetUid}`)
-        const adminDeltas: Record<string, { available: number; sold: number }> = {};
+        // 6. Update atomic lightweight stats documents
+        const actorDeltas: Record<string, { available: number; sold?: number }> = {};
         const targetDeltas: Record<string, { available: number }> = {};
         for (const [pkgId, qty] of countByPkg.entries()) {
-          adminDeltas[pkgId] = { available: qty, sold: -qty };
+          actorDeltas[pkgId] = isSuperAdminActor
+            ? { available: qty, sold: -qty }
+            : { available: qty };
           targetDeltas[pkgId] = { available: -qty };
         }
-        void applyStatsSummaryDelta('summary', activeUser.uid, adminDeltas);
+        void applyStatsSummaryDelta(
+          isSuperAdminActor ? 'summary' : `user_${activeUser.uid}`,
+          activeUser.uid,
+          actorDeltas
+        );
         void applyStatsSummaryDelta(`user_${targetUser.uid}`, targetUser.uid, targetDeltas);
 
-        // 7. Update local caches & React state immediately (Zero lag across all 10 reports!)
-        const recalledCardObjs: CachedAvailableCard[] = toRecall.map((item) => ({
-          id: item.id,
-          packageId: item.data.packageId,
-          cardNumber: item.data.cardNumber,
-          ownerId: activeUser.uid,
-        }));
+        // 7. Update local IndexedDB, RAM pools & React state IMMEDIATELY (0ms stock update!)
+        const recalledCardObjs: CachedAvailableCard[] = toRecall.map((item) => {
+          const normPkgId =
+            canonicalPackageId(item.data.packageId || item.data.price) || item.data.packageId;
+          const pkg = pkgMap.get(normPkgId);
+          return {
+            id: item.id,
+            packageId: normPkgId,
+            price: pkg?.price || parseNormalizedPrice(item.data.price) || undefined,
+            cardNumber: item.data.cardNumber,
+            ownerId: activeUser.uid,
+            status: 'available',
+            cardType: resolveCardKind(item.data),
+          };
+        });
         const recalledNumbers = recalledCardObjs.map((c) => c.cardNumber);
         releaseCardLocksLocally(recalledNumbers);
         appendCachedAvailableCards(activeUser.uid, recalledCardObjs);
         removeCardsFromCacheForOwners([targetUser.uid], recalledNumbers);
+        setOfflinePoolVersion((v) => v + 1);
 
         try {
           localStorage.removeItem(`taibah_agent_cards_cache_v1_${targetUser.uid}`);
@@ -7908,28 +8349,48 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           // ignore
         }
 
-        setRawPackages((prev) =>
-          prev.map((pkg) => {
-            const addQty = countByPkg.get(pkg.id) || 0;
-            if (!addQty) return pkg;
-            return {
-              ...pkg,
-              availableCount: (Number(pkg.availableCount) || 0) + addQty,
-              soldCount: Math.max(0, (Number(pkg.soldCount) || 0) - addQty),
-            };
-          })
-        );
+        if (isSuperAdminActor) {
+          setRawPackages((prev) =>
+            prev.map((pkg) => {
+              const addQty = countByPkg.get(pkg.id) || 0;
+              if (!addQty) return pkg;
+              return {
+                ...pkg,
+                availableCount: (Number(pkg.availableCount) || 0) + addQty,
+                soldCount: Math.max(0, (Number(pkg.soldCount) || 0) - addQty),
+              };
+            })
+          );
+        } else {
+          setPersonalCardCounts((prev) => {
+            const next = { ...prev };
+            for (const [pkgId, addQty] of countByPkg.entries()) {
+              next[pkgId] = Math.max(0, (Number(next[pkgId]) || 0) + addQty);
+            }
+            return next;
+          });
+        }
 
         setManagedUsers((prev) =>
           prev.map((u) => (u.uid === targetUser.uid ? { ...u, balance: newBalance } : u))
         );
 
         const nowFakeTs = {
-          toDate: () => new Date(),
-          toMillis: () => Date.now(),
-          seconds: Math.floor(Date.now() / 1000),
+          toDate: () => new Date(nowMs),
+          toMillis: () => nowMs,
+          seconds: Math.floor(nowMs / 1000),
           nanoseconds: 0,
         } as unknown as Timestamp;
+
+        setSales((prev) => [
+          {
+            id: recallSaleId,
+            ...recallSalePayload,
+            createdAt: nowFakeTs,
+            updatedAt: nowFakeTs,
+          },
+          ...prev,
+        ]);
 
         setCustomers((prev) => {
           const existsInState = prev.some((c) => c.id === customerId);
@@ -7972,6 +8433,10 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         ]);
 
         // 8. Audit log + Cloud notification to Agent/Client
+        const actorSignature = isSuperAdminActor
+          ? `📞 *الإدارة:* ${SUPER_ADMIN_CONFIG.name} (${SUPER_ADMIN_CONFIG.phone})`
+          : `📞 *الوكيل:* ${profile.name} (${profile.phone})`;
+
         const notificationMessage = [
           '🌐 *شبكة طيبة نت اللاسلكية — TAIBAH NET*',
           '📋 *إشعار سحب / مرتجع كروت وتحديث الرصيد*',
@@ -7984,26 +8449,28 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           `✅ *الرصيد الحالي بعد السحب:* ${formatYER(newBalance)}`,
           cleanReason ? `📝 *السبب:* ${cleanReason}` : '',
           '━━━━━━━━━━━━━━━━━━',
-          `📞 *الإدارة:* ${SUPER_ADMIN_CONFIG.name} (${SUPER_ADMIN_CONFIG.phone})`,
+          actorSignature,
         ]
           .filter(Boolean)
           .join('\n');
 
         writeAuditLog(
-          'سحب كروت من وكيل / عميل',
-          `سحب ${toRecall.length} كرت (${pkgBreakdownText}) من ${targetUser.name} وإعادتها للمخزون الرئيسي بقيمة ${formatYER(totalCreditAmount)}`
+          isSuperAdminActor ? 'سحب كروت من وكيل / عميل' : 'سحب كروت بواسطة وكيل من عميل تابع',
+          `سحب ${toRecall.length} كرت (${pkgBreakdownText}) من ${targetUser.name} وإعادتها إلى ${destinationLabel} بقيمة ${formatYER(totalCreditAmount)}`
         ).catch(() => {});
 
         sendCloudNotification({
           recipientId: targetUser.uid,
           title: `إشعار سحب / مرتجع كروت (${toRecall.length} كرت)`,
-          body: `تم سحب ${toRecall.length} كرت غير مباع (${pkgBreakdownText}) وخصم ${formatYER(totalCreditAmount)} من رصيدك. الرصيد الحالي: ${formatYER(newBalance)}`,
+          body: `تم سحب ${toRecall.length} كرت غير مباع (${pkgBreakdownText}) بواسطة ${isSuperAdminActor ? 'الإدارة' : `الوكيل ${profile.name}`} وخصم ${formatYER(totalCreditAmount)} من رصيدك. الرصيد الحالي: ${formatYER(newBalance)}`,
           category: 'inventory',
           targetRoute: 'reports',
         }).catch(() => {});
 
         notifySuccess(
-          `تم سحب ${toRecall.length} كرت بنجاح — أُعيدت الكروت للمخزون الرئيسي وخُصم ${formatYER(totalCreditAmount)} من حساب ${targetUser.name}.`
+          isSuperAdminActor
+            ? `تم سحب ${toRecall.length} كرت بنجاح — أُعيدت للمخزون الرئيسي وخُصم ${formatYER(totalCreditAmount)} من حساب ${targetUser.name}.`
+            : `تم سحب ${toRecall.length} كرت بنجاح — أُضيفت مباشرة إلى مخزونك وخُصم ${formatYER(totalCreditAmount)} من حساب ${targetUser.name}.`
         );
 
         return {

@@ -42,6 +42,7 @@ const VALID_ROUTES: AppRoute[] = [
   'packages',
   'topup_requests',
   'agents_management',
+  'recall_cards',
   'reports',
   'sales_list',
   'notifications',
@@ -354,6 +355,10 @@ const TaibahAppShell: React.FC = () => {
     }
     if (nextRoute === 'agents_management' && !isAdminOrAgent) {
       notifyInfo('صلاحية غير متاحة', 'شاشة إدارة الوكلاء والعملاء مخصصة للمدير والوكيل.');
+      return;
+    }
+    if (nextRoute === 'recall_cards' && !isAdminOrAgent) {
+      notifyInfo('صلاحية غير متاحة', 'شاشة سحب الكروت مخصصة للمدير والوكيل فقط.');
       return;
     }
     if (nextRoute === 'audit_logs' && role !== 'super_admin') {

@@ -10,6 +10,7 @@ import {
   Home,
   Layers,
   LogOut,
+  RotateCcw,
   Send,
   Settings,
   Share2,
@@ -130,6 +131,13 @@ export const SidebarDrawer: React.FC<SidebarDrawerProps> = ({
       label: 'إدارة الوكلاء والعملاء',
       icon: UserCheck,
       iconBg: 'bg-gradient-to-br from-sky-600 to-[#1A365D] text-[#FDE68A]',
+      visible: isAdmin || isAgent,
+    },
+    {
+      route: 'recall_cards',
+      label: 'سحب الكروت',
+      icon: RotateCcw,
+      iconBg: 'bg-gradient-to-br from-rose-600 to-red-800 text-white',
       visible: isAdmin || isAgent,
     },
     {

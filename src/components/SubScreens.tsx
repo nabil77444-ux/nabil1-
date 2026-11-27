@@ -362,7 +362,12 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
     onBack();
     return null;
   }
-  if ((route === 'electronic_cards' || route === 'agents_management') && !isAdminOrAgent) {
+  if (
+    (route === 'electronic_cards' ||
+      route === 'agents_management' ||
+      route === 'recall_cards') &&
+    !isAdminOrAgent
+  ) {
     onBack();
     return null;
   }
@@ -419,6 +424,24 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
       >
         <Suspense fallback={<LazyFallback />}>
           <WholesaleCardsScreen mode="electronic" hideNumbers={hideNumbers} />
+        </Suspense>
+      </SubScreenShell>
+    );
+  }
+
+  if (route === 'recall_cards') {
+    return (
+      <SubScreenShell
+        title="سحب الكروت"
+        subtitle={
+          isAdmin
+            ? 'سحب الكروت غير المباعة من الوكلاء والعملاء وإعادتها لمخزون الإدارة'
+            : 'سحب الكروت غير المباعة من عملائك التابعين لك فقط وإعادتها لمخزونك'
+        }
+        onBack={onBack}
+      >
+        <Suspense fallback={<LazyFallback />}>
+          <RecallCardsPanel defaultExpanded />
         </Suspense>
       </SubScreenShell>
     );
@@ -789,8 +812,8 @@ export const ActiveSubScreen: React.FC<ActiveSubScreenProps> = ({
             </div>
           </div>
 
-          {/* Super Admin EXCLUSIVE: Recall Unsold Cards From Agent / Client */}
-          {isAdmin && (
+          {/* Super Admin & Agent ONLY: Recall Unsold Cards (strictly isolated to Agent's own linked clients) */}
+          {isAdminOrAgent && (
             <Suspense fallback={<LazyFallback />}>
               <RecallCardsPanel />
             </Suspense>

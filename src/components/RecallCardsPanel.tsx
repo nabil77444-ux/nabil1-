@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { useFirebase } from '../contexts/FirebaseContext';
 import { normalizeDigits } from '../lib/firebase';
+import { getPendingSoldCardIds } from '../lib/offlineCards';
 import { useFeedback } from '../lib/feedback';
 import { useDebounce } from '../hooks/useDebounce';
 import { openSmsShare, openWhatsAppShare } from '../lib/exportUtils';
@@ -33,13 +34,30 @@ import {
 
 const PAGE_SIZE = 50;
 
-export const RecallCardsPanel: React.FC = React.memo(() => {
+interface RecallCardsPanelProps {
+  defaultExpanded?: boolean;
+}
+
+function isLinkedClientOfAgent(u: UserProfile, agentUid: string): boolean {
+  if (!agentUid || u.uid === agentUid || u.role !== 'client') return false;
+  return (
+    u.parentAgentId === agentUid ||
+    u.agentId === agentUid ||
+    u.parentId === agentUid ||
+    u.createdBy === agentUid
+  );
+}
+
+export const RecallCardsPanel: React.FC<RecallCardsPanelProps> = React.memo(
+  ({ defaultExpanded = false }) => {
   const { profile, managedUsers, fetchUserCardInventory, recallCardsFromUser } = useFirebase();
   const { notifySuccess, notifyWarning, notifyInfo } = useFeedback();
 
   const isSuperAdmin = profile?.role === 'super_admin';
+  const isAgent = profile?.role === 'agent';
+  const canRecall = isSuperAdmin || isAgent;
 
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(defaultExpanded);
   const [userSearch, setUserSearch] = useState('');
   const debouncedUserSearch = useDebounce(userSearch, 180);
   const [selectedUid, setSelectedUid] = useState<string>('');
@@ -61,8 +79,13 @@ export const RecallCardsPanel: React.FC = React.memo(() => {
 
   const eligibleUsers = useMemo(() => {
     const q = debouncedUserSearch.trim().toLowerCase();
+    const myUid = profile?.uid || '';
     return managedUsers
-      .filter((u) => u.role === 'agent' || u.role === 'client')
+      .filter((u) => {
+        if (isSuperAdmin) return u.role === 'agent' || u.role === 'client';
+        if (isAgent) return isLinkedClientOfAgent(u, myUid);
+        return false;
+      })
       .filter((u) => {
         if (!q) return true;
         return (
@@ -71,11 +94,11 @@ export const RecallCardsPanel: React.FC = React.memo(() => {
         );
       })
       .sort((a, b) => a.name.localeCompare(b.name, 'ar'));
-  }, [debouncedUserSearch, managedUsers]);
+  }, [debouncedUserSearch, isAgent, isSuperAdmin, managedUsers, profile?.uid]);
 
   const selectedUser: UserProfile | null = useMemo(
-    () => managedUsers.find((u) => u.uid === selectedUid) || null,
-    [managedUsers, selectedUid]
+    () => eligibleUsers.find((u) => u.uid === selectedUid) || null,
+    [eligibleUsers, selectedUid]
   );
 
   const loadUserUnsoldCards = useCallback(
@@ -85,8 +108,22 @@ export const RecallCardsPanel: React.FC = React.memo(() => {
       setVisibleCardsCount(PAGE_SIZE);
       try {
         const rep = await fetchUserCardInventory(user, force);
-        setInventory(rep);
-        const firstNonEmpty = rep.byPackage.find((p) => p.remainingCount > 0);
+        const pendingIds = getPendingSoldCardIds();
+        const safeRemaining = rep.remainingCards.filter(
+          (c) => c.status !== 'sold' && !pendingIds.has(c.id)
+        );
+        const safeByPkg = rep.byPackage.map((p) => ({
+          ...p,
+          remainingCount: safeRemaining.filter((c) => c.packageId === p.packageId).length,
+        }));
+        const safeRep: AgentCardInventoryReport = {
+          ...rep,
+          remainingCards: safeRemaining,
+          byPackage: safeByPkg,
+          totalRemaining: safeRemaining.length,
+        };
+        setInventory(safeRep);
+        const firstNonEmpty = safeRep.byPackage.find((p) => p.remainingCount > 0);
         if (firstNonEmpty) {
           setSelectedPkgId(firstNonEmpty.packageId);
           setQtyInput(String(Math.min(10, firstNonEmpty.remainingCount)));
@@ -99,13 +136,13 @@ export const RecallCardsPanel: React.FC = React.memo(() => {
   );
 
   useEffect(() => {
-    if (isSuperAdmin && selectedUser && expanded) {
+    if (canRecall && selectedUser && expanded) {
       setLastResult(null);
       void loadUserUnsoldCards(selectedUser, true);
     } else {
       setInventory(null);
     }
-  }, [expanded, isSuperAdmin, loadUserUnsoldCards, selectedUser]);
+  }, [canRecall, expanded, loadUserUnsoldCards, selectedUser]);
 
   const discountRate = useMemo(() => {
     if (!selectedUser) return 100;
@@ -136,7 +173,14 @@ export const RecallCardsPanel: React.FC = React.memo(() => {
   // Compute exact preview of cards to be recalled & credit amount
   const recallPreview = useMemo(() => {
     if (!inventory || inventory.remainingCards.length === 0) {
-      return { count: 0, creditAmount: 0, byPkg: [] as Array<{ price: number; count: number; credit: number }> };
+      return {
+        count: 0,
+        creditAmount: 0,
+        electronicCount: 0,
+        paperCount: 0,
+        cardKindLabel: 'إلكترونية',
+        byPkg: [] as Array<{ price: number; count: number; credit: number }>,
+      };
     }
     let chosen = inventory.remainingCards;
     if (mode === 'by_package_qty') {
@@ -150,7 +194,11 @@ export const RecallCardsPanel: React.FC = React.memo(() => {
 
     const pkgCounts = new Map<number, { count: number; credit: number }>();
     let totalCredit = 0;
+    let electronicCount = 0;
+    let paperCount = 0;
     for (const c of chosen) {
+      if (c.cardType === 'paper') paperCount += 1;
+      else electronicCount += 1;
       const unitCredit = Math.round((c.packagePrice * discountRate) / 100);
       totalCredit += unitCredit;
       const prev = pkgCounts.get(c.packagePrice) || { count: 0, credit: 0 };
@@ -160,7 +208,21 @@ export const RecallCardsPanel: React.FC = React.memo(() => {
       .map(([price, v]) => ({ price, count: v.count, credit: v.credit }))
       .sort((a, b) => a.price - b.price);
 
-    return { count: chosen.length, creditAmount: totalCredit, byPkg };
+    const cardKindLabel =
+      electronicCount > 0 && paperCount > 0
+        ? `إلكترونية (${electronicCount}) + ورقية (${paperCount})`
+        : paperCount > 0
+          ? 'ورقية'
+          : 'إلكترونية';
+
+    return {
+      count: chosen.length,
+      creditAmount: totalCredit,
+      electronicCount,
+      paperCount,
+      cardKindLabel,
+      byPkg,
+    };
   }, [discountRate, inventory, mode, qtyInput, remainingForSelectedPkg, selectedCardIds, selectedPkgId]);
 
   const toggleCardSelection = (cardId: string) => {
@@ -204,8 +266,8 @@ export const RecallCardsPanel: React.FC = React.memo(() => {
     }
   };
 
-  // STRICT SUPER ADMIN ONLY RENDER GUARD (placed after all hooks per Rules of Hooks)
-  if (!isSuperAdmin) {
+  // STRICT SUPER ADMIN & AGENT ONLY RENDER GUARD (clients completely blocked)
+  if (!canRecall) {
     return null;
   }
 
@@ -222,10 +284,14 @@ export const RecallCardsPanel: React.FC = React.memo(() => {
           </div>
           <div className="min-w-0">
             <h3 className="text-xs sm:text-sm font-extrabold text-[#1A365D] dark:text-[#FDE68A] leading-snug">
-              سحب الكروت من الوكيل أو العميل (صلاحية المدير العام فقط)
+              {isSuperAdmin
+                ? 'سحب الكروت من الوكيل أو العميل'
+                : 'سحب الكروت من عملائك التابعين لك'}
             </h3>
             <p className="text-[10.5px] font-bold text-slate-500 dark:text-slate-400">
-              استرداد الكروت غير المباعة للمخزون الرئيسي وخصم قيمتها تلقائياً من رصيد الحساب
+              {isSuperAdmin
+                ? 'استرداد الكروت غير المباعة للمخزون الرئيسي وخصم قيمتها تلقائياً من رصيد الحساب'
+                : 'استرداد الكروت غير المباعة من عملائك التابعين لك وإعادتها مباشرة إلى مخزونك مع تحديث الرصيد'}
             </p>
           </div>
         </div>
@@ -240,7 +306,9 @@ export const RecallCardsPanel: React.FC = React.memo(() => {
           <div className="rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-300 dark:border-amber-700 px-3 py-2 text-[11px] font-bold text-amber-900 dark:text-amber-200 flex items-start gap-2">
             <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5 text-amber-600 dark:text-amber-400" />
             <span>
-              يتم تحميل <strong>الكروت المتبقية غير المباعة فقط</strong> لدى الحساب المختار. يُمنع برمجياً سحب أي كرت تم بيعه، وتُعاد الكروت المسحوبة للمخزون الرئيسي بأرقامها الأصلية دون ضياع أي كرت.
+              {isSuperAdmin
+                ? 'يتم تحميل الكروت المتبقية غير المباعة فقط لدى الحساب المختار. يُمنع برمجياً سحب أي كرت تم بيعه، وتُعاد الكروت المسحوبة للمخزون الرئيسي بأرقامها الأصلية.'
+                : 'تظهر هنا قائمة عملائك التابعين لك فقط. يتم تحميل الكروت غير المباعة المتاحة فقط وتُعاد الكروت المسحوبة مباشرة إلى مخزونك الشخصي بأرقامها الأصلية.'}
             </span>
           </div>
 
@@ -253,7 +321,11 @@ export const RecallCardsPanel: React.FC = React.memo(() => {
                 inputMode="text"
                 value={userSearch}
                 onChange={(e) => setUserSearch(e.target.value)}
-                placeholder="ابحث باسم أو رقم الوكيل / العميل..."
+                placeholder={
+                  isSuperAdmin
+                    ? 'ابحث باسم أو رقم الوكيل / العميل...'
+                    : 'ابحث باسم أو رقم أحد عملائك...'
+                }
                 className="w-full min-h-[38px] rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 pr-8 pl-3 text-xs font-bold text-slate-900 dark:text-white focus:border-[#D4AF37] focus:outline-none"
               />
             </div>
@@ -262,7 +334,13 @@ export const RecallCardsPanel: React.FC = React.memo(() => {
               onChange={(e) => setSelectedUid(e.target.value)}
               className="w-full min-h-[38px] rounded-xl border-2 border-[#D4AF37]/60 bg-slate-50 dark:bg-slate-800 px-3 text-xs font-extrabold text-slate-900 dark:text-white focus:border-[#D4AF37] focus:outline-none"
             >
-              <option value="">— اختر الوكيل أو العميل —</option>
+              <option value="">
+                {isSuperAdmin
+                  ? '— اختر الوكيل أو العميل —'
+                  : eligibleUsers.length > 0
+                    ? '— اختر عميلاً من عملائك التابعين لك —'
+                    : '— لا يوجد عملاء تابعون لحسابك حالياً —'}
+              </option>
               {eligibleUsers.map((u) => (
                 <option key={u.uid} value={u.uid}>
                   {u.name} ({getRoleArabicLabel(u.role)}) — {u.phone}
@@ -582,6 +660,12 @@ export const RecallCardsPanel: React.FC = React.memo(() => {
                 الحساب المستهدف: <strong className="text-[#1A365D] dark:text-[#FDE68A]">{selectedUser.name}</strong> ({selectedUser.phone})
               </p>
               <p>
+                الوجهة بعد السحب: <strong className="text-emerald-700 dark:text-emerald-400">{isSuperAdmin ? 'مخزون الإدارة الرئيسي' : 'مخزونك الشخصي (الوكيل)'}</strong>
+              </p>
+              <p>
+                نوع الكروت المسحوبة: <strong className="text-indigo-700 dark:text-indigo-300">{recallPreview.cardKindLabel}</strong>
+              </p>
+              <p>
                 إجمالي الكروت التي ستُسحب: <strong className="text-red-600 dark:text-red-400 tabular-nums">{formatCount(recallPreview.count)} كرت</strong>
               </p>
               <div className="pt-1 border-t border-slate-200 dark:border-slate-700 space-y-0.5 text-[11px]">
@@ -623,6 +707,7 @@ export const RecallCardsPanel: React.FC = React.memo(() => {
       )}
     </div>
   );
-});
+  }
+);
 
 RecallCardsPanel.displayName = 'RecallCardsPanel';

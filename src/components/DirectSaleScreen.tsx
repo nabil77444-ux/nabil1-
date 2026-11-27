@@ -72,17 +72,18 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
 
   const isAdmin = profile?.role === 'super_admin';
 
-  // Silent auto-cache into IndexedDB when opening Direct Sale online without requiring manual tap
+  // Silent auto-cache into IndexedDB whenever opening Direct Sale online (keeps offline pool 100% fresh without manual tap)
   const didSilentWarmupRef = useRef(false);
   useEffect(() => {
-    if (!isOnline || didSilentWarmupRef.current) return;
-    if (localOfflineCards.length === 0 && !isRefreshingInventory) {
-      didSilentWarmupRef.current = true;
-      void refreshMyInventory(false);
-    }
-  }, [isOnline, localOfflineCards.length, isRefreshingInventory, refreshMyInventory]);
+    if (!isOnline || didSilentWarmupRef.current || isRefreshingInventory) return;
+    didSilentWarmupRef.current = true;
+    void refreshMyInventory(false);
+  }, [isOnline, isRefreshingInventory, refreshMyInventory]);
 
   // Unified Single Source of Truth: exact same `getSellableCardsForPackage(...)` used by «تأكيد البيع»!
+  const isEffectivelyOffline =
+    !isOnline || (typeof navigator !== 'undefined' && !navigator.onLine);
+
   const displayPackages = useMemo<PackageDoc[]>(() => {
     const base = packages.length > 0 ? packages : (EXCLUSIVE_PACKAGES as PackageDoc[]);
     const pendingIds = getPendingSoldCardIds();
@@ -95,12 +96,12 @@ export const DirectSaleScreen: React.FC<DirectSaleScreenProps> = ({ hideNumbers 
       ).length;
       return {
         ...pkg,
-        availableCount: !isOnline
+        availableCount: isEffectivelyOffline
           ? localSellable
           : Math.max(Number(pkg.availableCount) || 0, localSellable),
       };
     });
-  }, [packages, localOfflineCards, profile, isOnline]);
+  }, [packages, localOfflineCards, profile, isEffectivelyOffline]);
 
   const directTotalAvailableCards = useMemo(
     () => displayPackages.reduce((sum, p) => sum + (Number(p.availableCount) || 0), 0),

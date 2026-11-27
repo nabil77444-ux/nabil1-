@@ -47,6 +47,14 @@ service cloud.firestore {
       return isSignedIn() && request.auth.uid == uid;
     }
 
+    function isParentAgentOfOwner(ownerUid) {
+      return isSignedIn() &&
+        isValidId(ownerUid) &&
+        exists(/databases/$(database)/documents/users/$(ownerUid)) &&
+        get(/databases/$(database)/documents/users/$(ownerUid)).data.parentAgentId == request.auth.uid &&
+        get(/databases/$(database)/documents/users/$(ownerUid)).data.role == 'client';
+    }
+
     function authEmail() {
       return request.auth.token.email is string ? request.auth.token.email : '';
     }
@@ -546,6 +554,11 @@ service cloud.firestore {
             isSelfProfileMatch(existing()) &&
             incoming().uid == request.auth.uid &&
             incoming().diff(existing()).affectedKeys().hasOnly(['uid', 'updatedAt'])
+          ) ||
+          (
+            ('parentAgentId' in existing()) &&
+            existing().parentAgentId == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['balance', 'updatedAt'])
           )
         );
       allow delete: if isValidId(clientId) && isSuperAdmin();
@@ -636,8 +649,16 @@ service cloud.firestore {
     // 6. Cards Inventory (10 or 11 digit voucher codes)
     // =========================================================================
     match /cards/{cardId} {
-      allow get: if isValidId(cardId) && isSignedIn() && (isSuperAdmin() || existing().ownerId == request.auth.uid);
-      allow list: if isSignedIn() && (isSuperAdmin() || resource.data.ownerId == request.auth.uid);
+      allow get: if isValidId(cardId) && isSignedIn() && (
+        isSuperAdmin() ||
+        existing().ownerId == request.auth.uid ||
+        isParentAgentOfOwner(existing().ownerId)
+      );
+      allow list: if isSignedIn() && (
+        isSuperAdmin() ||
+        resource.data.ownerId == request.auth.uid ||
+        (('previousOwnerId' in resource.data) && resource.data.previousOwnerId == request.auth.uid)
+      );
       allow create: if isValidId(cardId) && isValidCardDoc(incoming()) && isSuperAdmin() &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time;
@@ -649,8 +670,22 @@ service cloud.firestore {
             incoming().createdAt == existing().createdAt &&
             existing().ownerId == request.auth.uid &&
             incoming().status in ['available', 'assigned_to_agent', 'sold', 'returned'] &&
+            (!('previousOwnerId' in incoming()) || incoming().previousOwnerId == request.auth.uid || (('previousOwnerId' in existing()) && incoming().previousOwnerId == existing().previousOwnerId)) &&
             incoming().diff(existing()).affectedKeys().hasOnly([
-              'status', 'ownerId', 'soldTo', 'soldToName', 'soldToPhone', 'saleType', 'saleId', 'updatedAt'
+              'status', 'ownerId', 'soldTo', 'soldToName', 'soldToPhone', 'saleType', 'saleId', 'previousOwnerId', 'updatedAt'
+            ])
+          ) ||
+          (
+            incoming().createdAt == existing().createdAt &&
+            existing().status in ['available', 'assigned_to_agent'] &&
+            existing().ownerId != request.auth.uid &&
+            isParentAgentOfOwner(existing().ownerId) &&
+            incoming().ownerId == request.auth.uid &&
+            incoming().status == 'available' &&
+            incoming().recalledFrom == existing().ownerId &&
+            incoming().previousOwnerId == existing().ownerId &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'ownerId', 'status', 'soldTo', 'soldToName', 'soldToPhone', 'saleType', 'saleId', 'recalledFrom', 'previousOwnerId', 'updatedAt'
             ])
           )
         );
@@ -838,18 +873,30 @@ service cloud.firestore {
     match /stats/{statId} {
       allow get: if isValidId(statId) && isSignedIn() && (
         isSuperAdmin() ||
-        statId == 'user_' + request.auth.uid
+        statId == 'user_' + request.auth.uid ||
+        (
+          statId.matches('^user_[a-zA-Z0-9_\\-]+$') &&
+          isParentAgentOfOwner(statId.replace('^user_', ''))
+        )
       );
       allow list: if isSuperAdmin();
       allow create: if isValidId(statId) && isSignedIn() && isValidStatsSummaryDoc(incoming()) &&
         incoming().updatedAt == request.time && (
           isSuperAdmin() ||
-          statId == 'user_' + request.auth.uid
+          statId == 'user_' + request.auth.uid ||
+          (
+            statId.matches('^user_[a-zA-Z0-9_\\-]+$') &&
+            isParentAgentOfOwner(statId.replace('^user_', ''))
+          )
         );
       allow update: if isValidId(statId) && isSignedIn() && isValidStatsSummaryDoc(incoming()) &&
         incoming().updatedAt == request.time && (
           isSuperAdmin() ||
-          statId == 'user_' + request.auth.uid
+          statId == 'user_' + request.auth.uid ||
+          (
+            statId.matches('^user_[a-zA-Z0-9_\\-]+$') &&
+            isParentAgentOfOwner(statId.replace('^user_', ''))
+          )
         );
       allow delete: if isValidId(statId) && isSuperAdmin();
     }

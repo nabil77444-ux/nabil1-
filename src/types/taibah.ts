@@ -13,6 +13,7 @@ export type AppRoute =
   | 'packages'
   | 'topup_requests'
   | 'agents_management'
+  | 'recall_cards'
   | 'reports'
   | 'sales_list'
   | 'notifications'
@@ -162,6 +163,7 @@ export interface AgentRemainingCardRecord {
   packageLabel: string;
   ownerId: string;
   status: CardDoc['status'];
+  cardType?: 'electronic' | 'paper';
 }
 
 export interface AgentCardInventoryReport {

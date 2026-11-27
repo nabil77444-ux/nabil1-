@@ -127,6 +127,17 @@ const TileIconArtwork: React.FC<{ route: AppRoute }> = React.memo(({ route }) =>
           <path d="M32 31l2 2.2 4.2-4.4" fill="none" stroke="#FFFFFF" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       );
+    case 'recall_cards': // بطاقة بسهم استرداد أحمر وذهبي لسحب الكروت غير المباعة
+      return (
+        <svg viewBox="0 0 48 48" className="w-6 h-6 sm:w-[26px] sm:h-[26px] shrink-0 drop-shadow-xs" aria-hidden="true">
+          <rect x="8" y="13" width="30" height="21" rx="4" fill="#FEE2E2" stroke="#1A365D" strokeWidth="2.2" />
+          <rect x="8" y="18" width="30" height="5" fill="#1A365D" />
+          <rect x="13" y="26" width="10" height="3.5" rx="1.2" fill="#D4AF37" />
+          <circle cx="34" cy="31" r="9" fill="#DC2626" stroke="#FDE68A" strokeWidth="2" />
+          <path d="M30.5 29.5A4.6 4.6 0 1 1 31 34" fill="none" stroke="#FFFFFF" strokeWidth="2.2" strokeLinecap="round" />
+          <path d="M29.2 26.5v3.6h3.6" fill="none" stroke="#FFFFFF" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      );
     default: // التقارير — أعمدة زرقاء وسهم صاعد برتقالي
       return (
         <svg viewBox="0 0 48 48" className="w-6 h-6 sm:w-[26px] sm:h-[26px] shrink-0 drop-shadow-xs" aria-hidden="true">
@@ -278,6 +289,12 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
         iconBg: 'bg-cyan-50 dark:bg-cyan-950/50 border-cyan-200 dark:border-cyan-800/70',
         badgeCount: agentsBadgeTotal > 0 ? agentsBadgeTotal : undefined,
         badgeVariant: 'red',
+        visible: canManageWholesale,
+      },
+      {
+        route: 'recall_cards',
+        title: 'سحب الكروت',
+        iconBg: 'bg-rose-50 dark:bg-rose-950/50 border-rose-200 dark:border-rose-800/70',
         visible: canManageWholesale,
       },
       {
@@ -619,12 +636,17 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
         {/* 5. SEQUENTIAL VERTICAL-CENTERED ROYAL GRID (ZERO SCROLL — 100% FIT ON EVERY SCREEN!) */}
         <section
           aria-label="الأيقونات الرئيسية"
-          className={`flex-1 min-h-0 grid grid-cols-2 md:grid-cols-4 auto-rows-fr ${
-            tiles.length <= 6 ? 'gap-3' : 'gap-2 sm:gap-2.5'
+          className={`flex-1 min-h-0 grid auto-rows-fr ${
+            tiles.length >= 9
+              ? 'grid-cols-3 gap-2 sm:gap-2.5'
+              : tiles.length <= 6
+                ? 'grid-cols-2 md:grid-cols-3 gap-3'
+                : 'grid-cols-2 md:grid-cols-4 gap-2 sm:gap-2.5'
           } py-0.5 px-0.5`}
         >
           {tiles.map((tile, idx) => {
-            const isOddLast = tiles.length % 2 === 1 && idx === tiles.length - 1;
+            const isThreeCol = tiles.length >= 9;
+            const isOddLast = !isThreeCol && tiles.length % 2 === 1 && idx === tiles.length - 1;
             const spaciousMode = tiles.length <= 6;
             return (
               <button
@@ -634,7 +656,9 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
                 className={`royal-tile-3d relative w-full h-full min-h-0 rounded-2xl bg-gradient-to-b from-white via-white to-slate-50 dark:from-slate-900 dark:via-slate-900 dark:to-[#0F172A] border-2 border-[#D4AF37] flex flex-col items-center justify-center text-center overflow-hidden group ${
                   spaciousMode
                     ? 'gap-2.5 py-3 px-3'
-                    : 'gap-1 sm:gap-2 py-1.5 sm:py-3 px-2.5'
+                    : isThreeCol
+                      ? 'gap-1.5 py-2 px-1.5 sm:px-2.5'
+                      : 'gap-1 sm:gap-2 py-1.5 sm:py-3 px-2.5'
                 } ${isOddLast ? 'col-span-2 md:col-span-1' : ''}`}
               >
                 {/* Top-Right Corner: Sleek Sequential Number Badge (1, 2, 3...) */}
@@ -658,14 +682,22 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(({
                 {/* Centered Prominent Icon Container */}
                 <div
                   className={`${
-                    spaciousMode ? 'w-12 h-12' : 'w-10 h-10 sm:w-12 sm:h-12'
+                    spaciousMode
+                      ? 'w-12 h-12'
+                      : isThreeCol
+                        ? 'w-10 h-10 sm:w-12 sm:h-12'
+                        : 'w-10 h-10 sm:w-12 sm:h-12'
                   } rounded-2xl border ${tile.iconBg} flex items-center justify-center shadow-xs shrink-0 group-hover:scale-105 transition-transform`}
                 >
                   <TileIconArtwork route={tile.route} />
                 </div>
 
                 {/* Centered Bold Arabic Title Matching Icon Proportion */}
-                <span className="w-full text-center text-[14.5px] sm:text-[15px] font-bold leading-snug text-slate-900 dark:text-white px-1">
+                <span
+                  className={`w-full text-center font-bold leading-snug text-slate-900 dark:text-white px-0.5 ${
+                    isThreeCol ? 'text-[12px] sm:text-[14.5px]' : 'text-[14.5px] sm:text-[15px]'
+                  }`}
+                >
                   {tile.title}
                 </span>
               </button>
